@@ -95,219 +95,59 @@ from workflow_preferences import (
     save_preferences,
 )
 
-CODE_ROOT = Path(__file__).resolve().parent
-FRONTEND_TEMPLATE = "html/dashboard/index.html"
-NAV_PATHS = [
-    "/",
-    "/uploads",
-    "/youtube",
-    "/diarization",
-    "/training-labels",
-    "/fine-tuning",
-]
-PAGE_ALIASES = {
-    "/jobs": "/diarization",
-    "/direct": "/diarization",
-    "/models": "/diarization",
-    "/review": "/uploads",
-    "/labeling": "/training-labels",
-    "/labels": "/training-labels",
-    "/training-labeling": "/training-labels",
-}
-PAGE_PATHS = set(NAV_PATHS)
-AUDIO_INVENTORY_PAGES = {"/uploads", "/training-labels", "/diarization", "/fine-tuning"}
-PROJECT_SUMMARY_PAGES = {"/", "/training-labels", "/fine-tuning"}
-RECENT_OUTPUT_PAGES = {"/", "/diarization", "/youtube"}
-RECENT_SRT_PAGES: set[str] = set()
-YOUTUBE_QUEUE_PAGES = {"/youtube"}
-MODEL_SELECTION_PAGES = {"/training-labels", "/diarization", "/fine-tuning"}
-TRAINING_LABEL_CONTEXT_PAGES = {"/training-labels", "/fine-tuning"}
-DEFAULT_TRAINING_LABEL_PROJECT = "uploaded-site-training"
-DIARIZATION_LABEL_PREVIEW_LIMIT = 2000
-ARTIFACT_SCAN_EXCLUDE_DIRS = {"__pycache__", "audio", "rttm", "text"}
-TRAINING_SOURCE_SCAN_EXCLUDE_DIRS = {"__pycache__", "artifacts", "runs", "experiments", "slurm_logs"}
-TRAINING_RTTM_SUFFIXES = {".rttm"}
-TRAINING_TRANSCRIPT_SUFFIXES = {".txt", ".srt", ".vtt", ".csv", ".tsv"}
-WORKSPACE_MEDIA_SUFFIXES = {
-    ".wav",
-    ".mp3",
-    ".m4a",
-    ".flac",
-    ".ogg",
-    ".opus",
-    ".aac",
-    ".wma",
-    ".mp4",
-    ".mkv",
-    ".webm",
-}
-DEFAULT_UPLOAD_AUDIO_FOLDER = "file_uploads"
-DEFAULT_YOUTUBE_AUDIO_FOLDER = "youtube_links"
-DEFAULT_AUDIO_FOLDERS = (DEFAULT_UPLOAD_AUDIO_FOLDER, DEFAULT_YOUTUBE_AUDIO_FOLDER)
-ROOT_AUDIO_FOLDER_VALUE = "__root__"
-YOUTUBE_INDEX_COLUMNS = (
-    "url",
-    "video_id",
-    "status",
-    "audio_file",
-    "audio_path",
-    "title",
-    "last_attempt_utc",
-    "note",
+from dashboard.constants import (
+    ARTIFACT_PREVIEW_BYTE_LIMIT,
+    ARTIFACT_PREVIEW_LINE_LIMIT,
+    ARTIFACT_SCAN_EXCLUDE_DIRS,
+    AUDIO_INVENTORY_PAGES,
+    CODE_ROOT,
+    DASHBOARD_REFRESH_STATUSES,
+    DEFAULT_AUDIO_FOLDERS,
+    DEFAULT_SERVER_MODE,
+    DEFAULT_SERVER_THREADS,
+    DEFAULT_TRAINING_LABEL_PROJECT,
+    DEFAULT_UPLOAD_AUDIO_FOLDER,
+    DEFAULT_YOUTUBE_AUDIO_FOLDER,
+    DIARIZATION_ACTIVE_STATUSES,
+    DIARIZATION_ARTIFACT_SUFFIXES,
+    DIARIZATION_COMPLETED_STATUSES,
+    DIARIZATION_LABEL_PREVIEW_LIMIT,
+    DOWNLOADABLE_ROOT_NAMES,
+    FRONTEND_TEMPLATE,
+    IDLE_TRACKING_INTERVAL_MS,
+    LIVE_TRACKING_INTERVAL_MS,
+    MODEL_SELECTION_PAGES,
+    NAV_PATHS,
+    PAGE_ALIASES,
+    PAGE_PATHS,
+    PROJECT_SUMMARY_PAGES,
+    RECENT_OUTPUT_PAGES,
+    RECENT_SRT_PAGES,
+    ROOT_AUDIO_FOLDER_VALUE,
+    SECURITY_RESPONSE_HEADERS,
+    TAIL_PREVIEW_SUFFIXES,
+    TEXT_PREVIEW_SUFFIXES,
+    TRAINING_LABEL_CONTEXT_PAGES,
+    TRAINING_RTTM_SUFFIXES,
+    TRAINING_SOURCE_SCAN_EXCLUDE_DIRS,
+    TRAINING_TRANSCRIPT_SUFFIXES,
+    UPLOAD_AUDIO_ACCEPT,
+    UPLOAD_AUDIO_SUFFIXES,
+    WORKSPACE_MEDIA_SUFFIXES,
+    YOUTUBE_INDEX_COLUMNS,
+    YOUTUBE_NO_DATA_MARKERS,
+    YOUTUBE_QUEUE_PAGES,
 )
-DIARIZATION_ARTIFACT_SUFFIXES = (".txt", ".srt", "_review.html", "_review_flags.tsv")
-YOUTUBE_NO_DATA_MARKERS = (
-    "video unavailable",
-    "this video is unavailable",
-    "private video",
-    "video has been removed",
-    "the uploader has not made this video available",
-    "this content isn't available",
-    "content is not available",
-    "members-only",
-    "sign in to confirm your age",
-    "age-restricted",
-    "unsupported url",
+from dashboard.slurm import submit_sbatch_job
+from dashboard.servers import (
+    ThreadedWSGIServer,
+    bind_server,
+    built_in_make_server,
+    server_port,
+    waitress_make_server,
+    write_url_file,
 )
-UPLOAD_AUDIO_SUFFIXES = tuple(
-    sorted(extension for extension in AUDIO_EXTENSIONS if extension not in {".mp4", ".mkv", ".webm"})
-)
-UPLOAD_AUDIO_ACCEPT = ",".join(UPLOAD_AUDIO_SUFFIXES)
-DIARIZATION_COMPLETED_STATUSES = {"ok", "no_speech"}
-DIARIZATION_ACTIVE_STATUSES = {"running", "submitted", "pending", "waiting"}
-DASHBOARD_REFRESH_STATUSES = {"running", "submitted", "pending", "waiting", "configuring"}
-LIVE_TRACKING_INTERVAL_MS = 1000
-IDLE_TRACKING_INTERVAL_MS = 5000
-DEFAULT_SERVER_MODE = "auto"
-DEFAULT_SERVER_THREADS = 8
-SECURITY_RESPONSE_HEADERS = (
-    ("X-Content-Type-Options", "nosniff"),
-    ("X-Frame-Options", "DENY"),
-    ("Referrer-Policy", "no-referrer"),
-)
-DOWNLOADABLE_ROOT_NAMES = (
-    "audio_in",
-    "outputs",
-    "fine_tuning",
-    "job_outputs",
-    "job_logs",
-    "youtube_links_err",
-)
-TEXT_PREVIEW_SUFFIXES = {
-    ".csv",
-    ".err",
-    ".htm",
-    ".html",
-    ".json",
-    ".log",
-    ".md",
-    ".out",
-    ".rttm",
-    ".srt",
-    ".tsv",
-    ".txt",
-    ".uem",
-    ".yaml",
-    ".yml",
-}
-TAIL_PREVIEW_SUFFIXES = {".err", ".log", ".out"}
-ARTIFACT_PREVIEW_BYTE_LIMIT = 16000
-ARTIFACT_PREVIEW_LINE_LIMIT = 80
-
-
-class ThreadedWSGIServer(ThreadingMixIn):
-    """Allow the built-in WSGI server to handle concurrent browser requests."""
-
-    daemon_threads = True
-
-
-def submit_sbatch_job(
-    *,
-    sbatch_script: Path,
-    cwd: Path,
-    run_dir: Path,
-    export_env: dict[str, str],
-    metadata: dict[str, object] | None = None,
-    job_label: str = "site workflow",
-) -> dict[str, object]:
-    """Submit a Slurm job and record the same metadata files used by site runs."""
-
-    if not shutil.which("sbatch"):
-        raise RuntimeError("sbatch is not available on this machine.")
-    if not sbatch_script.is_file():
-        raise RuntimeError(f"Slurm script not found: {sbatch_script}")
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = run_dir / "stdout.log"
-    stderr_path = run_dir / "stderr.log"
-    exit_code_path = run_dir / "exit_code.txt"
-    metadata_path = run_dir / "metadata.json"
-    command = ["sbatch", "--parsable", str(sbatch_script)]
-    run_metadata = {
-        "runner": "slurm",
-        "submission_status": "submitting",
-        "command": command,
-        "cwd": str(cwd),
-        "sbatch_script": str(sbatch_script),
-        "started_at_utc": utc_now_iso(),
-        "stdout_path": str(stdout_path),
-        "stderr_path": str(stderr_path),
-        "exit_code_path": str(exit_code_path),
-        **(metadata or {}),
-    }
-    metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")
-
-    completed = subprocess.run(
-        command,
-        cwd=str(cwd),
-        check=False,
-        capture_output=True,
-        text=True,
-        env={**os.environ, **export_env},
-    )
-    if completed.returncode != 0:
-        stdout_path.write_text(completed.stdout or "", encoding="utf-8")
-        stderr_path.write_text(completed.stderr or "Slurm submission failed.\n", encoding="utf-8")
-        exit_code_path.write_text(str(completed.returncode), encoding="utf-8")
-        run_metadata.update(
-            {
-                "submission_status": "failed",
-                "sbatch_stdout": completed.stdout,
-                "sbatch_stderr": completed.stderr,
-            }
-        )
-        metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")
-        error_text = (completed.stderr or completed.stdout or "Slurm submission failed.").strip()
-        raise RuntimeError(error_text)
-
-    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    raw_job_id = output_lines[-1] if output_lines else ""
-    job_id = raw_job_id.split(";", 1)[0]
-    stdout_path.write_text(
-        f"Submitted Slurm job {job_id} for {job_label}.\n"
-        f"Slurm script: {sbatch_script}\n",
-        encoding="utf-8",
-    )
-    if completed.stderr:
-        stderr_path.write_text(completed.stderr, encoding="utf-8")
-    run_metadata.update(
-        {
-            "submission_status": "submitted",
-            "slurm_job_id": job_id,
-            "sbatch_stdout": completed.stdout,
-            "sbatch_stderr": completed.stderr,
-        }
-    )
-    metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")
-    return {
-        "slurm_job_id": job_id,
-        "run_dir": run_dir,
-        "stdout_path": stdout_path,
-        "stderr_path": stderr_path,
-        "exit_code_path": exit_code_path,
-        "metadata_path": metadata_path,
-    }
-
+from dashboard.cli import build_parser
 
 class WorkflowWebApp:
     """WSGI application that exposes the main project workflows through one dashboard."""
@@ -6598,192 +6438,6 @@ def resolve_server_mode(server_mode: str) -> str:
     raise ValueError(f"Unsupported server mode: {server_mode}")
 
 
-def built_in_make_server(host: str, port: int, application, *, threaded: bool):
-    """Create one of the built-in WSGI server variants."""
-
-    from wsgiref.simple_server import WSGIServer, make_server
-
-    server_class = type(
-        "ThreadedBuiltinWSGIServer" if threaded else "BuiltinWSGIServer",
-        (ThreadedWSGIServer, WSGIServer) if threaded else (WSGIServer,),
-        {},
-    )
-    return make_server(host, port, application, server_class=server_class)
-
-
-def waitress_make_server(host: str, port: int, application, *, threads: int):
-    """Create a Waitress server when the optional dependency is available."""
-
-    from waitress.server import create_server
-
-    return create_server(application, host=host, port=port, threads=threads)
-
-
-def server_port(server, requested_port: int) -> int:
-    """Recover the bound port from the server object when possible."""
-
-    for attribute in ("server_port", "effective_port", "port"):
-        value = getattr(server, attribute, None)
-        if isinstance(value, int) and value > 0:
-            return value
-
-    socket_obj = getattr(server, "socket", None)
-    getsockname = getattr(socket_obj, "getsockname", None)
-    if callable(getsockname):
-        try:
-            return int(getsockname()[1])
-        except (OSError, TypeError, ValueError):
-            pass
-
-    return requested_port
-
-
-def write_url_file(destination: str | None, url: str) -> None:
-    """Persist the resolved local dashboard URL when requested."""
-
-    if not destination:
-        return
-    path = Path(destination).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{url}\n", encoding="utf-8")
-
-
-def bind_server(host: str, port: int, application, *, max_port_tries: int = 25, make_server_fn=None):
-    """Bind the workflow web server, retrying nearby ports when one is already busy."""
-
-    make_server_fn = make_server_fn or (
-        lambda bind_host, bind_port, bind_app: built_in_make_server(
-            bind_host,
-            bind_port,
-            bind_app,
-            threaded=False,
-        )
-    )
-    attempts = 1 if port == 0 else max(max_port_tries, 1)
-    last_exc: OSError | None = None
-    for offset in range(attempts):
-        candidate_port = port if port == 0 else port + offset
-        try:
-            server = make_server_fn(host, candidate_port, application)
-        except OSError as exc:
-            if exc.errno != errno.EADDRINUSE or port == 0:
-                raise
-            last_exc = exc
-            continue
-        return server, server_port(server, candidate_port)
-
-    upper_bound = port + attempts - 1
-    raise OSError(
-        errno.EADDRINUSE,
-        f"No free port found between {port} and {upper_bound}.",
-    ) from last_exc
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Expose a minimal CLI for serving the dashboard locally."""
-
-    parser = argparse.ArgumentParser(description="Serve the ML Speech Diarization dashboard.")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument(
-        "--server",
-        choices=["auto", "threaded", "waitress", "wsgiref"],
-        default=DEFAULT_SERVER_MODE,
-        help="Runtime server to use. 'auto' prefers Waitress when installed.",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=DEFAULT_SERVER_THREADS,
-        help="Worker thread count for Waitress. Retained for auto mode selection.",
-    )
-    parser.add_argument(
-        "--url-file",
-        default=None,
-        help="Optional path that receives the resolved local URL after startup.",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Start the dashboard with the selected WSGI runtime."""
-
-    args = build_parser().parse_args(argv)
-    host = args.host
-    requested_port = args.port
-    if args.threads < 1:
-        print("Error: --threads must be at least 1.", file=sys.stderr)
-        return 1
-    try:
-        server_mode = resolve_server_mode(args.server)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    display_host = host
-    if host in {"0.0.0.0", "::"}:
-        display_host = "127.0.0.1"
-    hostname = socket.gethostname()
-    make_server_fn = None
-    runtime_label = "built-in WSGI"
-    if server_mode == "threaded":
-        make_server_fn = lambda bind_host, bind_port, bind_app: built_in_make_server(
-            bind_host,
-            bind_port,
-            bind_app,
-            threaded=True,
-        )
-        runtime_label = "threaded built-in WSGI"
-    elif server_mode == "waitress":
-        make_server_fn = lambda bind_host, bind_port, bind_app: waitress_make_server(
-            bind_host,
-            bind_port,
-            bind_app,
-            threads=args.threads,
-        )
-        runtime_label = f"Waitress ({args.threads} worker threads)"
-    elif server_mode == "wsgiref":
-        runtime_label = "standard-library WSGI"
-
-    try:
-        server, actual_port = bind_server(host, requested_port, app, make_server_fn=make_server_fn)
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
-        raise
-    local_url = f"http://{display_host}:{actual_port}"
-    try:
-        write_url_file(args.url_file, local_url)
-        if actual_port != requested_port:
-            print(
-                f"Port {requested_port} is already in use. "
-                f"Serving workflow hub on port {actual_port} instead."
-            )
-        print(f"Server runtime: {runtime_label}")
-        if host in {"0.0.0.0", "::"}:
-            print(f"Serving workflow hub on all interfaces, port {actual_port}")
-            print(f"Open locally: {local_url}")
-            print(
-                "Open remotely if your HPC/network setup allows it: "
-                f"http://{hostname}:{actual_port}"
-            )
-        else:
-            print(f"Serving workflow hub on {local_url}")
-
-        if server_mode == "waitress":
-            server.run()
-        else:
-            with server:
-                server.serve_forever()
-    except KeyboardInterrupt:
-        print("Stopping workflow hub.")
-    finally:
-        if server_mode == "waitress":
-            close = getattr(server, "close", None)
-            if callable(close):
-                close()
-    return 0
-
-
 if __name__ == "__main__":
+    from dashboard.cli import main
     raise SystemExit(main())
