@@ -1,0 +1,27 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.log
+
+.local_dashboard/
+.vscode/
+node_modules/
+frontend/node_modules/
+frontend/app/node_modules/
+frontend/dist/
+frontend/app/dist/
+
+audio_in/
+job_logs/
+job_outputs/
+sbatch_runtime/
+fine_tuning/projects/
+youtube_links_err/*.tsv
+
+outputs/diarization_runs/
+outputs/youtube_conversion_runs/
+# keep outputs/youtube_conversion_history/url_audio_index.tsv tracked
+
+.venv/
+.venv_*/
+*.egg-info/

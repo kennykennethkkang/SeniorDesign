@@ -1,0 +1,7 @@
+Audio output directory: /WAVE/users2/unix/kkang/SeniorDesign/audio_in
+Job log directory: /WAVE/users2/unix/kkang/SeniorDesign/job_logs/youtube_to_audio_job_182525
+Slurm stdout/stderr: /WAVE/users2/unix/kkang/SeniorDesign/job_logs/slurm/youtube_to_audio_182525.out | /WAVE/users2/unix/kkang/SeniorDesign/job_logs/slurm/youtube_to_audio_182525.err
+Installing/updating downloader dependencies...
+YouTube-to-audio conversion complete.
+Audio files are in /WAVE/users2/unix/kkang/SeniorDesign/audio_in
+Per-run logs are in /WAVE/users2/unix/kkang/SeniorDesign/job_logs/youtube_to_audio_job_182525

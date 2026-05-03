@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{DASHBOARD_TITLE}}</title>
+  <script>
+    (function () {
+      try {
+        var storedTheme = window.localStorage.getItem("ml-speech-diarization-theme");
+        var theme = storedTheme === "dark" || storedTheme === "light"
+          ? storedTheme
+          : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      } catch (_error) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    }());
+  </script>
+  <link rel="stylesheet" href="{{DASHBOARD_STYLES}}">
+</head>
+<body>
+  <div id="dashboard-root"></div>
+  <noscript>
+    <main class="no-script">
+      <h1>ML Speech Diarization</h1>
+      <p>This dashboard uses React for the tabbed interface. Enable JavaScript to use the site controls.</p>
+    </main>
+  </noscript>
+  <script id="dashboard-state" type="application/json">{{DASHBOARD_STATE}}</script>
+  <script defer src="{{REACT_RUNTIME}}"></script>
+  <script defer src="{{REACT_DOM_RUNTIME}}"></script>
+  <script defer src="{{DASHBOARD_APP}}"></script>
+</body>
+</html>

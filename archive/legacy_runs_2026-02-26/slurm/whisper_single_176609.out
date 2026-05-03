@@ -1,0 +1,7 @@
+Dependencies unchanged; skipping pip install.
+Done. Outputs in /WAVE/users2/unix/kkang/SeniorDesign/whisper_runtime/outputs/single_job_176609
+Per-run logs in /WAVE/users2/unix/kkang/SeniorDesign/whisper_runtime/logs/whisper_single/jobs/single_job_176609
+total 47M
+-rw-r--r-- 1 kkang kkang 6.6K Feb 12 16:04 audiotest.srt
+-rw-r--r-- 1 kkang kkang 3.1K Feb 12 16:04 audiotest.txt
+-rw-r--r-- 1 kkang kkang  47M Jan 29 16:00 audiotest_whisper_input.wav

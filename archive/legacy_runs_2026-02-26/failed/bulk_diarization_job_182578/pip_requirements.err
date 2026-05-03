@@ -1,0 +1,4 @@
+  Running command git clone --filter=blob:none --quiet https://github.com/MahmoudAshraf97/demucs.git /WAVE/users2/unix/kkang/SeniorDesign/sbatch_runtime/tmp/pip-req-build-7xaccv8f
+  Running command git clone --filter=blob:none --quiet https://github.com/oliverguhr/deepmultilingualpunctuation.git /WAVE/users2/unix/kkang/SeniorDesign/sbatch_runtime/tmp/pip-req-build-yzgujbeo
+  Running command git clone --filter=blob:none --quiet https://github.com/MahmoudAshraf97/ctc-forced-aligner.git /WAVE/users2/unix/kkang/SeniorDesign/sbatch_runtime/tmp/pip-req-build-zxy8yzto
+  Running command git clone --filter=blob:none --quiet https://github.com/AI4Bharat/indic-numtowords.git /WAVE/users2/unix/kkang/SeniorDesign/sbatch_runtime/tmp/pip-install-o6slk3q6/indic-numtowords_a28331d098194eb29528f35e59e32535

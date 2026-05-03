@@ -1,0 +1,120 @@
+import csv
+import importlib.util
+import pathlib
+import sys
+import tempfile
+import unittest
+
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def load_module(module_name: str, relative_path: str):
+    module_path = PROJECT_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load module from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+review_outputs = load_module("review_outputs_test", "review_bundle.py")
+
+
+class ReviewOutputsTests(unittest.TestCase):
+    def test_write_review_bundle_generates_html_and_flag_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = pathlib.Path(tmpdir)
+            srt_path = temp_path / "clip.srt"
+            media_path = temp_path / "clip.wav"
+            html_path = temp_path / "clip_review.html"
+            report_path = temp_path / "clip_review_flags.tsv"
+
+            srt_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:00,200\n"
+                "Speaker 0: Hi.\n\n"
+                "2\n"
+                "00:00:00,150 --> 00:00:00,300\n"
+                "Speaker 0: Hi.\n",
+                encoding="utf-8",
+            )
+            media_path.write_text("media", encoding="utf-8")
+
+            review_outputs.write_review_bundle(
+                srt_path=srt_path,
+                media_path=media_path,
+                output_html=html_path,
+                report_tsv=report_path,
+                quiet=True,
+            )
+
+            self.assertTrue(html_path.exists())
+            self.assertTrue(report_path.exists())
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn("clip.wav", html)
+            self.assertIn("playRange", html)
+            self.assertIn("Training Labels", html)
+            self.assertIn("Detected Segments", html)
+            self.assertIn(">Back</button>", html)
+            self.assertIn("nowPlaying", html)
+            self.assertIn("class=\"play-label\"", html)
+            self.assertIn("id=\"startAtSegment\"", html)
+            self.assertIn("id=\"stopAtSegmentEnd\"", html)
+            self.assertIn("id=\"labelSearch\"", html)
+            self.assertIn("id=\"cueSpeakerFilter\"", html)
+            self.assertIn("class=\"use-cue\"", html)
+            self.assertIn("Add Label", html)
+            self.assertIn("Listen starts at the selected segment", html)
+            self.assertIn("clearPlaybackTimers", html)
+            self.assertIn("id=\"waveformCanvas\"", html)
+            self.assertIn("id=\"playbackRate\"", html)
+            self.assertIn("loadWaveform", html)
+            self.assertNotIn("Adjust selected label", html)
+            self.assertNotIn("Set Start Here", html)
+            self.assertIn("id=\"labelHealth\"", html)
+            self.assertIn("Speaker_0", html)
+            self.assertIn("review-grid", html)
+            self.assertIn("label_action", html)
+            self.assertIn("class=\"play-cue\"", html)
+
+            with report_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+            self.assertEqual(len(rows), 2)
+            self.assertIn("very_short_segment", rows[0]["flags"])
+            self.assertIn("overlap_previous", rows[1]["flags"])
+            self.assertIn("duplicate_adjacent_text", rows[1]["flags"])
+
+    def test_write_review_bundle_can_auto_match_media_by_stem(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = pathlib.Path(tmpdir)
+            audio_dir = temp_path / "audio_in"
+            audio_dir.mkdir()
+            srt_path = temp_path / "sample.srt"
+            media_path = audio_dir / "sample.wav"
+
+            srt_path.write_text(
+                "1\n"
+                "00:00:01,000 --> 00:00:02,000\n"
+                "Speaker 1: Example line.\n",
+                encoding="utf-8",
+            )
+            media_path.write_text("media", encoding="utf-8")
+
+            html_path, report_path = review_outputs.write_review_bundle(
+                srt_path=srt_path,
+                audio_dir=audio_dir,
+                quiet=True,
+            )
+
+            self.assertTrue(html_path.exists())
+            self.assertTrue(report_path.exists())
+            self.assertIn("sample.wav", html_path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()

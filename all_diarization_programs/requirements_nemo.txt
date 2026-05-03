@@ -1,0 +1,2 @@
+numpy<2
+nemo_toolkit[asr]==2.6.2

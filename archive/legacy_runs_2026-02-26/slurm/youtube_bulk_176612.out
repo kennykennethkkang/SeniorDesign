@@ -1,0 +1,12 @@
+Dependencies unchanged; skipping pip install.
+Diarizing Kids Give Adults Advice on Dating_B08UvVwjpG4.wav ...
+Diarizing Parents & Kids Play Truth or Drink ｜ Truth or Drink ｜ Cut_iIaYJqKBK44.wav ...
+All done. Outputs in /WAVE/users2/unix/kkang/SeniorDesign/whisper_runtime/outputs/bulk_job_176612
+Per-run logs in /WAVE/users2/unix/kkang/SeniorDesign/whisper_runtime/logs/youtube_bulk/jobs/bulk_job_176612
+total 22M
+-rw-r--r-- 1 kkang kkang 5.7K Feb 12 16:23 Kids Give Adults Advice on Dating_B08UvVwjpG4.srt
+-rw-r--r-- 1 kkang kkang 3.0K Feb 12 16:23 Kids Give Adults Advice on Dating_B08UvVwjpG4.txt
+-rw-r--r-- 1 kkang kkang 5.4M Feb 12 15:19 Kids Give Adults Advice on Dating_B08UvVwjpG4_whisper_input.wav
+-rw-r--r-- 1 kkang kkang  16K Feb 12 16:24 Parents & Kids Play Truth or Drink ｜ Truth or Drink ｜ Cut_iIaYJqKBK44.srt
+-rw-r--r-- 1 kkang kkang 7.9K Feb 12 16:24 Parents & Kids Play Truth or Drink ｜ Truth or Drink ｜ Cut_iIaYJqKBK44.txt
+-rw-r--r-- 1 kkang kkang  17M Feb 12 15:40 Parents & Kids Play Truth or Drink ｜ Truth or Drink ｜ Cut_iIaYJqKBK44_whisper_input.wav
