@@ -248,6 +248,8 @@ class CoreMixin:
                 status, headers, body = self.handle_cluster_queue(environ)
             elif routed_method == "GET" and path == "/api/runtime-estimate":
                 status, headers, body = self.handle_runtime_estimate(environ)
+            elif routed_method == "GET" and path == "/api/file-search":
+                status, headers, body = self.handle_file_search(environ)
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):
@@ -890,6 +892,52 @@ class CoreMixin:
             for backend_name, payload in rates.items()
         }
         return self.json_response("200 OK", estimate)
+
+    def file_index_snapshot(self):
+        """Return the cross-run file index. Cached for 30 s — outputs only grow
+        when a run finishes, so we don't need to re-walk on every poll."""
+
+        from dashboard.file_index import build_file_index
+
+        return self.cached_value(
+            "file_index",
+            ttl_seconds=30.0,
+            builder=lambda: build_file_index(
+                audio_dir=self.audio_dir,
+                outputs_root=self.outputs_root,
+                fine_tuning_root=self.root / "fine_tuning",
+            ),
+        )
+
+    def handle_file_search(self, environ):
+        """Search the cross-run file index by stem.
+
+        Query parameters:
+          q     - search query (case-insensitive substring; prefix matches rank first)
+          limit - max grouped results (default 50)
+        """
+
+        from dashboard.file_index import search_index
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        needle = (query.get("q") or [""])[0].strip()
+        try:
+            limit = int((query.get("limit") or ["50"])[0])
+        except ValueError:
+            limit = 50
+        index = self.file_index_snapshot()
+        if not needle:
+            return self.json_response("200 OK", {"query": "", "results": [], "total_stems": len(index)})
+        results = search_index(index, needle, limit=max(1, min(limit, 200)))
+        # Wrap matches with download links for the frontend.
+        script_name = self.script_name(environ)
+        for group in results:
+            for record in group.get("matches", []):
+                record["href"] = self.with_prefix("/files/" + record["rel_path"], script_name)
+        return self.json_response(
+            "200 OK",
+            {"query": needle, "results": results, "total_stems": len(index)},
+        )
 
     def requested_diarization_model_key(self, environ) -> str:
         """Read an optional model-key override from query parameters."""

@@ -1455,9 +1455,12 @@
       renderRow: (item, index) => {
         const dialogId = dialogIdFor("run-item", runName, item.audioFile, index);
         const created = createdArtifactLabels(item.links);
+        const rowClassName = item.status === "failed"
+          ? "diarization-item-row diarization-item-row--failed"
+          : "diarization-item-row";
         return h(
           "tr",
-          { key: `${item.audioFile}-${index}` },
+          { key: `${item.audioFile}-${index}`, className: rowClassName },
           h("td", null, item.audioFile || ""),
           h("td", null, h(StatusPill, { status: item.status || "unknown" }), item.errorSummary ? h("p", { className: "row-note" }, item.errorSummary) : null),
           h("td", null, item.runtimeSeconds || ""),
@@ -1513,7 +1516,8 @@
           )
         )
       ),
-      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Recent Activity"), h("p", null, "Newest artifacts from the workspace."))), h(RecentOutputsTable, { limit: 6 }))
+      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Recent Activity"), h("p", null, "Newest artifacts from the workspace."))), h(RecentOutputsTable, { limit: 6 })),
+      h(FileSearchPanel)
     );
   }
 
@@ -1615,6 +1619,91 @@
         : localPid
           ? h("p", { className: "empty" }, "This run was launched as a local background process, so it does not have a Slurm queue position. Local PID: ", localPid)
           : h("p", { className: "empty" }, "No Slurm job id is attached to this run yet.")
+    );
+  }
+
+  function FileSearchPanel({ title = "Find a file across runs", placeholder = "e.g. 017_call" }) {
+    // Cross-run file index search. Hits /api/file-search?q=... and groups
+    // matches by stem so the user can see every artifact (audio, srt, log,
+    // review html) tied to a given file name.
+    const url = (state.routes && state.routes.fileSearch) || "/api/file-search";
+    const [query, setQuery] = React.useState("");
+    const [results, setResults] = React.useState([]);
+    const [loading, setLoading] = React.useState(false);
+
+    React.useEffect(() => {
+      if (!query) {
+        setResults([]);
+        return;
+      }
+      let cancelled = false;
+      const timer = window.setTimeout(() => {
+        if (typeof window.fetch !== "function") return;
+        setLoading(true);
+        window
+          .fetch(`${url}?q=${encodeURIComponent(query)}`, { cache: "no-store", headers: { Accept: "application/json" } })
+          .then((response) => response.json())
+          .then((payload) => {
+            if (cancelled) return;
+            setResults(payload.results || []);
+            setLoading(false);
+          })
+          .catch(() => {
+            if (!cancelled) setLoading(false);
+          });
+      }, 250);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
+    }, [url, query]);
+
+    return h(
+      "article",
+      { className: "panel file-search-panel" },
+      h(
+        "div",
+        { className: "panel-head" },
+        h("div", null, h("h2", null, title), h("p", null, "Type any part of an audio file name to see every run, output, and source file that mentions it."))
+      ),
+      h("input", {
+        type: "search",
+        className: "file-search-input",
+        value: query,
+        placeholder,
+        onChange: (e) => setQuery(e.target.value),
+        "aria-label": "File search",
+      }),
+      query && loading ? h("p", { className: "footer-note" }, "Searching...") : null,
+      query && !loading && results.length === 0
+        ? h("p", { className: "empty" }, `No matches for "${query}".`)
+        : null,
+      results.length > 0
+        ? h(
+            "ul",
+            { className: "file-search-results" },
+            results.map((group) =>
+              h(
+                "li",
+                { key: group.stem, className: "file-search-group" },
+                h("span", { className: "file-search-stem" }, group.stem),
+                h("span", { className: "file-search-count" }, `${group.match_count} match(es)`),
+                h(
+                  "ul",
+                  { className: "file-search-matches" },
+                  (group.matches || []).slice(0, 12).map((m, i) =>
+                    h(
+                      "li",
+                      { key: `${m.rel_path}-${i}`, className: `file-search-match file-search-match--${m.kind}` },
+                      m.href ? h("a", { href: m.href }, m.rel_path) : m.rel_path,
+                      h("span", { className: "file-search-kind" }, ` (${m.kind}${m.run_name ? ` · ${m.run_name}` : ""})`)
+                    )
+                  )
+                )
+              )
+            )
+          )
+        : null
     );
   }
 
@@ -2017,9 +2106,23 @@
     }
     const total = Math.max(Number(run.selectedCount || 0), 1);
     const metadata = run.metadata || {};
+    const live = run.liveProgress || {};
     return h(
       React.Fragment,
       null,
+      live.current_file
+        ? h(
+            "div",
+            { className: "live-progress-banner" },
+            h("span", { className: "live-progress-dot", "aria-hidden": true }),
+            h(
+              "span",
+              { className: "live-progress-text" },
+              `Currently processing ${live.current_index} of ${live.current_total}: `,
+              h("code", null, live.current_file)
+            )
+          )
+        : null,
       h(
         "div",
         { className: "summary-grid" },

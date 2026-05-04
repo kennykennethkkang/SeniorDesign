@@ -1463,6 +1463,22 @@ class DiarizationMixin:
         import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
         slurm_queue = _wd.slurm_queue_snapshot(slurm_job_id) if slurm_job_id and status in {"submitted", "running"} else {}
 
+        # Live "currently processing" inference for active runs only:
+        # the first selected audio that has no completed status is treated as
+        # the in-flight file. Read-only; no edits to the diarization wrapper.
+        live_progress: dict[str, object] = {}
+        if status in {"running", "submitted"} and selected_audio:
+            for index, audio_name in enumerate(selected_audio):
+                completed_names = {(row.get("audio_file") or "").strip() for row in summary_rows}
+                if audio_name not in completed_names:
+                    live_progress = {
+                        "current_index": index + 1,
+                        "current_total": len(selected_audio),
+                        "current_file": audio_name,
+                        "fraction": (index) / max(len(selected_audio), 1),
+                    }
+                    break
+
         return {
             "run_dir": run_dir,
             "name": run_dir.name,
@@ -1476,6 +1492,7 @@ class DiarizationMixin:
             "failed_count": failed,
             "no_speech_count": no_speech,
             "remaining_count": max(len(selected_audio) - completed, 0),
+            "live_progress": live_progress,
             "summary_rows": summary_rows[:10],
             "item_records": item_records,
             "summary_path": summary_path if summary_path.is_file() else None,
