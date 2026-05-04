@@ -844,6 +844,7 @@ class RenderingMixin:
                 "tracking": self.frontend_route("/api/tracking", script_name),
                 "pageState": self.frontend_route("/api/page-state", script_name),
                 "clusterQueue": self.frontend_route("/api/cluster-queue", script_name),
+                "runtimeEstimate": self.frontend_route("/api/runtime-estimate", script_name),
                 "fineTuneUpload": self.frontend_route("/fine-tuning/upload-sample", script_name),
                 "fineTunePrepare": self.frontend_route("/fine-tuning/prepare", script_name),
                 "fineTuneLaunch": self.frontend_route("/fine-tuning/launch", script_name),

@@ -2713,6 +2713,51 @@ button.btn-sm {
 }
 
 /* ============================================================
+   Runtime ETA badge - added in Phase 4.
+   Inline beside the diarization-page selection counter; shows the
+   pre-launch wallclock estimate computed from runtime_summary.tsv
+   history. When too little history is available the badge falls
+   back to a quiet "ETA unknown" tag.
+   ============================================================ */
+.runtime-estimate-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(64, 144, 220, 0.15);
+  border: 1px solid rgba(64, 144, 220, 0.45);
+  font-size: 0.78rem;
+  font-weight: 600;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.runtime-estimate-badge--unknown {
+  background: rgba(127, 127, 127, 0.10);
+  border-color: rgba(127, 127, 127, 0.30);
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.runtime-estimate-badge-detail {
+  font-weight: 400;
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+
+:root[data-theme="dark"] .runtime-estimate-badge {
+  background: rgba(96, 168, 240, 0.20);
+  border-color: rgba(96, 168, 240, 0.45);
+}
+
+:root[data-theme="dark"] .runtime-estimate-badge--unknown {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* ============================================================
    Run-status tab strip - added in Phase 3.
    Surfaces above the SlurmQueueTracker on the Diarization,
    YouTube, and Fine-Tuning pages when 2+ runs are active so the

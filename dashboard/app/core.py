@@ -246,6 +246,8 @@ class CoreMixin:
                 status, headers, body = self.handle_artifact_preview(environ)
             elif routed_method == "GET" and path == "/api/cluster-queue":
                 status, headers, body = self.handle_cluster_queue(environ)
+            elif routed_method == "GET" and path == "/api/runtime-estimate":
+                status, headers, body = self.handle_runtime_estimate(environ)
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):
@@ -820,6 +822,74 @@ class CoreMixin:
                 filtered.append(job)
             snapshot = {**snapshot, "jobs": filtered, "filtered": True}
         return self.json_response("200 OK", snapshot)
+
+    def runtime_history_rates(self) -> dict:
+        """Cached cluster-wide-cheap rolling rate per diarization backend.
+
+        TTL is generous because runtime history only changes when a run
+        finishes; we don't need to re-walk the runs folder on every poll.
+        """
+
+        from dashboard.runtime_history import gather_historical_rates
+
+        return self.cached_value(
+            "runtime_history_rates",
+            ttl_seconds=30.0,
+            builder=lambda: gather_historical_rates(
+                self.diarization_runs_root,
+                audio_dir=self.audio_dir,
+                local_dashboard_dir=self.local_dashboard_dir,
+            ),
+        )
+
+    def handle_runtime_estimate(self, environ):
+        """Estimate wallclock for a candidate diarization run.
+
+        Query parameters:
+          backend         - "nemo" / "pyannote" / etc. (required)
+          audio_files     - one or more relative audio paths under audio_in/
+
+        Multiple ``audio_files`` values are supported (parse_qs returns a list).
+        """
+
+        from dashboard.runtime_history import estimate_runtime_for_files
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        backend = (query.get("backend") or [""])[0].strip() or "nemo"
+        audio_relatives = [v for v in query.get("audio_files", []) if v.strip()]
+        # Resolve to absolute paths under audio_in/
+        audio_paths = []
+        for rel in audio_relatives:
+            try:
+                resolved = (self.audio_dir / rel).resolve()
+                # Guard against escapes outside audio_dir.
+                resolved.relative_to(self.audio_dir.resolve())
+                audio_paths.append(resolved)
+            except (ValueError, OSError):
+                continue
+
+        rates = self.runtime_history_rates()
+        estimate = estimate_runtime_for_files(
+            audio_paths,
+            backend=backend,
+            rates=rates,
+            local_dashboard_dir=self.local_dashboard_dir,
+        )
+        # Include the per-backend rate snapshot so the UI can show "based on
+        # 5 runs / 24 files" without an extra round-trip.
+        estimate["backend"] = backend
+        estimate["history"] = {
+            backend_name: {
+                "available": bool(payload.get("available")),
+                "ratio": payload.get("ratio"),
+                "sample_count": payload.get("sample_count"),
+                "runs_used": payload.get("runs_used"),
+                "last_run": payload.get("last_run"),
+                "message": payload.get("message"),
+            }
+            for backend_name, payload in rates.items()
+        }
+        return self.json_response("200 OK", estimate)
 
     def requested_diarization_model_key(self, environ) -> str:
         """Read an optional model-key override from query parameters."""

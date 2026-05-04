@@ -1618,6 +1618,86 @@
     );
   }
 
+  function RuntimeEstimateBadge({ group, backend }) {
+    // Listens to ``change`` events on checkboxes in ``group`` and (debounced)
+    // fetches /api/runtime-estimate so the user can see "~12 min" before
+    // submitting. When the estimate engine has too little history, renders
+    // a quiet "ETA unknown" tag instead of bluffing a number.
+    const url = (state.routes && state.routes.runtimeEstimate) || "/api/runtime-estimate";
+    const [estimate, setEstimate] = React.useState(null);
+    const [loading, setLoading] = React.useState(false);
+
+    React.useEffect(() => {
+      let cancelled = false;
+      let timer = null;
+      const update = () => {
+        if (cancelled) return;
+        const boxes = document.querySelectorAll(
+          `input[type="checkbox"][data-check-group="${group}"]:checked`
+        );
+        const files = Array.from(boxes)
+          .map((b) => (b instanceof HTMLInputElement ? b.value : ""))
+          .filter(Boolean);
+        if (files.length === 0) {
+          setEstimate(null);
+          setLoading(false);
+          return;
+        }
+        if (typeof window.fetch !== "function") return;
+        const params = new URLSearchParams();
+        params.set("backend", backend || "nemo");
+        files.forEach((f) => params.append("audio_files", f));
+        setLoading(true);
+        window
+          .fetch(`${url}?${params.toString()}`, { cache: "no-store", headers: { Accept: "application/json" } })
+          .then((response) => response.json())
+          .then((payload) => {
+            if (cancelled) return;
+            setEstimate(payload);
+            setLoading(false);
+          })
+          .catch(() => {
+            if (!cancelled) setLoading(false);
+          });
+      };
+
+      const onChange = (event) => {
+        const t = event.target;
+        if (!(t instanceof HTMLInputElement)) return;
+        if (t.getAttribute && t.getAttribute("data-check-group") !== group) return;
+        if (timer) window.clearTimeout(timer);
+        timer = window.setTimeout(update, 350);
+      };
+
+      // Run once on mount in case checkboxes were already checked.
+      update();
+      document.addEventListener("change", onChange);
+      return () => {
+        cancelled = true;
+        if (timer) window.clearTimeout(timer);
+        document.removeEventListener("change", onChange);
+      };
+    }, [url, group, backend]);
+
+    if (!estimate) return null;
+    if (!estimate.available) {
+      return h(
+        "span",
+        { className: "runtime-estimate-badge runtime-estimate-badge--unknown", title: estimate.message || "" },
+        loading ? "Estimating..." : "ETA unknown"
+      );
+    }
+    const detail = estimate.based_on_runs && estimate.based_on_files
+      ? ` · based on ${estimate.based_on_runs} runs / ${estimate.based_on_files} files`
+      : "";
+    return h(
+      "span",
+      { className: "runtime-estimate-badge", title: `Ratio ${estimate.ratio || ""}, ${estimate.total_audio_seconds || 0} s of audio` },
+      `ETA ${estimate.estimate_label || ""}`,
+      h("span", { className: "runtime-estimate-badge-detail" }, detail)
+    );
+  }
+
   function LatestRunQueueTracker({ latestRun, activeRuns, emptyText, storageKey }) {
     // The "unified" run-status panel: collapses to the same single-run tracker
     // every page used to render. When `activeRuns` carries 2+ runs, we render
@@ -2076,7 +2156,7 @@
           h("div", { className: "tracker-heading" }, h("h3", null, "Audio File Tracker"), h("p", null, "Select from files that are new or need another attempt. Completed files stay locked unless re-running is allowed.")),
           h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "ready", "data-ready-select": "diarization_model_keys" }, "Select ready + retry"), h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "all" }, "Select all"), h("button", { className: "ghost", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "none" }, "Clear"), h("label", { className: "checkbox-row" }, h("input", { type: "checkbox", name: "diarization_include_completed" }), " Allow re-running already diarized files")),
           h(DataTable, { className: "compact-table", headers: ["Select", "#", "Selected Model Status", "Audio File", "Folder", "Model Coverage", "Last Result"], rows: files, emptyText: h("div", { className: "empty-state" }, h("strong", null, "No audio files to diarize yet."), "Upload audio in Media Library or convert a YouTube URL first; this tracker fills in once files land in audio_in/."), renderRow: (row, index) => h("tr", { key: row.name }, h("td", null, h("input", { type: "checkbox", name: "selected_audio", value: row.name, "data-check-group": "diarization-audio", "data-ready": row.selection_ready || "yes", "data-ready-by-model": row.selectionByModelJson || JSON.stringify(row.selectionByModel || {}) })), h("td", null, row.index || index + 1), h("td", null, h("span", { className: `queue-state ${row.state_class || "ready"}` }, row.queue_state || "ready"), h("p", { className: "row-note" }, row.targetModelLabel || row.targetBackendLabel || row.targetBackend || "selected model")), h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), h("p", { className: "row-note" }, row.name)), h("td", null, row.folder || "Unsorted Root"), h("td", null, h(ModelCoverage, { statuses: row.modelStatuses || [] })), h("td", null, h("span", { className: "detail-text" }, row.detail || "No previous run."), row.lastRun ? h("p", { className: "row-note" }, row.lastRun) : null)) }),
-          h("p", { className: "field-status" }, h("span", { "data-selection-count": "diarization-audio" }, "0"), " file(s) selected for the next diarization run."),
+          h("p", { className: "field-status" }, h("span", { "data-selection-count": "diarization-audio" }, "0"), " file(s) selected for the next diarization run. ", h(RuntimeEstimateBadge, { group: "diarization-audio", backend: (selectedModelKey || "nemo").split("/")[0] })),
           h("div", { className: "button-row" }, h("button", { type: "submit", name: "diarization_mode", value: "selected", "data-loading-message": "Submitting selected files to Slurm...", "data-selection-submit": "diarization-audio" }, "Run selected"), h("button", { className: "secondary", type: "submit", name: "diarization_mode", value: "all", "data-loading-message": "Submitting the full library to Slurm..." }, "Run all"))
         )
       ),
