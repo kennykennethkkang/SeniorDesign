@@ -2713,6 +2713,66 @@ button.btn-sm {
 }
 
 /* ============================================================
+   Run-status tab strip - added in Phase 3.
+   Surfaces above the SlurmQueueTracker on the Diarization,
+   YouTube, and Fine-Tuning pages when 2+ runs are active so the
+   user can toggle between them. Single-active is unchanged: the
+   strip simply does not render.
+   ============================================================ */
+.run-tab-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+  padding-bottom: 0.4rem;
+}
+
+.run-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.65rem;
+  font: inherit;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.run-tab:hover {
+  background: rgba(64, 144, 220, 0.10);
+  border-color: rgba(64, 144, 220, 0.50);
+}
+
+.run-tab--active {
+  background: rgba(64, 144, 220, 0.18);
+  border-color: #4090dc;
+  font-weight: 600;
+}
+
+.run-tab-name {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.78rem;
+}
+
+:root[data-theme="dark"] .run-tab {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+:root[data-theme="dark"] .run-tab:hover {
+  background: rgba(96, 168, 240, 0.20);
+  border-color: rgba(96, 168, 240, 0.50);
+}
+
+:root[data-theme="dark"] .run-tab--active {
+  background: rgba(96, 168, 240, 0.30);
+  border-color: #60a8f0;
+}
+
+/* ============================================================
    Cluster Queue panel - added in Phase 2.
    Live cluster-wide squeue snapshot rendered on every page that
    submits jobs. Uses its own surface and a "you" highlight so it

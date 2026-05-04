@@ -207,11 +207,13 @@ class RenderingMixin:
                 row for row in issue_rows if row.get("issue_category") == "no_data"
             ]
             context["youtube_latest_run"] = self.youtube_run_details(context["latest_site_youtube"])
+            context["youtube_active_runs"] = self.active_youtube_runs_detailed()
         if effective_path in MODEL_SELECTION_PAGES:
             context["preferences"] = self.model_preferences()
         if effective_path in {"/uploads", "/training-labels", "/fine-tuning"}:
             context["diarization_history"] = self.diarization_history_rows(limit=100)
             context["diarization_latest_run"] = self.diarization_run_details(context["latest_site_diarization"])
+            context["diarization_active_runs"] = self.active_diarization_runs_detailed()
         if effective_path in {"/training-labels", "/fine-tuning"}:
             context["diarization_model_options"] = self.diarization_model_options()
         if effective_path in TRAINING_LABEL_CONTEXT_PAGES:
@@ -236,6 +238,7 @@ class RenderingMixin:
             context["diarization_audio_rows"] = diarization_audio_rows
             context["diarization_library_summary"] = self.diarization_library_summary(diarization_audio_rows)
             context["diarization_latest_run"] = self.diarization_run_details(context["latest_site_diarization"])
+            context["diarization_active_runs"] = self.active_diarization_runs_detailed()
         if effective_path == "/fine-tuning":
             projects = context.get("projects", [])
             context["training_source_files"] = self.training_source_files()
@@ -905,6 +908,13 @@ class RenderingMixin:
                     "retryRows": context.get("youtube_retry_rows", []),
                     "noDataRows": context.get("youtube_no_data_rows", []),
                     "latestRun": self.frontend_youtube_run(context.get("youtube_latest_run"), script_name),
+                    "activeRuns": [
+                        run for run in (
+                            self.frontend_youtube_run(detail, script_name)
+                            for detail in context.get("youtube_active_runs", [])
+                        )
+                        if run is not None
+                    ],
                 },
                 "diarization": {
                     "audioRows": context.get("diarization_audio_rows", []),
@@ -913,6 +923,13 @@ class RenderingMixin:
                     "selectedModelKey": context.get("selected_diarization_model_key", ""),
                     "history": self.frontend_diarization_history_rows(list(context.get("diarization_history", [])), script_name),
                     "latestRun": self.frontend_diarization_run(context.get("diarization_latest_run"), script_name),
+                    "activeRuns": [
+                        run for run in (
+                            self.frontend_diarization_run(detail, script_name)
+                            for detail in context.get("diarization_active_runs", [])
+                        )
+                        if run is not None
+                    ],
                 },
             },
         }

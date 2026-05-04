@@ -362,6 +362,23 @@ class DiarizationMixin:
             if run_status(path) in DASHBOARD_REFRESH_STATUSES
         ]
 
+    def active_diarization_runs_detailed(self, *, limit: int = 4) -> list[dict[str, object]]:
+        """Return ``diarization_run_details`` payloads for currently active diarization runs.
+
+        Capped at ``limit`` to bound polling work when many runs are queued.
+        Used by the frontend's tab-toggle for switching between simultaneous runs.
+        """
+
+        active_paths = self.active_diarization_run_directories()
+        # Newest first so the most recently submitted run is the default tab.
+        active_paths.sort(key=lambda path: path.name, reverse=True)
+        details = []
+        for run_dir in active_paths[:limit]:
+            payload = self.diarization_run_details(run_dir)
+            if payload:
+                details.append(payload)
+        return details
+
     def active_fine_tuning_runs(self) -> list[dict[str, str]]:
         """Return active fine-tuning runs without loading full project summaries."""
 

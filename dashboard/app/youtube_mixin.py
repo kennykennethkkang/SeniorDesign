@@ -566,6 +566,22 @@ class YouTubeMixin:
             builder=builder,
         )
 
+    def active_youtube_runs_detailed(self, *, limit: int = 4) -> list[dict[str, object]]:
+        """Return ``youtube_run_details`` payloads for currently active YouTube runs.
+
+        Capped at ``limit`` to bound polling work. Used by the frontend's
+        tab-toggle for switching between simultaneous runs.
+        """
+
+        active_paths = self.active_run_directories(self.youtube_runs_root)
+        active_paths.sort(key=lambda path: path.name, reverse=True)
+        details = []
+        for run_dir in active_paths[:limit]:
+            payload = self.youtube_run_details(run_dir)
+            if payload:
+                details.append(payload)
+        return details
+
     def youtube_run_details(self, run_dir: Path | None) -> dict[str, object] | None:
         """Load the latest YouTube run summary, artifacts, and short log previews."""
 

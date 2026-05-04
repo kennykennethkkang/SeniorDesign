@@ -1572,7 +1572,7 @@
           h("div", null, h("h2", null, "Diarized File Tracker"), h("p", null, "Review diarized audio, transcripts, speaker-time files, review pages, flags, and logs in one place."))
         ),
         h("div", { className: "summary-grid" }, h(SummaryCard, { title: "Tracked Files" }, h("p", null, h("strong", null, filteredHistory.length), " diarized item(s)")), h(SummaryCard, { title: "Latest Run" }, h("p", null, h(StatusPill, { status: diarization.latestRun?.status || "not started" })), h("p", { className: "run-name" }, diarization.latestRun?.name || "No site run yet."))),
-        h(LatestRunQueueTracker, { latestRun: diarization.latestRun, emptyText: "No diarization Slurm job has been submitted yet." }),
+        h(LatestRunQueueTracker, { latestRun: diarization.latestRun, activeRuns: diarization.activeRuns, emptyText: "No diarization Slurm job has been submitted yet.", storageKey: "diarization-active-tab" }),
         h(
           "div",
           { className: "selection-toolbar" },
@@ -1618,8 +1618,39 @@
     );
   }
 
-  function LatestRunQueueTracker({ latestRun, emptyText }) {
-    if (!latestRun) {
+  function LatestRunQueueTracker({ latestRun, activeRuns, emptyText, storageKey }) {
+    // The "unified" run-status panel: collapses to the same single-run tracker
+    // every page used to render. When `activeRuns` carries 2+ runs, we render
+    // a tab strip above so the user can flip between them. Tab choice is
+    // persisted in sessionStorage so navigating away and back keeps it.
+    const runs = Array.isArray(activeRuns) && activeRuns.length > 0
+      ? activeRuns
+      : (latestRun ? [latestRun] : []);
+
+    const showTabs = runs.length >= 2;
+    const effectiveStorageKey = storageKey || "run-status-tab";
+
+    const [selectedIndex, setSelectedIndex] = React.useState(() => {
+      if (!showTabs || typeof window === "undefined") return 0;
+      try {
+        const stored = window.sessionStorage.getItem(effectiveStorageKey);
+        const parsed = stored == null ? 0 : parseInt(stored, 10);
+        return Number.isFinite(parsed) && parsed >= 0 && parsed < runs.length ? parsed : 0;
+      } catch (_err) {
+        return 0;
+      }
+    });
+
+    React.useEffect(() => {
+      if (!showTabs || typeof window === "undefined") return;
+      try {
+        window.sessionStorage.setItem(effectiveStorageKey, String(selectedIndex));
+      } catch (_err) {
+        /* ignore storage failures; tab still works in-memory */
+      }
+    }, [selectedIndex, showTabs, effectiveStorageKey]);
+
+    if (runs.length === 0) {
       return h(
         "article",
         { className: "queue-tracker" },
@@ -1627,7 +1658,32 @@
         h("p", { className: "empty" }, emptyText || "No site run has been submitted yet.")
       );
     }
-    return h(SlurmQueueTracker, { queue: latestRun.slurmQueue || {}, metadata: latestRun.metadata || {} });
+
+    const safeIndex = Math.min(selectedIndex, runs.length - 1);
+    const selected = runs[safeIndex];
+
+    return h(
+      React.Fragment,
+      null,
+      showTabs && h(
+        "div",
+        { className: "run-tab-strip", role: "tablist", "aria-label": "Active runs" },
+        runs.map((run, index) => h(
+          "button",
+          {
+            key: (run && run.name) || index,
+            type: "button",
+            role: "tab",
+            "aria-selected": index === safeIndex,
+            className: "run-tab" + (index === safeIndex ? " run-tab--active" : ""),
+            onClick: () => setSelectedIndex(index),
+          },
+          h("span", { className: "run-tab-name" }, (run && run.name) || `Run ${index + 1}`),
+          run && run.status ? h(StatusPill, { status: run.status }) : null
+        ))
+      ),
+      h(SlurmQueueTracker, { queue: (selected && selected.slurmQueue) || {}, metadata: (selected && selected.metadata) || {} })
+    );
   }
 
   function ClusterQueuePanel({ title = "Cluster Queue", refreshIntervalMs = 5000 }) {
@@ -1848,7 +1904,7 @@
             { className: "subpanel" },
             h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Queue Status"), h("p", null, "Use these counts to choose a single run, a bulk run, or a clean reset."))),
             h("div", { className: "summary-grid" }, h(SummaryCard, { title: "Total queued" }, h("p", null, h("strong", null, summary.total || 0), " link(s)")), h(SummaryCard, { title: "Ready right now" }, h("p", null, h("strong", null, summary.ready || 0), " new link(s)"), h("p", null, `${summary.retry || 0} link(s) are marked for retry.`)), h(SummaryCard, { title: "Already converted" }, h("p", null, h("strong", null, summary.converted || 0), " link(s)"), h("p", null, `${summary.no_data || 0} link(s) are marked as no public data.`)), h(SummaryCard, { title: "Latest run" }, h("p", null, h(StatusPill, { status: latestRun?.status || "stopped" })), h("p", null, latestRun?.name || "No site run yet."))),
-            h(LatestRunQueueTracker, { latestRun, emptyText: "No YouTube audio conversion Slurm job has been submitted yet." }),
+            h(LatestRunQueueTracker, { latestRun, activeRuns: youtube.activeRuns, emptyText: "No YouTube audio conversion Slurm job has been submitted yet.", storageKey: "youtube-active-tab" }),
             h("form", { method: "post", action: routes.resetYoutube, onSubmit: (event) => { if (!window.confirm("This clears the YouTube queue, removes generated audio files from the youtube_links folder, and deletes old YouTube run logs. Continue?")) { event.preventDefault(); } } }, h("p", { className: "footer-note" }, "Use reset before a brand-new bulk batch."), h("div", { className: "button-row" }, h("button", { className: "danger", type: "submit" }, "Reset queue")))
           )
         )
