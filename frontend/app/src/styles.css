@@ -1,0 +1,37 @@
+/* Phase 6 scaffold styles. The shared dashboard.css that the Python server
+ * loads handles the legacy bundle; this file holds component-only styles
+ * specific to the Vite preview so the new bundle can be visually
+ * identifiable without breaking the legacy page rendering. */
+
+.vite-dashboard-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.vite-dashboard-header {
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  background: rgba(64, 144, 220, 0.10);
+  border: 1px solid rgba(64, 144, 220, 0.40);
+}
+
+.vite-dashboard-header h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.2rem;
+}
+
+.vite-dashboard-header p {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.20);
+}

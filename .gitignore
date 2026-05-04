@@ -10,6 +10,8 @@ frontend/node_modules/
 frontend/app/node_modules/
 frontend/dist/
 frontend/app/dist/
+frontend/static/dist/
+frontend/app/tsconfig.tsbuildinfo
 
 audio_in/
 job_logs/
