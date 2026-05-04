@@ -373,10 +373,18 @@
   }
 
   function diarizationHistoryFilterOptions(rows) {
+    // Filter dropdown shown above the diarized-files table on /uploads.
+    // Entries:
+    //   - "All diarized items" (always)
+    //   - One per backend that produced output ("nemo runs", "pyannote runs")
+    //   - One per fine-tuned model key (only appears once a fine-tuned model
+    //     has actually run, by design).
+    // We deliberately do NOT add per-batch entries: batch ids are run-grouping
+    // metadata, not user-facing model identities, and were surfacing as
+    // "Batch 20260503" rows that confused the filter.
     const options = [{ value: "all", label: "All diarized items" }];
     const seenBackends = new Set();
     const seenModels = new Set();
-    const seenBatches = new Set();
     (rows || []).forEach((row) => {
       const backend = text(row.backend || "").trim();
       if (backend && !seenBackends.has(backend)) {
@@ -396,14 +404,6 @@
         options.push({
           value: modelKey,
           label: row.modelLabel || modelKey,
-        });
-      }
-      const batchId = text(row.batchId || "").trim();
-      if (batchId && !seenBatches.has(batchId)) {
-        seenBatches.add(batchId);
-        options.push({
-          value: `batch:${batchId}`,
-          label: `Batch ${batchId}`,
         });
       }
     });
@@ -1540,9 +1540,6 @@
       }
       if (modelFilter.startsWith("backend:")) {
         return row.backend === modelFilter.slice("backend:".length);
-      }
-      if (modelFilter.startsWith("batch:")) {
-        return row.batchId === modelFilter.slice("batch:".length);
       }
       return row.modelKey === modelFilter;
     });
