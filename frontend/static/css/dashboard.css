@@ -2712,3 +2712,66 @@ button.btn-sm {
   flex-wrap: nowrap;
 }
 
+/* ============================================================
+   Cluster Queue panel - added in Phase 2.
+   Live cluster-wide squeue snapshot rendered on every page that
+   submits jobs. Uses its own surface and a "you" highlight so it
+   does not visually compete with the per-run queue tracker.
+   ============================================================ */
+.cluster-queue-panel {
+  margin-top: 1.25rem;
+}
+
+.cluster-queue-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.cluster-queue-controls .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.cluster-queue-controls .field .label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.cluster-queue-controls input,
+.cluster-queue-controls select {
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: rgba(255, 255, 255, 0.6);
+  font: inherit;
+}
+
+.cluster-queue-row td {
+  vertical-align: middle;
+}
+
+.cluster-queue-row--self td {
+  background: rgba(64, 144, 220, 0.10);
+}
+
+.cluster-queue-row--self td:first-child {
+  border-left: 3px solid #4090dc;
+}
+
+:root[data-theme="dark"] .cluster-queue-row--self td {
+  background: rgba(96, 168, 240, 0.18);
+}
+
+:root[data-theme="dark"] .cluster-queue-controls input,
+:root[data-theme="dark"] .cluster-queue-controls select {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: inherit;
+}
+

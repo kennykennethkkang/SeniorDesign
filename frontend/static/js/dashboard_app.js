@@ -1630,6 +1630,135 @@
     return h(SlurmQueueTracker, { queue: latestRun.slurmQueue || {}, metadata: latestRun.metadata || {} });
   }
 
+  function ClusterQueuePanel({ title = "Cluster Queue", refreshIntervalMs = 5000 }) {
+    const url = (state.routes && state.routes.clusterQueue) || "/api/cluster-queue";
+    const [snapshot, setSnapshot] = React.useState({ available: true, jobs: [], message: null });
+    const [loading, setLoading] = React.useState(true);
+    const [error, setError] = React.useState(null);
+    const [stateFilter, setStateFilter] = React.useState("PD,R,CG");
+    const [partitionFilter, setPartitionFilter] = React.useState("");
+    const [userFilter, setUserFilter] = React.useState("");
+
+    React.useEffect(() => {
+      let cancelled = false;
+      let timer = null;
+      const run = () => {
+        if (typeof window.fetch !== "function") {
+          return;
+        }
+        const params = new URLSearchParams();
+        if (stateFilter) params.set("state", stateFilter);
+        if (partitionFilter) params.set("partition", partitionFilter);
+        if (userFilter) params.set("user", userFilter);
+        const target = params.toString() ? `${url}?${params.toString()}` : url;
+        window
+          .fetch(target, { cache: "no-store", headers: { Accept: "application/json" } })
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`Cluster queue request failed with ${response.status}`);
+            }
+            return response.json();
+          })
+          .then((payload) => {
+            if (cancelled) return;
+            setSnapshot(payload || { available: false, jobs: [] });
+            setError(null);
+            setLoading(false);
+          })
+          .catch((err) => {
+            if (cancelled) return;
+            setError(err.message || "Cluster queue fetch failed.");
+            setLoading(false);
+          });
+      };
+      run();
+      timer = window.setInterval(run, refreshIntervalMs);
+      return () => {
+        cancelled = true;
+        if (timer) window.clearInterval(timer);
+      };
+    }, [url, stateFilter, partitionFilter, userFilter, refreshIntervalMs]);
+
+    const jobs = snapshot.jobs || [];
+    const me = snapshot.current_user || "";
+    const fetchedAt = snapshot.fetched_at_utc ? snapshot.fetched_at_utc.replace("T", " ").replace(/\..*$/, "") : "";
+
+    const renderRow = (job) => h(
+      "tr",
+      { key: job.job_id, className: job.is_self ? "cluster-queue-row cluster-queue-row--self" : "cluster-queue-row" },
+      h("td", null, job.job_id),
+      h("td", null, job.is_self ? h("strong", null, job.user, " (you)") : job.user),
+      h("td", null, h(StatusPill, { status: job.state })),
+      h("td", null, job.partition),
+      h("td", null, job.time_used),
+      h("td", null, job.time_left),
+      h("td", null, job.nodes),
+      h("td", null, job.cpus),
+      h("td", { title: job.name }, job.name),
+      h("td", { title: job.reason }, job.reason)
+    );
+
+    return h(
+      "article",
+      { className: "panel cluster-queue-panel" },
+      h(
+        "div",
+        { className: "panel-head" },
+        h("div", null, h("h2", null, title), h("p", null, "Live view of every job currently known to ", h("code", null, "squeue"), ". Your jobs are highlighted."))
+      ),
+      h(
+        "div",
+        { className: "cluster-queue-controls" },
+        h(
+          "label",
+          { className: "field" },
+          h("span", { className: "label" }, "States"),
+          h(
+            "select",
+            { value: stateFilter, onChange: (e) => setStateFilter(e.target.value) },
+            h("option", { value: "PD,R,CG" }, "Pending + Running + Completing"),
+            h("option", { value: "PD" }, "Pending only"),
+            h("option", { value: "R" }, "Running only"),
+            h("option", { value: "PD,R" }, "Pending + Running")
+          )
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", { className: "label" }, "Partition contains"),
+          h("input", { type: "text", value: partitionFilter, onChange: (e) => setPartitionFilter(e.target.value), placeholder: "e.g. gpu" })
+        ),
+        h(
+          "label",
+          { className: "field" },
+          h("span", { className: "label" }, "User contains"),
+          h("input", { type: "text", value: userFilter, onChange: (e) => setUserFilter(e.target.value), placeholder: me ? `e.g. ${me}` : "username" })
+        )
+      ),
+      error
+        ? h("p", { className: "empty" }, error)
+        : !snapshot.available
+          ? h("p", { className: "empty" }, snapshot.message || "squeue is not available on this machine.")
+          : loading && jobs.length === 0
+            ? h("p", { className: "empty" }, "Loading cluster queue...")
+            : jobs.length === 0
+              ? h("p", { className: "empty" }, snapshot.message || "Cluster queue is empty for the selected filters.")
+              : h(DataTable, {
+                  headers: ["Job ID", "User", "State", "Partition", "Elapsed", "Time left", "Nodes", "CPUs", "Name", "Reason"],
+                  rows: jobs,
+                  renderRow,
+                }),
+      h(
+        "p",
+        { className: "footer-note" },
+        fetchedAt
+          ? `Last refreshed ${fetchedAt} UTC. Refreshes every ${Math.round(refreshIntervalMs / 1000)} s.`
+          : `Refreshes every ${Math.round(refreshIntervalMs / 1000)} s.`
+      )
+    );
+  }
+
+
   function YoutubeRunPanel({ latestRun }) {
     if (!latestRun) {
       return h("p", { className: "empty" }, "No site-launched YouTube conversion run exists yet.");
@@ -1740,7 +1869,8 @@
           h("div", { className: "button-row" }, h("button", { type: "submit", name: "youtube_mode", value: "selected", "data-selection-submit": "youtube-queue" }, "Convert selected"), h("button", { className: "secondary", type: "submit", name: "youtube_mode", value: "all" }, "Convert all"))
         )
       ),
-      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "More Details"), h("p", null, "Open logs, history, and queue exceptions only when needed."))), h("div", { className: "button-row" }, h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-run-dialog" }, "Latest run"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-history-dialog" }, "History"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-issues-dialog" }, "Queue issues")), h(Dialog, { id: "youtube-run-dialog", title: "Latest Audio Conversion Run", detail: "Newest result counts, artifact files, and log previews." }, h(YoutubeRunPanel, { latestRun })), h(Dialog, { id: "youtube-history-dialog", title: "Recent Conversion History", detail: "Confirm whether a link already produced audio or needs another attempt." }, h(DataTable, { headers: ["Status", "Title / Video", "Audio File", "Note", "Last Attempt"], rows: youtube.history || [], emptyText: "No conversion history yet.", renderRow: (row, index) => h("tr", { key: `${row.title}-${index}` }, h("td", null, row.status), h("td", null, row.title), h("td", null, row.audioHref ? h("a", { href: row.audioHref }, row.audioFile || "Open audio") : row.audioFile), h("td", null, row.note), h("td", null, row.lastAttempt)) })), h(Dialog, { id: "youtube-issues-dialog", title: "Queue Issues", detail: "Retryable downloader errors stay available. No-data links are separated." }, h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.retryRows || [], emptyText: "No retry-needed URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "kept"), h("td", null, row.when)) }), h("h3", null, "URLs With No Public Audio Data"), h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.noDataRows || [], emptyText: "No no-data URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "removed"), h("td", null, row.when)) })))
+      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "More Details"), h("p", null, "Open logs, history, and queue exceptions only when needed."))), h("div", { className: "button-row" }, h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-run-dialog" }, "Latest run"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-history-dialog" }, "History"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-issues-dialog" }, "Queue issues")), h(Dialog, { id: "youtube-run-dialog", title: "Latest Audio Conversion Run", detail: "Newest result counts, artifact files, and log previews." }, h(YoutubeRunPanel, { latestRun })), h(Dialog, { id: "youtube-history-dialog", title: "Recent Conversion History", detail: "Confirm whether a link already produced audio or needs another attempt." }, h(DataTable, { headers: ["Status", "Title / Video", "Audio File", "Note", "Last Attempt"], rows: youtube.history || [], emptyText: "No conversion history yet.", renderRow: (row, index) => h("tr", { key: `${row.title}-${index}` }, h("td", null, row.status), h("td", null, row.title), h("td", null, row.audioHref ? h("a", { href: row.audioHref }, row.audioFile || "Open audio") : row.audioFile), h("td", null, row.note), h("td", null, row.lastAttempt)) })), h(Dialog, { id: "youtube-issues-dialog", title: "Queue Issues", detail: "Retryable downloader errors stay available. No-data links are separated." }, h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.retryRows || [], emptyText: "No retry-needed URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "kept"), h("td", null, row.when)) }), h("h3", null, "URLs With No Public Audio Data"), h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.noDataRows || [], emptyText: "No no-data URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "removed"), h("td", null, row.when)) }))),
+      h(ClusterQueuePanel, { title: "Cluster Queue" })
     );
   }
 
@@ -2338,7 +2468,8 @@
           h("p", null, h("strong", null, "Absolute DER reduction: "), absoluteReduction === null ? "n/a" : `${formatNumber(absoluteReduction, 2)} points`),
           h("p", null, h("strong", null, "Relative DER reduction: "), relativeReduction === null ? "n/a" : formatPercent(relativeReduction, 2))
         )
-      )
+      ),
+      h(ClusterQueuePanel, { title: "Cluster Queue" })
     );
   }
 
@@ -2372,7 +2503,8 @@
         { className: "panel", id: "fine-tune-projects" },
         h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Fine-Tuning Projects"), h("p", null, "Each card summarizes preparation state, latest run state, and generated artifacts."))),
         h("div", { className: "project-grid" }, projects.length ? projects.map((project) => h(FineTuneProjectCard, { key: `${project.backend}/${project.slug}`, project })) : h("article", { className: "project-card" }, h("h3", null, "No fine-tuning projects yet"), h("p", null, "Upload audio + RTTM pairs to create the first project.")))
-      )
+      ),
+      h(ClusterQueuePanel, { title: "Cluster Queue" })
     );
   }
 

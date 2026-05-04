@@ -244,6 +244,8 @@ class CoreMixin:
                 status, headers, body = self.handle_page_state(environ)
             elif routed_method == "GET" and path == "/api/artifact-preview":
                 status, headers, body = self.handle_artifact_preview(environ)
+            elif routed_method == "GET" and path == "/api/cluster-queue":
+                status, headers, body = self.handle_cluster_queue(environ)
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):
@@ -782,6 +784,42 @@ class CoreMixin:
             "200 OK",
             self.artifact_preview_payload(artifact_path, self.script_name(environ)),
         )
+
+    def handle_cluster_queue(self, environ):
+        """Return the cluster-wide squeue snapshot, optionally filtered.
+
+        Query parameters:
+          state     - comma-separated squeue state codes (default ``PD,R,CG``)
+          partition - case-insensitive partition substring filter
+          user      - case-insensitive username substring filter
+        """
+
+        from dashboard.cluster_queue import cluster_queue_snapshot
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        states = (query.get("state") or ["PD,R,CG"])[0].strip() or "PD,R,CG"
+        partition_filter = (query.get("partition") or [""])[0].strip().lower()
+        user_filter = (query.get("user") or [""])[0].strip().lower()
+
+        # Cache for 5 seconds so a page that polls multiple times doesn't hammer
+        # the controller. Filters are applied after the cached read so distinct
+        # filter combinations all share one squeue invocation.
+        snapshot = self.cached_value(
+            f"cluster_queue::{states}",
+            ttl_seconds=5.0,
+            builder=lambda: cluster_queue_snapshot(states=states),
+        )
+
+        if partition_filter or user_filter:
+            filtered = []
+            for job in snapshot.get("jobs", []):
+                if partition_filter and partition_filter not in job["partition"].lower():
+                    continue
+                if user_filter and user_filter not in job["user"].lower():
+                    continue
+                filtered.append(job)
+            snapshot = {**snapshot, "jobs": filtered, "filtered": True}
+        return self.json_response("200 OK", snapshot)
 
     def requested_diarization_model_key(self, environ) -> str:
         """Read an optional model-key override from query parameters."""
