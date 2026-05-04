@@ -22,15 +22,15 @@ Legacy CLI commands and older output folders still exist for compatibility, but 
 ## Project layout
 
 - `workflow_cli.py`: top-level CLI for status, tests, review generation, and the local web launcher
-- `workflow_dashboard.py`: backend routes, JSON page state, and local web launcher integration for the dashboard
+- `workflow_dashboard.py`: thin entry-point module — composes the `WorkflowWebApp` class from the mixins under `dashboard/app/`, exposes the `app` WSGI instance, and keeps `waitress_available` / `resolve_server_mode` at module level for tests to patch
 - `frontend/`: dashboard website files split into `html/`, `static/css/`, `static/js/`, and local React runtime files
 - `workflow_preferences.py`: persistent defaults used by the diarization and fine-tuning pages
 - `workflow_background.py`: shared helpers for detached and Slurm-backed runs launched from the site
 - `fine_tuning_manager.py`: upload, prepare, and launch logic for NeMo and pyannote fine-tuning projects
 - `review_bundle.py`: review HTML and TSV flag generation from `.srt` files
 - `audio_numbering.py`: numbering utility for `audio_in/`
-- `youtube_audio_batch.py`: YouTube URL to audio downloader and conversion-history indexer used by the local CLI
-- `youtube_to_audio_batch.py`: same downloader, invoked from the dashboard's Slurm wrapper
+- `youtube_audio_batch.py`: YouTube URL to audio downloader and conversion-history indexer; used by both the local CLI and the dashboard's Slurm wrapper
+- `dashboard/`: package extracted from `workflow_dashboard.py` — constants, sbatch helper, server bootstrap, CLI, and the per-domain mixins under `dashboard/app/`
 - `all_diarization_programs/`: diarization entrypoints and backend-specific code
 - `scheduler/`: Slurm batch scripts for the dashboard's diarization and YouTube conversion jobs
 - `docs/`: local guides and reference papers for the project
