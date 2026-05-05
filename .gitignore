@@ -1,10 +1,22 @@
+# Python build/cache artifacts
 __pycache__/
 .pytest_cache/
 *.py[cod]
 *.log
+.coverage
+htmlcov/
+*.egg-info/
+.venv/
+.venv_*/
 
+# Editor / OS
 .local_dashboard/
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Node / frontend build outputs (we ship the React/TS source, not the built bundles)
 node_modules/
 frontend/node_modules/
 frontend/app/node_modules/
@@ -13,6 +25,7 @@ frontend/app/dist/
 frontend/static/dist/
 frontend/app/tsconfig.tsbuildinfo
 
+# Project-local data — these dirs are write-once-per-run and personal to this host.
 audio_in/
 job_logs/
 job_outputs/
@@ -20,10 +33,59 @@ sbatch_runtime/
 fine_tuning/projects/
 youtube_links_err/*.tsv
 
+# Full diarization runs are huge; the index TSV stays tracked so reruns can dedupe.
 outputs/diarization_runs/
 outputs/youtube_conversion_runs/
-# keep outputs/youtube_conversion_history/url_audio_index.tsv tracked
+# (intentionally keep) outputs/youtube_conversion_history/url_audio_index.tsv
 
-.venv/
-.venv_*/
-*.egg-info/
+# ---- Sensitive data: belt-and-suspenders ------------------------------------
+# Anything that smells like a credential should never get committed by mistake,
+# even if I forget which dotfile a secret was hiding in.
+.env
+.env.*
+*.env
+.envrc
+secrets/
+**/credentials*
+**/*api_key*
+**/*api-key*
+*.pem
+*.key
+*.pfx
+id_rsa
+id_ed25519
+id_*.pub
+.ssh/
+
+# Hugging Face / Torch caches occasionally land beside the project when a job
+# runs with HF_HOME unset. Don't let those leak into the repo.
+.hf_cache/
+hf_cache/
+.cache/
+huggingface/
+
+# ---- Model weights and large media ------------------------------------------
+# These are bigger than git can comfortably handle and are reproducible from
+# the training scripts; never commit them.
+*.ckpt
+*.pt
+*.pth
+*.nemo
+*.onnx
+*.safetensors
+*.bin
+*.tflite
+
+# Audio / video — recordings can contain identifiable voices; we treat them as
+# data, not source. The one tracked test.opus under archive/ stays tracked
+# (git only ignores untracked files, so this won't disturb it).
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.opus
+*.ogg
+*.aac
+*.mp4
+*.mkv
+*.webm
