@@ -1104,10 +1104,6 @@ tr:last-child td {
   min-width: 860px;
 }
 
-.training-label-table table {
-  min-width: 920px;
-}
-
 .compact-callout {
   margin-bottom: 12px;
 }
@@ -1120,6 +1116,38 @@ progress {
   width: 100%;
   height: 14px;
   accent-color: var(--accent);
+}
+
+.upload-progress-tracker {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-solid);
+}
+
+.upload-progress-tracker[hidden] {
+  display: none;
+}
+
+.upload-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--bg-ink);
+}
+
+.upload-progress-head span {
+  flex: 0 0 auto;
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.upload-progress-tracker .progress-meta {
+  margin: 0;
 }
 
 .empty {
@@ -2571,10 +2599,125 @@ dialog.dashboard-dialog {
   color: var(--muted);
 }
 
+.label-audio-caption {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.label-audio-title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
 .label-audio.empty-state {
   text-align: left;
   border-style: dashed;
   background: transparent;
+}
+
+.label-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.label-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.label-editor-head h3 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.label-editor-head .row-note {
+  margin: 0;
+}
+
+.label-editor-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+}
+
+.label-editor-table {
+  min-width: 760px;
+  border: 0;
+  table-layout: fixed;
+}
+
+.label-editor-table th,
+.label-editor-table td {
+  vertical-align: middle;
+}
+
+.label-editor-table th:first-child,
+.label-editor-table td:first-child {
+  width: 72px;
+  min-width: 72px;
+}
+
+.label-editor-table th:nth-child(2),
+.label-editor-table th:nth-child(3),
+.label-editor-table td:nth-child(2),
+.label-editor-table td:nth-child(3) {
+  width: 150px;
+  min-width: 150px;
+}
+
+.label-editor-table input {
+  width: 100%;
+  min-width: 0;
+}
+
+.label-editor-table tr.needs-work {
+  background: rgba(255, 182, 0, 0.14);
+}
+
+.label-editor-index {
+  text-align: center;
+}
+
+.label-row-handle {
+  width: 38px;
+  min-width: 38px;
+  padding: 6px 0;
+  cursor: grab;
+}
+
+.label-row-handle:active {
+  cursor: grabbing;
+}
+
+.label-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.label-editor-actions button {
+  padding: 6px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.label-optional-details {
+  margin-top: var(--space-3);
+}
+
+.label-optional-details textarea {
+  min-height: 92px;
 }
 
 /* Header for the Uploaded Material section: lay the controls cluster
@@ -2617,6 +2760,13 @@ dialog.dashboard-dialog {
   .training-labels-controls {
     margin-left: 0;
   }
+  .label-editor-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .label-editor-head button {
+    align-self: flex-start;
+  }
 }
 
 /* ============================================================
@@ -2631,11 +2781,10 @@ dialog.dashboard-dialog {
 }
 
 .audio-inventory-toolbar {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: var(--space-3);
-  align-items: center;
-  justify-content: space-between;
   padding: var(--space-2) var(--space-3);
   margin-bottom: var(--space-2);
   border: 1px solid var(--line);
@@ -2649,14 +2798,92 @@ dialog.dashboard-dialog {
   color: var(--muted);
 }
 
+.audio-inventory-toolbar-left {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .audio-inventory-bulk-actions {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.audio-folder-filter {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-solid);
+}
+
+.audio-folder-filter legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.audio-folder-filter-actions,
+.audio-folder-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.audio-folder-filter-actions {
+  margin-bottom: 8px;
+}
+
+.audio-folder-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--bg-ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.audio-folder-option input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.audio-folder-option em {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--fog-light);
+  color: var(--muted);
+  font-style: normal;
+  text-align: center;
 }
 
 .audio-inventory-bulk-actions button {
   width: auto;
+}
+
+@media (max-width: 760px) {
+  .audio-inventory-toolbar {
+    grid-template-columns: 1fr;
+  }
+  .audio-inventory-bulk-actions {
+    justify-content: flex-start;
+  }
 }
 
 .select-cell {
@@ -2997,4 +3224,3 @@ button.btn-sm {
   border-color: rgba(255, 255, 255, 0.18);
   color: inherit;
 }
-

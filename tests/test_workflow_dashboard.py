@@ -505,7 +505,12 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertIn("class=\"use-cue\"", html)
             self.assertIn("id=\"waveformCanvas\"", html)
             self.assertIn("id=\"playbackRate\"", html)
+            self.assertIn("Dialogue</th>", html)
+            self.assertIn("Speech</th>", html)
+            self.assertIn("id=\"showLabelDialogue\"", html)
             self.assertNotIn("Adjust selected label", html)
+            self.assertNotIn("Transcript / notes", html)
+            self.assertNotIn("Open questions", html)
             self.assertIn("training-labels/save", html)
             self.assertIn("001_clip.wav", html)
 
@@ -549,6 +554,75 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(record["status"], "completed")
             self.assertEqual(record["source"], "review_page")
             self.assertEqual(record["review_path"], "outputs/diarization_runs/20260414T190000_diarization_nemo_01-items/001_clip_review.html")
+
+    def test_review_page_label_save_persists_new_manual_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            nested_audio_dir = audio_dir / "field_uploads"
+            nested_audio_dir.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (nested_audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            run_dir = root / "outputs" / "diarization_runs" / "20260414T190000_diarization_nemo_01-items"
+            run_dir.mkdir(parents=True)
+            (run_dir / "field_uploads__001_clip.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:00,500\nSpeaker 0: hello\n",
+                encoding="utf-8",
+            )
+            review_path = run_dir / "field_uploads__001_clip_review.html"
+            review_path.write_text("<html>review</html>\n", encoding="utf-8")
+            return_to = "/files/outputs/diarization_runs/20260414T190000_diarization_nemo_01-items/field_uploads__001_clip_review.html?message=old&status=success"
+            clean_return_to = return_to.split("?", 1)[0]
+            manual_segments = "0.00 0.50 Speaker_0\n0.60 0.90 Speaker_1"
+
+            body = urlencode(
+                [
+                    ("audio_file", "field_uploads/001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "review-lab"),
+                    ("label_segments", manual_segments),
+                    ("label_action", "complete"),
+                    ("label_return_to", return_to),
+                    ("label_source", "review_page"),
+                    ("label_review_path", str(review_path)),
+                ]
+            ).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertTrue(headers["Location"].startswith(clean_return_to))
+            self.assertNotIn("old", headers["Location"])
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(label_status["items"]["field_uploads/001_clip.wav"]["label_segments"], manual_segments)
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "review-lab"
+            self.assertTrue((project_dir / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((project_dir / "rttm" / "001_clip.rttm").is_file())
+
+            status, _, body = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="GET",
+                path=clean_return_to,
+            )
+
+            self.assertEqual(status, "200 OK")
+            html = body.decode("utf-8")
+            self.assertEqual(html.count("<tr data-label-row"), 2)
+            self.assertIn("Speaker_1", html)
+            self.assertIn("<span class=\"row-number\">2</span>", html)
+            self.assertIn('name="audio_file" value="field_uploads/001_clip.wav"', html)
+
+            status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path="/fine-tuning")
+            self.assertEqual(status, "200 OK")
+            project = page_state(body)["context"]["projects"][0]
+            self.assertEqual(project["backend"], "pyannote")
+            self.assertEqual(project["slug"], "review-lab")
+            self.assertEqual(project["sampleCount"], 1)
 
     def test_diarization_page_tracks_completed_and_retryable_audio(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -817,6 +891,64 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertTrue(context["tracking"]["fingerprint"])
             self.assertEqual(context["tracking"]["activeDiarizationRuns"], 1)
             self.assertIn(active_run.name, context["tracking"]["diarizationRunNames"])
+
+    def test_diarization_page_exposes_all_active_model_sbatch_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            run_specs = [
+                ("nemo", "20260414T191500_diarization_nemo_01-items", "71111"),
+                ("pyannote", "20260414T191501_diarization_pyannote_01-items", "72222"),
+            ]
+            for backend, run_name, job_id in run_specs:
+                run_dir = root / "outputs" / "diarization_runs" / backend / run_name
+                run_dir.mkdir(parents=True)
+                (run_dir / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "backend": backend,
+                            "selected_audio_count": 1,
+                            "slurm_job_id": job_id,
+                            "batch_id": "batch-test",
+                            "batch_size_total": 2,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / "selected_audio.txt").write_text("001_clip.wav\n", encoding="utf-8")
+
+            original = workflow_web.slurm_queue_snapshot
+            workflow_web.slurm_queue_snapshot = lambda job_id: {
+                "job_id": str(job_id),
+                "available": True,
+                "state": "PENDING",
+                "queue_position": 1,
+                "jobs_ahead": 0,
+                "reason": "Priority",
+                "estimated_start": "2026-04-17T02:00:00",
+                "message": "Pending position 1.",
+            }
+            try:
+                status, headers, body = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="GET",
+                    path="/diarization",
+                )
+            finally:
+                workflow_web.slurm_queue_snapshot = original
+
+            self.assertEqual(status, "200 OK")
+            self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+            diarization = page_state(body)["context"]["diarization"]
+            self.assertEqual(len(diarization["activeRuns"]), 2)
+            job_ids = {run["slurmQueue"]["job_id"] for run in diarization["activeRuns"]}
+            self.assertEqual(job_ids, {"71111", "72222"})
+            batch_ids = {run["batchId"] for run in diarization["activeRuns"]}
+            self.assertEqual(batch_ids, {"batch-test"})
 
     def test_live_tracking_api_reports_diarization_and_youtube_runs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1697,7 +1829,9 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(status, "303 See Other")
             self.assertIn("status=success", headers["Location"])
             label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
-            self.assertEqual(label_status["items"]["001_clip.wav"]["status"], "draft")
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["status"], "draft")
+            self.assertEqual(record["label_segments"], "0.00 0.50 SPEAKER_00")
             self.assertFalse((root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab" / "audio").exists())
 
     def test_completed_training_label_creates_fine_tuning_sample(self):

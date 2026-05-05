@@ -26,7 +26,7 @@ import time
 import warnings
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit
 
 with warnings.catch_warnings():
     warnings.filterwarnings(
@@ -210,7 +210,13 @@ class TrainingLabelsMixin:
         parsed = urlsplit(raw_value)
         path = parsed.path or ""
         if path.startswith("/files/") or path in PAGE_PATHS:
-            return path + (f"?{parsed.query}" if parsed.query else "")
+            query_items = [
+                (key, value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key not in {"message", "status"}
+            ]
+            query = urlencode(query_items)
+            return path + (f"?{query}" if query else "")
         return "/training-labels"
 
     def training_label_status(self, record: dict[str, object] | None) -> str:
@@ -246,7 +252,8 @@ class TrainingLabelsMixin:
             "completed": 0,
         }
         for path in audio_paths:
-            status = self.training_label_status(records.get(path.name))
+            audio_name = self.audio_relative_path(path)
+            status = self.training_label_status(records.get(audio_name) or records.get(path.name))
             summary[status] = summary.get(status, 0) + 1
         return summary
 

@@ -548,6 +548,7 @@ def build_html(
     srt_path: Path,
     media_path: Path | None,
     output_html: Path,
+    media_selection_name: str = "",
     label_record: Mapping[str, object] | None = None,
     model_comparisons: Sequence[Mapping[str, object]] | None = None,
 ) -> str:
@@ -562,7 +563,6 @@ def build_html(
 
     cue_rows_html: list[str] = []
     default_label_entries: list[tuple[str, str, str, str, str]] = []
-    transcript_lines: list[str] = []
     for cue in cues:
         flags = flags_by_index.get(cue.index, [])
         flag_text = ", ".join(flags) or "-"
@@ -572,8 +572,6 @@ def build_html(
         start_seconds = format_seconds(cue.start_ms)
         end_seconds = format_seconds(cue.end_ms)
         spoken_text = cue.spoken_text
-        if spoken_text:
-            transcript_lines.append(spoken_text)
         default_label_entries.append((str(cue.index), start_seconds, end_seconds, speaker_label, spoken_text))
         cue_rows_html.append(
             "<tr "
@@ -598,9 +596,10 @@ def build_html(
         )
 
     saved_segments = parse_saved_label_segments(record_text(label_record, "label_segments", ""))
+    saved_dialogue_lines = record_text(label_record, "transcript_text", "").splitlines()
     if saved_segments:
         label_entries = [
-            (str(index), start, end, speaker, "")
+            (str(index), start, end, speaker, saved_dialogue_lines[index - 1] if index - 1 < len(saved_dialogue_lines) else "")
             for index, (start, end, speaker) in enumerate(saved_segments, start=1)
         ]
     else:
@@ -617,14 +616,21 @@ def build_html(
             f"data-end=\"{html.escape(end, quote=True)}\" "
             f"data-speaker=\"{html.escape(speaker, quote=True)}\""
             ">"
-            f"<td class=\"row-index\">{html.escape(index)}</td>"
+            "<td class=\"row-index\">"
+            "<span class=\"drag-handle\" draggable=\"true\" role=\"button\" tabindex=\"0\""
+            " aria-label=\"Drag to reorder this label\" title=\"Drag to reorder\">⋮⋮</span>"
+            f"<span class=\"row-number\">{html.escape(index)}</span>"
+            "</td>"
             "<td><div class=\"time-edit\">"
             f"<label><span>Start</span><input class=\"label-start\" type=\"number\" step=\"0.001\" min=\"0\" value=\"{html.escape(start, quote=True)}\"></label>"
             f"<label><span>End</span><input class=\"label-end\" type=\"number\" step=\"0.001\" min=\"0\" value=\"{html.escape(end, quote=True)}\"></label>"
             "</div></td>"
             f"<td><input class=\"label-speaker\" list=\"speakerOptions\" type=\"text\" value=\"{html.escape(speaker, quote=True)}\"></td>"
-            f"<td><input class=\"label-text\" type=\"text\" value=\"{html.escape(note, quote=True)}\"></td>"
-            "<td class=\"action-cell\"><button class=\"play-label\" type=\"button\">Listen</button></td>"
+            f"<td class=\"label-dialogue-cell\"><input class=\"label-dialogue\" type=\"text\" value=\"{html.escape(note, quote=True)}\" placeholder=\"Optional dialogue\"></td>"
+            "<td class=\"action-cell\">"
+            "<button class=\"play-label\" type=\"button\">Listen</button>"
+            "<button class=\"delete-label\" type=\"button\" aria-label=\"Delete this label\">Delete</button>"
+            "</td>"
             "</tr>"
         )
 
@@ -634,10 +640,9 @@ def build_html(
         if media_path is not None
         else "<p class=\"warning\">No matching media file was found, so segment playback is disabled.</p>"
     )
-    media_file_name = html.escape(media_path.name if media_path is not None else "", quote=True)
+    media_file_name = html.escape(media_selection_name or (media_path.name if media_path is not None else ""), quote=True)
     default_segments = html.escape("\n".join(label_segment_lines))
-    default_transcript = html.escape(record_text(label_record, "transcript_text", "\n".join(transcript_lines)))
-    default_questions = html.escape(record_text(label_record, "issue_questions", ""))
+    default_dialogue = html.escape("\n".join(entry[4] for entry in label_entries))
     review_workspace_path = html.escape(str(output_html), quote=True)
     selected_backend = normalized_label_backend(label_record)
     project_name = html.escape(record_text(label_record, "project_name", DEFAULT_LABEL_PROJECT), quote=True)
@@ -906,26 +911,26 @@ def build_html(
       position: sticky;
       top: 0;
       z-index: 10;
-      padding: 10px 12px;
-      margin-bottom: 10px;
+      padding: 8px 12px;
+      margin-bottom: 8px;
     }}
     .source-line {{
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 6px;
       align-items: center;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
       color: var(--muted);
     }}
     .source-line span {{
       display: inline-flex;
       align-items: center;
-      min-height: 28px;
-      padding: 4px 8px;
+      min-height: 24px;
+      padding: 2px 7px;
       border: 1px solid var(--line);
       border-radius: var(--radius-sm);
       background: var(--panel-solid);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 900;
       text-transform: uppercase;
     }}
@@ -937,57 +942,58 @@ def build_html(
     audio,
     video {{
       width: 100%;
-      margin: 0 0 8px;
+      margin: 0 0 6px;
       border-radius: var(--radius);
       background: #000;
     }}
     .now-playing {{
       display: flex;
       flex-wrap: wrap;
-      gap: 4px 12px;
+      gap: 2px 10px;
       align-items: baseline;
-      padding: 6px 10px;
+      padding: 4px 9px;
       border: 1px solid rgba(255, 182, 0, 0.36);
       border-radius: var(--radius-sm);
       background: rgba(255, 182, 0, 0.08);
       color: var(--bg-ink);
       font-weight: 700;
-      font-size: 13px;
+      font-size: 12px;
     }}
     .now-playing small {{
       color: var(--muted);
       font-weight: 600;
-      font-size: 12px;
+      font-size: 11px;
     }}
     .playback-options {{
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin: 0 0 8px;
+      align-items: center;
+      margin: 0 0 6px;
     }}
     .mode-chip {{
       display: inline-flex;
       align-items: center;
-      min-height: 38px;
-      padding: 8px 10px;
+      min-height: 30px;
+      padding: 5px 9px;
       border: 1px solid rgba(77, 135, 152, 0.34);
-      border-radius: var(--radius);
+      border-radius: var(--radius-sm);
       background: rgba(77, 135, 152, 0.1);
       color: var(--bg-ink);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 900;
     }}
     .waveform-panel {{
-      margin: 0 0 8px;
+      margin: 0 0 6px;
       border: 1px solid var(--line);
-      border-radius: var(--radius);
+      border-radius: var(--radius-sm);
       background: var(--panel-solid);
       overflow: hidden;
     }}
     .waveform-canvas {{
       display: block;
       width: 100%;
-      height: 76px;
+      height: 52px;
       cursor: pointer;
       background:
         linear-gradient(180deg, rgba(77, 135, 152, 0.1), rgba(163, 32, 53, 0.04)),
@@ -999,27 +1005,32 @@ def build_html(
       gap: 8px;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 10px;
+      padding: 5px 8px;
       border-top: 1px solid var(--line);
     }}
     .waveform-status {{
       min-width: 180px;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 800;
     }}
     .speed-control {{
-      display: flex;
-      gap: 8px;
+      display: inline-flex;
+      gap: 6px;
       align-items: center;
-      min-width: min(260px, 100%);
+      margin-left: auto;
     }}
     .speed-control span {{
       margin: 0;
       white-space: nowrap;
+      font-size: 12px;
+      color: var(--muted);
     }}
     .speed-control select {{
-      width: 120px;
+      width: 86px;
+      min-height: 30px;
+      padding: 4px 6px;
+      font-size: 12px;
     }}
     .review-grid {{
       display: grid;
@@ -1132,6 +1143,23 @@ def build_html(
       gap: 10px;
       margin-bottom: 10px;
     }}
+    .label-table-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 8px;
+    }}
+    .add-segment-btn {{
+      min-height: 34px;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      font-weight: 900;
+    }}
+    .add-segment-hint {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
     .field-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1210,10 +1238,54 @@ def build_html(
     .label-table input {{
       padding: 7px 8px;
     }}
+    .label-table.hide-dialogue .label-dialogue-col,
+    .label-table.hide-dialogue .label-dialogue-cell {{
+      display: none;
+    }}
     .row-index {{
-      width: 42px;
+      width: 56px;
       color: var(--muted);
       font-weight: 900;
+      vertical-align: middle;
+      white-space: nowrap;
+    }}
+    .row-index .row-number {{
+      display: inline-block;
+      min-width: 18px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }}
+    .drag-handle {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 22px;
+      margin-right: 4px;
+      color: var(--muted);
+      font-size: 14px;
+      letter-spacing: -1px;
+      cursor: grab;
+      user-select: none;
+      border-radius: var(--radius-sm);
+    }}
+    .drag-handle:hover,
+    .drag-handle:focus-visible {{
+      color: var(--bg-ink);
+      background: rgba(77, 135, 152, 0.12);
+      outline: none;
+    }}
+    .drag-handle:active {{
+      cursor: grabbing;
+    }}
+    [data-label-row].dragging {{
+      opacity: 0.55;
+    }}
+    [data-label-row].drop-above {{
+      box-shadow: inset 0 2px 0 0 var(--accent);
+    }}
+    [data-label-row].drop-below {{
+      box-shadow: inset 0 -2px 0 0 var(--accent);
     }}
     .time-readout,
     .time-edit {{
@@ -1260,6 +1332,32 @@ def build_html(
       padding: 8px 9px;
       font-size: 13px;
     }}
+    .label-table .action-cell {{
+      width: 132px;
+    }}
+    .label-table .action-cell button {{
+      display: block;
+      width: 100%;
+    }}
+    .label-table .action-cell button + button {{
+      margin-top: 5px;
+    }}
+    .delete-label {{
+      width: 100%;
+      min-width: 0;
+      padding: 6px 8px;
+      font-size: 12px;
+      color: var(--accent);
+      background: transparent;
+      border: 1px solid rgba(163, 32, 53, 0.36);
+    }}
+    .delete-label:hover,
+    .delete-label:focus-visible {{
+      color: var(--white);
+      background: var(--accent);
+      border-color: var(--accent);
+      outline: none;
+    }}
     .filter-row {{
       margin-bottom: 12px;
     }}
@@ -1300,9 +1398,6 @@ def build_html(
       font-weight: 800;
     }}
     .form-actions {{
-      margin-top: 12px;
-    }}
-    .notes-grid {{
       margin-top: 12px;
     }}
     @media (max-width: 980px) {{
@@ -1378,13 +1473,13 @@ def build_html(
         <canvas id="waveformCanvas" class="waveform-canvas" aria-label="Audio waveform"></canvas>
         <div class="waveform-tools">
           <span id="waveformStatus" class="waveform-status">Waveform loading...</span>
-          <label class="speed-control" for="playbackRate"><span>Playback speed</span><select id="playbackRate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
         </div>
       </div>
       <div class="playback-options">
         <input id="startAtSegment" type="checkbox" checked hidden aria-hidden="true">
         <span class="mode-chip">Listen starts at the selected segment</span>
         <label class="checkbox-row"><input id="stopAtSegmentEnd" type="checkbox" checked> Stop at segment end</label>
+        <label class="speed-control" for="playbackRate"><span>Speed</span><select id="playbackRate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
       </div>
       <div id="nowPlaying" class="now-playing">
         <span>Ready to review.</span>
@@ -1404,6 +1499,7 @@ def build_html(
           <input type="hidden" name="label_source" value="review_page">
           <input type="hidden" name="label_review_path" value="{review_workspace_path}">
           <textarea id="labelSegments" name="label_segments" hidden>{default_segments}</textarea>
+          <textarea id="labelTranscript" name="label_transcript_text" hidden>{default_dialogue}</textarea>
           <div class="field-grid">
             <label><span>Training backend</span><select name="label_backend"><option value="both"{selected_attr("both", selected_backend)}>NeMo + pyannote</option><option value="pyannote"{selected_attr("pyannote", selected_backend)}>pyannote only</option><option value="nemo"{selected_attr("nemo", selected_backend)}>NeMo only</option></select></label>
             <label><span>Project</span><input name="label_project_name" type="text" value="{project_name}"></label>
@@ -1415,26 +1511,31 @@ def build_html(
           </div>
           <datalist id="speakerOptions">{speaker_options}</datalist>
           <div class="tool-grid">
-            <label><span>Search labels</span><input id="labelSearch" type="search" placeholder="Speaker, note, or time"></label>
+            <label><span>Search labels</span><input id="labelSearch" type="search" placeholder="Speaker, dialogue, or time"></label>
             <label><span>Speaker</span><select id="labelSpeakerFilter">{speaker_filter_options}</select></label>
             <label><span>Label status</span><select id="labelIssueFilter"><option value="">All labels</option><option value="needs_time">Needs time fix</option><option value="missing_speaker">Missing speaker</option></select></label>
+          </div>
+          <div class="label-table-toolbar">
+            <button type="button" id="addLabelRowTop" class="add-segment-btn">Add Label</button>
+            <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox" checked> Dialogue</label>
+            <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
           <div class="table-wrap review-table-wrap">
             <table class="label-table">
               <colgroup>
-                <col style="width: 42px">
+                <col style="width: 56px">
                 <col style="width: 178px">
                 <col style="width: 20%">
-                <col style="width: 26%">
-                <col style="width: 98px">
+                <col class="label-dialogue-col" style="width: 26%">
+                <col style="width: 132px">
               </colgroup>
               <thead>
                 <tr>
                   <th>#</th>
                   <th>Start / End</th>
                   <th>Speaker</th>
-                  <th>Note</th>
-                  <th>Listen</th>
+                  <th class="label-dialogue-col">Dialogue</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody id="labelRows">
@@ -1442,12 +1543,8 @@ def build_html(
               </tbody>
             </table>
           </div>
-          <div class="field-grid notes-grid">
-            <label><span>Transcript / notes</span><textarea id="labelTranscript" name="label_transcript_text">{default_transcript}</textarea></label>
-            <label><span>Open questions</span><textarea name="label_issue_questions">{default_questions}</textarea></label>
-          </div>
           <div class="controls form-actions">
-            <button type="button" id="addLabelRow">Add Row</button>
+            <button type="button" id="addLabelRow">Add Label</button>
             <button class="secondary" type="submit" name="label_action" value="draft">Save Draft</button>
             <button class="primary" type="submit" name="label_action" value="complete">Complete For Training</button>
           </div>
@@ -1489,7 +1586,7 @@ def build_html(
                 <th>Issues</th>
                 <th>Listen</th>
                 <th>Add</th>
-                <th>Text</th>
+                <th>Speech</th>
               </tr>
             </thead>
             <tbody id="rows">
@@ -1523,11 +1620,14 @@ def build_html(
     const labelForm = document.getElementById("labelForm");
     const labelRows = document.getElementById("labelRows");
     const labelSegments = document.getElementById("labelSegments");
+    const labelTranscript = document.getElementById("labelTranscript");
     const labelHealth = document.getElementById("labelHealth");
     const labelSearch = document.getElementById("labelSearch");
     const labelSpeakerFilter = document.getElementById("labelSpeakerFilter");
     const labelIssueFilter = document.getElementById("labelIssueFilter");
+    const showLabelDialogue = document.getElementById("showLabelDialogue");
     const addLabelRow = document.getElementById("addLabelRow");
+    const addLabelRowTop = document.getElementById("addLabelRowTop");
     const saveStatus = document.getElementById("saveStatus");
     const labelReturnTo = document.getElementById("labelReturnTo");
     const trainingLabelsLink = document.getElementById("trainingLabelsLink");
@@ -1555,7 +1655,11 @@ def build_html(
       const path = window.location.pathname.startsWith(base)
         ? window.location.pathname.slice(base.length)
         : window.location.pathname;
-      return path + (window.location.search || "");
+      const params = new URLSearchParams(window.location.search || "");
+      params.delete("message");
+      params.delete("status");
+      const query = params.toString();
+      return path + (query ? "?" + query : "");
     }}
 
     function configureAppLinks() {{
@@ -1566,11 +1670,7 @@ def build_html(
       fineTuningLink.href = base + "/fine-tuning";
       dashboardLink.href = base + "/";
       backButton.addEventListener("click", function () {{
-        if (window.history.length > 1) {{
-          window.history.back();
-        }} else {{
-          window.location.href = base + "/training-labels";
-        }}
+        window.location.href = base + "/training-labels";
       }});
     }}
 
@@ -1843,7 +1943,7 @@ def build_html(
       const rect = waveformCanvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       const width = Math.max(Math.floor((rect.width || 800) * dpr), 320);
-      const height = Math.max(Math.floor((rect.height || 118) * dpr), 90);
+      const height = Math.max(Math.floor((rect.height || 76) * dpr), 64);
       if (waveformCanvas.width !== width || waveformCanvas.height !== height) {{
         waveformCanvas.width = width;
         waveformCanvas.height = height;
@@ -1976,11 +2076,11 @@ def build_html(
     function updateLabelRowDataset(row) {{
       const bounds = labelRowBounds(row);
       const speakerInput = row.querySelector(".label-speaker");
-      const noteInput = row.querySelector(".label-text");
+      const dialogueInput = row.querySelector(".label-dialogue");
       row.dataset.start = Number.isFinite(bounds.start) ? bounds.start.toFixed(3) : "";
       row.dataset.end = Number.isFinite(bounds.end) ? bounds.end.toFixed(3) : "";
       row.dataset.speaker = speakerInput ? speakerInput.value.trim() : "";
-      row.dataset.note = noteInput ? noteInput.value.trim() : "";
+      row.dataset.dialogue = dialogueInput ? dialogueInput.value.trim() : "";
       const needsTimeFix = !Number.isFinite(bounds.start) || !Number.isFinite(bounds.end) || bounds.end <= bounds.start;
       row.classList.toggle("needs-time-fix", needsTimeFix);
       row.classList.toggle("missing-speaker", !row.dataset.speaker);
@@ -2008,8 +2108,10 @@ def build_html(
     function syncLabelSegments(updateHealth = true) {{
       const speakers = new Set();
       let invalidCount = 0;
+      const dialogueLines = [];
       const lines = labelRowList().map(function (row) {{
         updateLabelRowDataset(row);
+        dialogueLines.push(row.dataset.dialogue || "");
         const bounds = labelRowBounds(row);
         const start = row.dataset.start;
         const end = row.dataset.end;
@@ -2023,9 +2125,14 @@ def build_html(
         return "";
       }}).filter(Boolean);
       labelSegments.value = lines.join("\\n");
+      if (labelTranscript) labelTranscript.value = dialogueLines.join("\\n").trim();
       if (updateHealth) {{
         updateLabelHealth(lines.length, speakers.size, invalidCount);
         updateLabelSpeakerFilterOptions();
+        const activeModel = modelComparisonSelect && modelComparisons.length
+          ? modelComparisons.find(function (item) {{ return item.key === modelComparisonSelect.value; }}) || modelComparisons[0]
+          : null;
+        updateSpeakerDatalist(activeModel);
       }}
     }}
 
@@ -2135,7 +2242,7 @@ def build_html(
       const issue = labelIssueFilter.value;
       labelRowList().forEach(function (row) {{
         updateLabelRowDataset(row);
-        const text = row.innerText.toLowerCase() + " " + (row.dataset.note || "").toLowerCase();
+        const text = row.innerText.toLowerCase() + " " + (row.dataset.dialogue || "").toLowerCase();
         const matchesQuery = !query || text.includes(query) || (row.dataset.start || "").includes(query) || (row.dataset.end || "").includes(query);
         const matchesSpeaker = !speaker || row.dataset.speaker === speaker;
         const matchesIssue = !issue
@@ -2143,6 +2250,12 @@ def build_html(
           || (issue === "missing_speaker" && row.classList.contains("missing-speaker"));
         row.hidden = !(matchesQuery && matchesSpeaker && matchesIssue);
       }});
+    }}
+
+    function syncLabelDialogueVisibility() {{
+      const table = labelRows ? labelRows.closest(".label-table") : null;
+      if (!table || !showLabelDialogue) return;
+      table.classList.toggle("hide-dialogue", !showLabelDialogue.checked);
     }}
 
     function playRange(start, end, selectedRow) {{
@@ -2229,13 +2342,13 @@ def build_html(
       playRange(row.dataset.start, row.dataset.end, row);
     }}
 
-    function createLabelRow(label) {{
+    function createLabelRow() {{
       const row = document.createElement("tr");
       row.setAttribute("data-label-row", "");
       row.setAttribute("tabindex", "0");
-      row.innerHTML = '<td class="row-index"></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="number" step="0.001" min="0" value=""></label><label><span>End</span><input class="label-end" type="number" step="0.001" min="0" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td><input class="label-text" type="text" value=""></td><td class="action-cell"><button class="play-label" type="button">Listen</button></td>';
-      row.querySelector("td").textContent = label || "new";
+      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="number" step="0.001" min="0" value=""></label><label><span>End</span><input class="label-end" type="number" step="0.001" min="0" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
       labelRows.appendChild(row);
+      renumberLabelRows();
       return row;
     }}
 
@@ -2243,12 +2356,12 @@ def build_html(
       row.querySelector(".label-start").value = Number.isFinite(rowNumber(start)) ? rowNumber(start).toFixed(3) : "";
       row.querySelector(".label-end").value = Number.isFinite(rowNumber(end)) ? rowNumber(end).toFixed(3) : "";
       row.querySelector(".label-speaker").value = speaker && speaker !== "-" ? speaker : "";
-      row.querySelector(".label-text").value = note || "";
+      row.querySelector(".label-dialogue").value = note || "";
       updateLabelRowDataset(row);
     }}
 
     function useCueAsLabel(cueRow) {{
-      const target = selectedOrCurrentLabelRow() || createLabelRow("new");
+      const target = selectedOrCurrentLabelRow() || createLabelRow();
       setLabelRowValues(target, cueRow.dataset.start, cueRow.dataset.end, cueRow.dataset.speaker, cueRow.dataset.text);
       setSelectedLabelRow(target);
       syncLabelSegments();
@@ -2278,9 +2391,36 @@ def build_html(
       setSelectedCueRow(row);
     }});
 
+    function renumberLabelRows() {{
+      labelRowList().forEach(function (row, index) {{
+        const numberCell = row.querySelector(".row-number");
+        if (numberCell) numberCell.textContent = String(index + 1);
+        row.dataset.position = String(index + 1);
+      }});
+    }}
+
+    function deleteLabelRow(row) {{
+      if (!row || !row.parentNode) return;
+      const wasSelected = selectedLabelRow === row;
+      const sibling = row.nextElementSibling || row.previousElementSibling;
+      row.parentNode.removeChild(row);
+      if (wasSelected) {{
+        setSelectedLabelRow(sibling && sibling.matches("[data-label-row]") ? sibling : null);
+      }}
+      renumberLabelRows();
+      syncLabelSegments();
+      applyLabelFilters();
+      setCurrentRows();
+    }}
+
     labelRows.addEventListener("click", function (event) {{
       const row = event.target.closest("[data-label-row]");
       if (!row) return;
+      if (event.target.closest("button.delete-label")) {{
+        event.stopPropagation();
+        deleteLabelRow(row);
+        return;
+      }}
       setSelectedLabelRow(row);
       if (event.target.closest("button.play-label")) {{
         event.stopPropagation();
@@ -2299,14 +2439,143 @@ def build_html(
       applyLabelFilters();
       setCurrentRows();
     }});
-
-    addLabelRow.addEventListener("click", function () {{
-      const row = createLabelRow("new");
-      setSelectedLabelRow(row);
+    labelRows.addEventListener("change", function () {{
       syncLabelSegments();
+      applyLabelFilters();
+      setCurrentRows();
     }});
 
-    labelForm.addEventListener("submit", syncLabelSegments);
+    let dragRow = null;
+
+    function clearDropMarkers() {{
+      labelRowList().forEach(function (row) {{
+        row.classList.remove("drop-above", "drop-below");
+      }});
+    }}
+
+    labelRows.addEventListener("dragstart", function (event) {{
+      const handle = event.target.closest(".drag-handle");
+      if (!handle) {{
+        event.preventDefault();
+        return;
+      }}
+      dragRow = handle.closest("[data-label-row]");
+      if (!dragRow) {{
+        event.preventDefault();
+        return;
+      }}
+      dragRow.classList.add("dragging");
+      if (event.dataTransfer) {{
+        event.dataTransfer.effectAllowed = "move";
+        try {{ event.dataTransfer.setData("text/plain", "label-row"); }} catch (_err) {{}}
+      }}
+    }});
+
+    labelRows.addEventListener("dragover", function (event) {{
+      if (!dragRow) return;
+      const target = event.target.closest("[data-label-row]");
+      if (!target || target === dragRow) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      const rect = target.getBoundingClientRect();
+      const after = (event.clientY - rect.top) > rect.height / 2;
+      clearDropMarkers();
+      target.classList.add(after ? "drop-below" : "drop-above");
+    }});
+
+    labelRows.addEventListener("dragleave", function (event) {{
+      const target = event.target.closest("[data-label-row]");
+      if (target) target.classList.remove("drop-above", "drop-below");
+    }});
+
+    labelRows.addEventListener("drop", function (event) {{
+      if (!dragRow) return;
+      const target = event.target.closest("[data-label-row]");
+      if (!target || target === dragRow) {{
+        clearDropMarkers();
+        return;
+      }}
+      event.preventDefault();
+      const rect = target.getBoundingClientRect();
+      const after = (event.clientY - rect.top) > rect.height / 2;
+      target.parentNode.insertBefore(dragRow, after ? target.nextSibling : target);
+      clearDropMarkers();
+      renumberLabelRows();
+      syncLabelSegments();
+      applyLabelFilters();
+      setSelectedLabelRow(dragRow);
+    }});
+
+    labelRows.addEventListener("dragend", function () {{
+      if (dragRow) dragRow.classList.remove("dragging");
+      clearDropMarkers();
+      dragRow = null;
+    }});
+
+    function appendBlankLabelRow() {{
+      const row = createLabelRow();
+      setSelectedLabelRow(row);
+      renumberLabelRows();
+      syncLabelSegments();
+      row.scrollIntoView({{ block: "nearest" }});
+      const startInput = row.querySelector(".label-start");
+      if (startInput) startInput.focus();
+    }}
+
+    addLabelRow.addEventListener("click", appendBlankLabelRow);
+    if (addLabelRowTop) addLabelRowTop.addEventListener("click", appendBlankLabelRow);
+
+    function setLabelFormBusy(isBusy) {{
+      labelForm.dataset.submitting = isBusy ? "true" : "";
+      labelForm.setAttribute("aria-busy", isBusy ? "true" : "false");
+      labelForm.querySelectorAll("button[type='submit']").forEach(function (button) {{
+        button.disabled = isBusy;
+      }});
+    }}
+
+    labelForm.addEventListener("submit", function (event) {{
+      syncLabelSegments(true);
+      if (!window.fetch || labelForm.dataset.submitting === "true") {{
+        return;
+      }}
+      event.preventDefault();
+      const submitter = event.submitter;
+      const formData = new FormData(labelForm);
+      if (submitter && submitter.name) {{
+        formData.set(submitter.name, submitter.value || "");
+      }}
+      setLabelFormBusy(true);
+      if (saveStatus) {{
+        saveStatus.className = "save-status";
+        saveStatus.style.display = "block";
+        saveStatus.textContent = "Saving label...";
+      }}
+      window.fetch(labelForm.action, {{
+        method: "POST",
+        body: formData,
+        credentials: "same-origin",
+        redirect: "follow",
+        headers: {{ Accept: "text/html,*/*" }},
+      }})
+        .then(function (response) {{
+          if (!response.ok) throw new Error("Label save failed");
+          window.location.replace(response.url || (appBasePath() + appLocalPath()));
+        }})
+        .catch(function () {{
+          setLabelFormBusy(false);
+          if (saveStatus) {{
+            saveStatus.className = "save-status error";
+            saveStatus.style.display = "block";
+            saveStatus.textContent = "The label could not be saved. Check the server and try again.";
+          }}
+        }});
+    }});
+    if (typeof FormDataEvent !== "undefined") {{
+      labelForm.addEventListener("formdata", function (event) {{
+        syncLabelSegments(false);
+        event.formData.set("label_segments", labelSegments.value);
+      }});
+    }}
 
     if (media) {{
       media.load();
@@ -2343,6 +2612,7 @@ def build_html(
     configureThemeToggle();
     showSaveStatusFromQuery();
     configureModelComparison();
+    renumberLabelRows();
     syncLabelSegments();
     applyLabelFilters();
     setCurrentRows();
@@ -2353,6 +2623,8 @@ def build_html(
     labelSearch.addEventListener("input", applyLabelFilters);
     labelSpeakerFilter.addEventListener("change", applyLabelFilters);
     labelIssueFilter.addEventListener("change", applyLabelFilters);
+    if (showLabelDialogue) showLabelDialogue.addEventListener("change", syncLabelDialogueVisibility);
+    syncLabelDialogueVisibility();
     rewind.addEventListener("click", function () {{
       if (!media) return;
       media.currentTime = Math.max(media.currentTime - 2, 0);
@@ -2399,8 +2671,18 @@ def write_review_bundle(
         audio_dir=audio_dir,
     )
     label_record: Mapping[str, object] | None = None
+    media_selection_name = ""
     if resolved_media is not None and training_label_records:
-        label_record = training_label_records.get(resolved_media.name)
+        try:
+            media_selection_name = resolved_media.resolve().relative_to(audio_dir.expanduser().resolve()).as_posix()
+        except ValueError:
+            media_selection_name = resolved_media.name
+        label_record = training_label_records.get(media_selection_name) or training_label_records.get(resolved_media.name)
+    elif resolved_media is not None:
+        try:
+            media_selection_name = resolved_media.resolve().relative_to(audio_dir.expanduser().resolve()).as_posix()
+        except ValueError:
+            media_selection_name = resolved_media.name
 
     write_flag_report(cues=cues, flags_by_index=flags_by_index, report_tsv=report_tsv)
     output_html.parent.mkdir(parents=True, exist_ok=True)
@@ -2411,6 +2693,7 @@ def write_review_bundle(
             srt_path=srt_path,
             media_path=resolved_media,
             output_html=output_html,
+            media_selection_name=media_selection_name,
             label_record=label_record,
             model_comparisons=model_comparisons,
         ),

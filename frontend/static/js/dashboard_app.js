@@ -640,7 +640,7 @@
     return h(
       "section",
       { className: "label-source-picker", "aria-labelledby": `${safeId}-heading` },
-      h("div", { className: "panel-head compact-head" }, h("div", null, h("h3", { id: `${safeId}-heading` }, "Review Source"), h("p", { className: "row-note" }, "Pick the diarization output to start from. You can still edit everything below."))),
+      h("div", { className: "panel-head compact-head" }, h("div", null, h("h3", { id: `${safeId}-heading` }, "Start from an existing diarization"), h("p", { className: "row-note" }, "Pick a model's output as the starting point. Use Timing or Use Transcript to copy it into the fields below. You can still edit anything afterward."))),
       h(
         "fieldset",
         { className: "model-toggle compact-toggle" },
@@ -685,6 +685,122 @@
           )
         : null
     );
+  }
+
+  function makeLabelEditorRow(values = {}) {
+    return {
+      id: values.id || `label-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      start: text(values.start),
+      end: text(values.end),
+      speaker: text(values.speaker),
+    };
+  }
+
+  function secondsForLabelInput(value) {
+    const rawValue = text(value).trim();
+    if (!rawValue) {
+      return "";
+    }
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) ? parsed.toFixed(3) : "";
+  }
+
+  function splitLabelSegmentLine(line) {
+    if (line.includes(",")) {
+      return line.split(",").map((part) => part.trim());
+    }
+    if (line.includes("\t")) {
+      return line.split("\t").map((part) => part.trim());
+    }
+    return line.split(/\s+/);
+  }
+
+  function parseLabelSegmentRows(rawSegments) {
+    return text(rawSegments)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const rttmParts = line.split(/\s+/);
+        if (rttmParts.length >= 8 && rttmParts[0].toUpperCase() === "SPEAKER") {
+          const start = Number(rttmParts[3]);
+          const duration = Number(rttmParts[4]);
+          return makeLabelEditorRow({
+            start: secondsForLabelInput(start),
+            end: Number.isFinite(start) && Number.isFinite(duration) ? secondsForLabelInput(start + duration) : "",
+            speaker: rttmParts[7] || "",
+          });
+        }
+        const parts = splitLabelSegmentLine(line);
+        if (parts.length >= 3) {
+          return makeLabelEditorRow({
+            start: parts[0],
+            end: parts[1],
+            speaker: parts.slice(2).join(" "),
+          });
+        }
+        return null;
+      })
+      .filter(Boolean);
+  }
+
+  function labelEditorRowHasAnyValue(row) {
+    return Boolean(text(row.start).trim() || text(row.end).trim() || text(row.speaker).trim());
+  }
+
+  function labelEditorRowIsValid(row) {
+    const startValue = text(row.start).trim();
+    const endValue = text(row.end).trim();
+    const speaker = text(row.speaker).trim();
+    if (!startValue || !endValue || !speaker) {
+      return false;
+    }
+    const start = Number(startValue);
+    const end = Number(endValue);
+    return Number.isFinite(start) && Number.isFinite(end) && end > start;
+  }
+
+  function serializeLabelSegmentRows(rows) {
+    return (rows || [])
+      .filter(labelEditorRowIsValid)
+      .map((row) => `${secondsForLabelInput(row.start)} ${secondsForLabelInput(row.end)} ${text(row.speaker).trim()}`)
+      .join("\n");
+  }
+
+  function labelEditorRowsFromForm(form) {
+    if (!form) {
+      return [];
+    }
+    return Array.from(form.querySelectorAll("[data-label-editor-row]")).map((row) => {
+      const fieldValue = (fieldName) => {
+        const field = row.querySelector(`[data-label-field="${fieldName}"]`);
+        return field ? field.value : "";
+      };
+      return makeLabelEditorRow({
+        id: row.getAttribute("data-label-row-id") || "",
+        start: fieldValue("start"),
+        end: fieldValue("end"),
+        speaker: fieldValue("speaker"),
+      });
+    });
+  }
+
+  function labelEditorStats(rows) {
+    const currentRows = rows || [];
+    return {
+      validCount: currentRows.filter(labelEditorRowIsValid).length,
+      incompleteCount: currentRows.filter((row) => labelEditorRowHasAnyValue(row) && !labelEditorRowIsValid(row)).length,
+    };
+  }
+
+  function syncTrainingLabelEditorForm(form) {
+    const rows = labelEditorRowsFromForm(form);
+    const serializedSegments = serializeLabelSegmentRows(rows);
+    const segmentsInput = form?.querySelector("[data-label-segments-input]");
+    if (segmentsInput) {
+      segmentsInput.value = serializedSegments;
+    }
+    return { rows, serializedSegments, ...labelEditorStats(rows) };
   }
 
   function DataTable({ headers, rows, emptyText, renderRow, className }) {
@@ -747,6 +863,20 @@
       return `${formatNumber(safeSeconds / 60, 1)} min`;
     }
     return `${formatNumber(safeSeconds, 1)} sec`;
+  }
+
+  function formatBytes(bytes) {
+    const safeBytes = Math.max(Number(bytes) || 0, 0);
+    if (safeBytes >= 1024 * 1024 * 1024) {
+      return `${formatNumber(safeBytes / (1024 * 1024 * 1024), 2)} GB`;
+    }
+    if (safeBytes >= 1024 * 1024) {
+      return `${formatNumber(safeBytes / (1024 * 1024), 1)} MB`;
+    }
+    if (safeBytes >= 1024) {
+      return `${formatNumber(safeBytes / 1024, 1)} KB`;
+    }
+    return `${formatNumber(safeBytes, 0)} bytes`;
   }
 
   function formatPercent(value, digits = 1) {
@@ -1127,6 +1257,27 @@
     const folders = audioFolderOptions();
     const moveTargets = folders.filter((folder) => folder.value && folder.value !== (defaults.rootAudioFolderValue || "__root__"));
     const [selected, setSelected] = React.useState(() => new Set());
+    const [selectedFolderKeys, setSelectedFolderKeys] = React.useState(null);
+    const folderLabel = (row) => text(row.folder || "Unsorted Root", "Unsorted Root");
+    const folderChoices = Array.from(
+      rows.reduce((choices, row) => {
+        const key = folderLabel(row);
+        const current = choices.get(key) || { key, label: key, count: 0 };
+        current.count += 1;
+        choices.set(key, current);
+        return choices;
+      }, new Map()).values()
+    ).sort((left, right) => {
+      if (left.key === "Unsorted Root") return -1;
+      if (right.key === "Unsorted Root") return 1;
+      return left.label.toLowerCase().localeCompare(right.label.toLowerCase());
+    });
+    const folderKeys = folderChoices.map((folder) => folder.key);
+    const visibleRows = selectedFolderKeys === null
+      ? rows
+      : rows.filter((row) => selectedFolderKeys.has(folderLabel(row)));
+    const selectedVisibleCount = visibleRows.filter((row) => selected.has(row.name)).length;
+    const allFoldersVisible = selectedFolderKeys === null || selectedFolderKeys.size === folderKeys.length;
 
     // Drop selections that no longer match a row (e.g., the inventory refreshed
     // after the user came back from a delete). Keeps the bulk-delete count
@@ -1147,6 +1298,21 @@
       }
     }, [rows]);
 
+    React.useEffect(() => {
+      if (selectedFolderKeys === null) {
+        return;
+      }
+      const validFolders = new Set(folderKeys);
+      const next = new Set(Array.from(selectedFolderKeys).filter((key) => validFolders.has(key)));
+      if (next.size === folderKeys.length) {
+        setSelectedFolderKeys(null);
+        return;
+      }
+      if (next.size !== selectedFolderKeys.size) {
+        setSelectedFolderKeys(next);
+      }
+    }, [folderKeys.join("\u0000"), selectedFolderKeys]);
+
     const toggleRow = (name, checked) => {
       setSelected((prev) => {
         const next = new Set(prev);
@@ -1159,8 +1325,8 @@
       });
     };
 
-    const allChecked = rows.length > 0 && rows.every((row) => selected.has(row.name));
-    const someChecked = !allChecked && rows.some((row) => selected.has(row.name));
+    const allChecked = visibleRows.length > 0 && visibleRows.every((row) => selected.has(row.name));
+    const someChecked = !allChecked && visibleRows.some((row) => selected.has(row.name));
     const headerRef = React.useRef(null);
     React.useEffect(() => {
       if (headerRef.current) {
@@ -1168,8 +1334,28 @@
       }
     }, [someChecked]);
 
-    const toggleAll = (checked) => {
-      setSelected(checked ? new Set(rows.map((row) => row.name)) : new Set());
+    const toggleShownRows = (checked) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        visibleRows.forEach((row) => {
+          if (checked) {
+            next.add(row.name);
+          } else {
+            next.delete(row.name);
+          }
+        });
+        return next;
+      });
+    };
+
+    const toggleFolder = (folderKey, checked) => {
+      const base = selectedFolderKeys === null ? new Set(folderKeys) : new Set(selectedFolderKeys);
+      if (checked) {
+        base.add(folderKey);
+      } else {
+        base.delete(folderKey);
+      }
+      setSelectedFolderKeys(base.size === folderKeys.length ? null : base);
     };
 
     const renderMoveControl = (row) => {
@@ -1251,31 +1437,73 @@
         "div",
         { className: "audio-inventory-toolbar" },
         h(
-          "span",
-          { className: "audio-inventory-summary" },
-          rows.length
-            ? `${selectedCount} of ${rows.length} selected`
-            : "No audio files yet"
+          "div",
+          { className: "audio-inventory-toolbar-left" },
+          h(
+            "span",
+            { className: "audio-inventory-summary" },
+            rows.length
+              ? `${visibleRows.length} shown of ${rows.length}; ${selectedVisibleCount} shown selected${selectedCount > selectedVisibleCount ? ` (${selectedCount} total)` : ""}`
+              : "No audio files yet"
+          )
         ),
         h(
           "div",
           { className: "audio-inventory-bulk-actions" },
           h(
             "button",
-            { type: "button", className: "secondary btn-sm", disabled: !rows.length, onClick: () => toggleAll(true) },
-            "Select all"
+            { type: "button", className: "secondary btn-sm", disabled: !visibleRows.length, onClick: () => toggleShownRows(true) },
+            "Select shown"
           ),
           h(
             "button",
-            { type: "button", className: "secondary btn-sm", disabled: !selectedCount, onClick: () => toggleAll(false) },
-            "Clear"
+            { type: "button", className: "secondary btn-sm", disabled: !selectedCount, onClick: () => setSelected(new Set()) },
+            "Clear selected"
           ),
           h(
             "button",
             { type: "submit", className: "secondary danger btn-sm", disabled: !selectedCount },
             selectedCount ? `Delete selected (${selectedCount})` : "Delete selected"
           )
-        )
+        ),
+        rows.length
+          ? h(
+              "fieldset",
+              { className: "audio-folder-filter" },
+              h("legend", null, "View folders"),
+              h(
+                "div",
+                { className: "audio-folder-filter-actions" },
+                h(
+                  "button",
+                  { type: "button", className: "ghost btn-sm", disabled: allFoldersVisible, onClick: () => setSelectedFolderKeys(null) },
+                  "View all"
+                ),
+                h(
+                  "button",
+                  { type: "button", className: "ghost btn-sm", disabled: selectedFolderKeys !== null && selectedFolderKeys.size === 0, onClick: () => setSelectedFolderKeys(new Set()) },
+                  "Clear folders"
+                )
+              ),
+              h(
+                "div",
+                { className: "audio-folder-options" },
+                folderChoices.map((folder) =>
+                  h(
+                    "label",
+                    { key: folder.key, className: "audio-folder-option" },
+                    h("input", {
+                      type: "checkbox",
+                      checked: selectedFolderKeys === null || selectedFolderKeys.has(folder.key),
+                      onChange: (event) => toggleFolder(folder.key, event.target.checked),
+                    }),
+                    h("span", null, folder.label),
+                    h("em", null, folder.count)
+                  )
+                )
+              )
+            )
+          : null
       ),
       h(DataTable, {
         headers: [
@@ -1284,8 +1512,8 @@
             type: "checkbox",
             "aria-label": "Select all audio files",
             checked: allChecked,
-            disabled: !rows.length,
-            onChange: (event) => toggleAll(event.target.checked),
+            disabled: !visibleRows.length,
+            onChange: (event) => toggleShownRows(event.target.checked),
           }),
           "#",
           "Folder",
@@ -1293,15 +1521,17 @@
           "Type",
           "Actions",
         ],
-        rows,
-        emptyText: h(
-          "div",
-          { className: "empty-state" },
-          h("strong", null, "No audio files yet."),
-          "Upload one with the form above, or queue a YouTube URL on the YouTube Audio Conversion tab to download one straight into ",
-          h("code", null, "audio_in/youtube_links/"),
-          "."
-        ),
+        rows: visibleRows,
+        emptyText: rows.length
+          ? h("div", { className: "empty-state" }, h("strong", null, "No files match the selected folder view."), "Choose another folder or use View all.")
+          : h(
+              "div",
+              { className: "empty-state" },
+              h("strong", null, "No audio files yet."),
+              "Upload one with the form above, or queue a YouTube URL on the YouTube Audio Conversion tab to download one straight into ",
+              h("code", null, "audio_in/youtube_links/"),
+              "."
+            ),
         renderRow: (row, index) =>
           h(
             "tr",
@@ -1317,7 +1547,7 @@
               })
             ),
             h("td", null, index + 1),
-            h("td", null, row.folder || "Unsorted Root"),
+            h("td", null, folderLabel(row)),
             h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), row.path ? h("p", { className: "row-note" }, row.path) : null),
             h("td", null, row.type),
             h("td", null, h("div", { className: "row-actions" }, renderMoveControl(row), renderDeleteControl(row)))
@@ -1553,11 +1783,18 @@
         h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Upload Source Files"), h("p", null, "Add one or more supported audio files."))),
         h(
           "form",
-          { method: "post", action: routes.uploadAudio, encType: "multipart/form-data" },
+          { method: "post", action: routes.uploadAudio, encType: "multipart/form-data", "data-upload-progress": "media_upload_progress", "data-loading-message": "Uploading media files..." },
           h(Field, { id: "audio_folder", label: "Target folder" }, h(AudioFolderSelect, { id: "audio_folder", name: "audio_folder", defaultValue: defaults.defaultUploadAudioFolder || "file_uploads" })),
           h(Field, { id: "new_audio_folder", label: "Optional new folder" }, h(TextInput, { id: "new_audio_folder", name: "new_audio_folder", placeholder: "new_set_name" })),
           h(Field, { id: "audio_files", label: "Supported audio files" }, h("input", { id: "audio_files", type: "file", name: "audio_files", multiple: true, required: true, accept: defaults.uploadAudioAccept, "data-file-summary": "audio_upload_summary" })),
           h("p", { id: "audio_upload_summary", className: "field-status" }, "No file selected yet."),
+          h(
+            "div",
+            { id: "media_upload_progress", className: "upload-progress-tracker", hidden: true, "aria-live": "polite" },
+            h("div", { className: "upload-progress-head" }, h("strong", { "data-upload-progress-status": true }, "Ready to upload"), h("span", { "data-upload-progress-percent": true }, "0%")),
+            h("progress", { value: 0, max: 100, "data-upload-progress-bar": true }),
+            h("p", { className: "progress-meta", "data-upload-progress-meta": true }, "Waiting for upload to start.")
+          ),
           h("p", { className: "footer-note" }, "Accepted uploads are converted to ", h("code", null, ".wav"), ". Source formats: ", h("code", null, (defaults.uploadAudioSuffixes || []).join(", ")), "."),
           h("p", null, h("button", { type: "submit" }, "Upload files"))
         )
@@ -1598,6 +1835,14 @@
   function SlurmQueueTracker({ queue = {}, metadata = {} }) {
     const jobId = queue.job_id || metadata.slurm_job_id || "";
     const localPid = metadata.pid ? String(metadata.pid) : "";
+    const samePartitionPosition = queue.queue_position_same_partition;
+    const resourceSummary = [
+      queue.partition ? `partition ${queue.partition}` : "",
+      queue.nodes ? `${queue.nodes} node(s)` : "",
+      queue.cpus ? `${queue.cpus} CPU(s)` : "",
+      queue.gres ? `GRES ${queue.gres}` : "",
+    ].filter(Boolean).join(" / ");
+    const fetchedAt = queue.fetched_at_utc ? text(queue.fetched_at_utc).replace("T", " ").replace(/\..*$/, "") : "";
     return h(
       "article",
       { className: "queue-tracker" },
@@ -1607,11 +1852,24 @@
             "div",
             { className: "queue-tracker-grid" },
             h("p", null, h("strong", null, "Job ID: "), jobId),
-            h("p", null, h("strong", null, "State: "), queue.state || "unknown"),
+            h("p", null, h("strong", null, "State: "), h(StatusPill, { status: queue.state || "unknown" })),
             h("p", null, h("strong", null, "Queue position: "), queue.queue_position === 0 ? "running now" : queue.queue_position ?? "not in queue"),
+            samePartitionPosition === undefined || samePartitionPosition === null
+              ? null
+              : h("p", null, h("strong", null, "Partition position: "), samePartitionPosition === 0 ? "running now" : samePartitionPosition),
             h("p", null, h("strong", null, "Jobs ahead: "), queue.jobs_ahead ?? "unknown"),
+            queue.jobs_ahead_same_partition === undefined || queue.jobs_ahead_same_partition === null
+              ? null
+              : h("p", null, h("strong", null, "Ahead in partition: "), queue.jobs_ahead_same_partition),
+            resourceSummary ? h("p", null, h("strong", null, "Resources: "), resourceSummary) : null,
+            queue.time_used || queue.time_left || queue.time_limit
+              ? h("p", null, h("strong", null, "Runtime: "), queue.time_used || "0:00", queue.time_left ? ` elapsed / ${queue.time_left} left` : queue.time_limit ? ` elapsed / ${queue.time_limit} limit` : " elapsed")
+              : null,
+            queue.name || queue.user ? h("p", null, h("strong", null, "Job: "), [queue.name, queue.user].filter(Boolean).join(" / ")) : null,
             h("p", null, h("strong", null, "Reason: "), queue.reason || queue.message || "none reported"),
-            h("p", null, h("strong", null, "Estimated start: "), queue.estimated_start || "not reported")
+            h("p", null, h("strong", null, "Estimated start: "), queue.estimated_start || "not reported"),
+            queue.exit_code ? h("p", null, h("strong", null, "Exit code: "), queue.exit_code) : null,
+            fetchedAt ? h("p", null, h("strong", null, "Checked: "), fetchedAt, " UTC", queue.state_source ? ` via ${queue.state_source}` : "") : null
           )
         : localPid
           ? h("p", { className: "empty" }, "This run was launched as a local background process, so it does not have a Slurm queue position. Local PID: ", localPid)
@@ -2097,9 +2355,14 @@
   }
 
   function DiarizationRunPanel() {
-    const run = ctx.diarization?.latestRun;
+    const diarization = ctx.diarization || {};
+    const run = diarization.latestRun;
+    const activeRuns = diarization.activeRuns || [];
+    if (!run && !activeRuns.length) {
+      return h(LatestRunQueueTracker, { latestRun: null, activeRuns, emptyText: "No site-launched diarization run exists yet.", storageKey: "diarization-run-panel-active-tab" });
+    }
     if (!run) {
-      return h(LatestRunQueueTracker, { latestRun: null, emptyText: "No site-launched diarization run exists yet." });
+      return h(LatestRunQueueTracker, { latestRun: null, activeRuns, emptyText: "No site-launched diarization run exists yet.", storageKey: "diarization-run-panel-active-tab" });
     }
     const total = Math.max(Number(run.selectedCount || 0), 1);
     const metadata = run.metadata || {};
@@ -2137,7 +2400,7 @@
         h(ProgressCard, { title: "Successful Files", current: run.succeededCount, total }),
         h(ProgressCard, { title: "Needs Review", current: Number(run.failedCount || 0) + Number(run.noSpeechCount || 0), total, detail: `No speech: ${run.noSpeechCount || 0}. Failed: ${run.failedCount || 0}.` })
       ),
-      h(LatestRunQueueTracker, { latestRun: run }),
+      h(LatestRunQueueTracker, { latestRun: run, activeRuns, emptyText: "No diarization Slurm job has been submitted yet.", storageKey: "diarization-run-panel-active-tab" }),
       h("div", { className: "artifact-strip" }, h("strong", null, "Run files: "), h(LinkList, { links: run.artifactLinks })),
       h("p", { className: "table-note" }, h("a", { href: navItems.find((item) => item.path === "/uploads")?.href || "/uploads" }, "Open Media Library"), " to review diarized audio, transcripts, time files, review pages, flags, and logs."),
       h(
@@ -2272,23 +2535,143 @@
     const segmentsId = `label_segments_${suffix}`;
     const transcriptId = `label_transcript_${suffix}`;
     const questionsId = `label_questions_${suffix}`;
-    const [labelSegments, setLabelSegments] = React.useState(row.labelSegments || "");
+    const formKey = `training-label:${row.name}`;
+    const [segmentRows, setSegmentRows] = React.useState(() => {
+      const parsedRows = parseLabelSegmentRows(row.labelSegments || "");
+      return parsedRows.length ? parsedRows : [makeLabelEditorRow()];
+    });
     const [transcriptText, setTranscriptText] = React.useState(row.transcriptText || "");
     const [issueQuestions, setIssueQuestions] = React.useState(row.issueQuestions || "");
     const [selectedModelKey, setSelectedModelKey] = React.useState("");
+    const audioRef = React.useRef(null);
+    const stopHandlerRef = React.useRef(null);
+    const dragRowIdRef = React.useRef("");
+    const serializedSegments = serializeLabelSegmentRows(segmentRows);
+    const validSegmentCount = segmentRows.filter(labelEditorRowIsValid).length;
+    const incompleteSegmentCount = segmentRows.filter((segment) => labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment)).length;
+    const completeDisabled = validSegmentCount === 0 || incompleteSegmentCount > 0;
+
+    React.useEffect(() => {
+      return () => {
+        if (audioRef.current && stopHandlerRef.current) {
+          audioRef.current.removeEventListener("timeupdate", stopHandlerRef.current);
+        }
+      };
+    }, []);
+
+    function replaceSegmentRows(rawSegments) {
+      const parsedRows = parseLabelSegmentRows(rawSegments);
+      setSegmentRows(parsedRows.length ? parsedRows : [makeLabelEditorRow()]);
+    }
+
+    function updateSegmentRow(rowId, updates) {
+      setSegmentRows((currentRows) => currentRows.map((segment) => (segment.id === rowId ? { ...segment, ...updates } : segment)));
+    }
+
+    function addSegmentRow() {
+      setSegmentRows((currentRows) => [...currentRows, makeLabelEditorRow()]);
+    }
+
+    function deleteSegmentRow(rowId) {
+      setSegmentRows((currentRows) => {
+        const nextRows = currentRows.filter((segment) => segment.id !== rowId);
+        return nextRows.length ? nextRows : [makeLabelEditorRow()];
+      });
+    }
+
+    function moveSegmentRow(rowId, direction) {
+      setSegmentRows((currentRows) => {
+        const index = currentRows.findIndex((segment) => segment.id === rowId);
+        const nextIndex = index + direction;
+        if (index < 0 || nextIndex < 0 || nextIndex >= currentRows.length) {
+          return currentRows;
+        }
+        const nextRows = currentRows.slice();
+        const [moving] = nextRows.splice(index, 1);
+        nextRows.splice(nextIndex, 0, moving);
+        return nextRows;
+      });
+    }
+
+    function dropSegmentRow(targetRowId) {
+      const draggedRowId = dragRowIdRef.current;
+      if (!draggedRowId || draggedRowId === targetRowId) {
+        return;
+      }
+      setSegmentRows((currentRows) => {
+        const fromIndex = currentRows.findIndex((segment) => segment.id === draggedRowId);
+        const toIndex = currentRows.findIndex((segment) => segment.id === targetRowId);
+        if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+          return currentRows;
+        }
+        const nextRows = currentRows.slice();
+        const [moving] = nextRows.splice(fromIndex, 1);
+        nextRows.splice(toIndex, 0, moving);
+        return nextRows;
+      });
+      dragRowIdRef.current = "";
+    }
+
+    function playSegmentRow(segment) {
+      const audio = audioRef.current;
+      if (!audio || !labelEditorRowIsValid(segment)) {
+        return;
+      }
+      if (stopHandlerRef.current) {
+        audio.removeEventListener("timeupdate", stopHandlerRef.current);
+        stopHandlerRef.current = null;
+      }
+      const start = Number(segment.start);
+      const end = Number(segment.end);
+      try {
+        audio.pause();
+        audio.currentTime = Math.max(start, 0);
+      } catch (_error) {
+        return;
+      }
+      const stopAtEnd = () => {
+        if (audio.currentTime >= end - 0.025) {
+          audio.pause();
+          audio.removeEventListener("timeupdate", stopAtEnd);
+          stopHandlerRef.current = null;
+        }
+      };
+      stopHandlerRef.current = stopAtEnd;
+      audio.addEventListener("timeupdate", stopAtEnd);
+      const playPromise = audio.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
+    }
+
+    function handleSubmit(event) {
+      const submitter = event.nativeEvent?.submitter;
+      const stats = syncTrainingLabelEditorForm(event.currentTarget);
+      if (submitter?.value === "complete" && (stats.validCount === 0 || stats.incompleteCount > 0)) {
+        event.preventDefault();
+        window.alert("Complete labels need at least one valid row, and every filled row needs start, end, and speaker.");
+      }
+    }
+
     return h(
       "form",
       {
         method: "post",
         action: routes.saveTrainingLabel,
+        onSubmit: handleSubmit,
+        "data-form-key": formKey,
+        "data-pause-refresh": "true",
+        "data-replace-submit": "true",
+        "data-training-label-editor": "true",
         "data-loading-message": "Saving training label...",
       },
       h("input", { type: "hidden", name: "audio_file", value: row.name }),
+      h("input", { type: "hidden", id: segmentsId, name: "label_segments", value: serializedSegments, readOnly: true, "data-label-segments-input": "true" }),
       row.systemQuestions?.length
         ? h("div", { className: "callout warm compact-callout" }, h("h2", null, "Questions To Resolve"), h("ul", null, row.systemQuestions.map((question, index) => h("li", { key: index }, question))))
         : null,
       // Audio player lives at the dialog level so it shows for every uploaded
-      // file — even one that has not been diarized yet. The bug it replaces:
+      // file, even one that has not been diarized yet. The bug it replaces:
       // LabelSourcePicker used to host the player and returned null entirely
       // when there were no diarization comparison rows, leaving the user no
       // way to listen to the WAV they were trying to label.
@@ -2296,20 +2679,22 @@
         ? h(
             "div",
             { className: "label-audio" },
-            h("p", { className: "row-note" }, h("strong", null, row.fileName || row.name)),
-            h("audio", { controls: true, preload: "metadata", src: row.audioHref, "aria-label": `Audio preview for ${row.fileName || row.name}` })
+            h("p", { className: "label-audio-caption" }, "Audio sample"),
+            h("h3", { className: "label-audio-title" }, row.fileName || row.name),
+            h("audio", { ref: audioRef, controls: true, preload: "metadata", src: row.audioHref, "aria-label": `Audio preview for ${row.fileName || row.name}` })
           )
         : h(
             "div",
             { className: "label-audio empty-state" },
-            h("strong", null, "Audio file is not on disk."),
-            "The WAV may have been moved or deleted. Re-upload it from the Media Library to label."
+            h("p", { className: "label-audio-caption" }, "Audio sample"),
+            h("h3", { className: "label-audio-title" }, "Audio file is not on disk."),
+            h("p", { className: "row-note" }, "The WAV may have been moved or deleted. Re-upload it from the Media Library to label.")
           ),
       h(LabelSourcePicker, {
         row,
         selectedModelKey,
         onSelectedModelKeyChange: setSelectedModelKey,
-        onUseSegments: setLabelSegments,
+        onUseSegments: replaceSegmentRows,
         onUseTranscript: (value) => setTranscriptText((current) => (current ? `${current}\n\n${value}` : value)),
         pickerId: `label-dialog-${suffix}`,
       }),
@@ -2317,21 +2702,101 @@
         "div",
         { className: "inline" },
         h(Field, { id: backendId, label: "Training backend" }, h(SelectInput, { id: backendId, name: "label_backend", defaultValue: row.backend || "both" }, h(Option, { value: "both" }, "NeMo + pyannote"), h(Option, { value: "nemo" }, "NeMo only"), h(Option, { value: "pyannote" }, "pyannote only"))),
-        h(Field, { id: projectId, label: "Fine-tuning project" }, h("input", { id: projectId, name: "label_project_name", list: "training_label_project_names", defaultValue: row.projectName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training", placeholder: "uploaded-site-training" }))
+        h(Field, { id: projectId, label: "Fine-tuning project" }, h("input", { id: projectId, name: "label_project_name", list: "training_label_project_names", defaultValue: row.projectName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training", placeholder: "uploaded-site-training", required: true }))
       ),
-      h(Field, { id: segmentsId, label: "Speaker-time labels", note: "Use one segment per line as start, end, speaker. Pasted RTTM is also accepted." }, h("textarea", { id: segmentsId, name: "label_segments", value: labelSegments, onChange: (event) => setLabelSegments(event.target.value), placeholder: "0.00 2.40 SPEAKER_00\n2.40 4.10 SPEAKER_01" })),
-      h(Field, { id: transcriptId, label: "Optional transcript or notes" }, h("textarea", { id: transcriptId, name: "label_transcript_text", value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" })),
-      h(Field, { id: questionsId, label: "Questions or issues" , note: "Anything here keeps the item out of completed training until it is answered." }, h("textarea", { id: questionsId, name: "label_issue_questions", value: issueQuestions, onChange: (event) => setIssueQuestions(event.target.value), placeholder: "What needs to be clarified before this can be used for training?" })),
+      h(
+        "section",
+        { className: "label-editor", "aria-labelledby": `${segmentsId}_heading` },
+        h(
+          "div",
+          { className: "label-editor-head" },
+          h("div", null, h("h3", { id: `${segmentsId}_heading` }, "Speaker-Time Labels"), h("p", { className: "row-note" }, `${validSegmentCount} valid row(s), ${incompleteSegmentCount} row(s) need fixes.`)),
+          h("button", { className: "secondary", type: "button", onClick: addSegmentRow }, "Add Label")
+        ),
+        h(
+          "div",
+          { className: "table-scroll label-editor-table-wrap" },
+          h(
+            "table",
+            { className: "label-editor-table" },
+            h("thead", null, h("tr", null, h("th", null, "#"), h("th", null, "Start"), h("th", null, "End"), h("th", null, "Speaker"), h("th", null, "Actions"))),
+            h(
+              "tbody",
+              null,
+              segmentRows.map((segment, index) =>
+                h(
+                  "tr",
+                  {
+                    key: segment.id,
+                    "data-label-editor-row": "true",
+                    "data-label-row-id": segment.id,
+                    className: classNames(labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment) ? "needs-work" : ""),
+                    onDragOver: (event) => event.preventDefault(),
+                    onDrop: (event) => {
+                      event.preventDefault();
+                      dropSegmentRow(segment.id);
+                    },
+                  },
+                  h(
+                    "td",
+                    { className: "label-editor-index" },
+                    h(
+                      "button",
+                      {
+                        className: "ghost label-row-handle",
+                        type: "button",
+                        draggable: true,
+                        title: "Drag to reorder",
+                        "aria-label": `Move label row ${index + 1}`,
+                        onDragStart: () => {
+                          dragRowIdRef.current = segment.id;
+                        },
+                        onDragEnd: () => {
+                          dragRowIdRef.current = "";
+                        },
+                      },
+                      String(index + 1)
+                    )
+                  ),
+                  h("td", null, h("input", { "aria-label": `Start time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) })),
+                  h("td", null, h("input", { "aria-label": `End time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) })),
+                  h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),
+                  h(
+                    "td",
+                    null,
+                    h(
+                      "div",
+                      { className: "label-editor-actions" },
+                      h("button", { className: "secondary", type: "button", onClick: () => playSegmentRow(segment), disabled: !row.audioHref || !labelEditorRowIsValid(segment) }, "Listen"),
+                      h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, -1), disabled: index === 0 }, "Up"),
+                      h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, 1), disabled: index === segmentRows.length - 1 }, "Down"),
+                      h("button", { className: "ghost danger", type: "button", onClick: () => deleteSegmentRow(segment.id) }, "Delete")
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      ),
+      h(
+        "details",
+        { className: "details-box label-optional-details", open: Boolean(transcriptText || issueQuestions) },
+        h("summary", null, "Optional transcript and questions"),
+        h(Field, { id: transcriptId, label: "Transcript export" }, h("textarea", { id: transcriptId, name: "label_transcript_text", value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" })),
+        h(Field, { id: questionsId, label: "Questions or issues", note: "Anything here keeps the item out of completed training until it is answered." }, h("textarea", { id: questionsId, name: "label_issue_questions", value: issueQuestions, onChange: (event) => setIssueQuestions(event.target.value), placeholder: "What needs to be clarified before this can be used for training?" }))
+      ),
       h(
         "div",
         { className: "button-row" },
         h("button", { className: "secondary", type: "submit", name: "label_action", value: "draft" }, "Save For Later"),
-        h("button", { type: "submit", name: "label_action", value: "complete" }, "Mark Complete")
+        h("button", { type: "submit", name: "label_action", value: "complete", disabled: completeDisabled }, "Complete Label"),
+        row.reviewHref ? h("a", { className: "tab-link", href: row.reviewHref }, "Open Review Page") : null
       )
     );
   }
 
-  function TrainingLabelsTable({ rows, preferences, projectNames }) {
+  function TrainingLabelsTable({ rows }) {
     return h(DataTable, {
       className: "training-label-table",
       headers: ["#", "Audio", "Status", "Training Target", "Notes", "Label"],
@@ -2372,8 +2837,8 @@
             "td",
             null,
             row.reviewHref
-              ? h("a", { className: "tab-link", href: row.reviewHref }, row.status === "completed" ? "Edit Label" : "Label")
-              : h("span", { className: "row-note" }, "Run diarization first")
+              ? h("a", { className: "tab-link", href: row.reviewHref }, row.status === "completed" ? "Review Label" : "Inspect")
+              : h("span", { className: "row-note" }, "Run diarization to create a review page")
           )
         );
       },
@@ -2381,7 +2846,6 @@
   }
 
   function TrainingLabelsPage() {
-    const preferences = ctx.preferences || {};
     const labels = ctx.trainingLabels || {};
     const rows = labels.rows || [];
     const summary = labels.summary || {};
@@ -2391,6 +2855,13 @@
     }, [showCompleted]);
     const visibleRows = showCompleted ? rows : rows.filter((row) => row.status !== "completed");
     const projectNames = Array.from(new Set((ctx.projects || []).map((project) => project.slug).filter(Boolean))).sort();
+    const speakerNames = Array.from(
+      new Set(
+        rows
+          .flatMap((row) => parseLabelSegmentRows(row.labelSegments || "").map((segment) => text(segment.speaker).trim()))
+          .filter(Boolean)
+      )
+    ).sort();
     const defaultProjectName = labels.defaultProjectName || "uploaded-site-training";
     const completedCount = Number(summary.completed || 0);
     return h(
@@ -2400,6 +2871,7 @@
         "article",
         { className: "panel" },
         projectNames.length ? h("datalist", { id: "training_label_project_names" }, projectNames.map((name) => h("option", { key: name, value: name }))) : null,
+        speakerNames.length ? h("datalist", { id: "training_label_speaker_names" }, speakerNames.map((name) => h("option", { key: name, value: name }))) : null,
         h(
           "div",
           { className: "panel-head" },
@@ -2430,7 +2902,7 @@
             "div",
             null,
             h("h2", null, "Uploaded Material To Label"),
-            h("p", null, "Open Label to review diarization outputs and save training labels in one place.")
+            h("p", null, "Open Inspect to label from the review page with audio playback, timing rows, and fine-tuning save actions.")
           ),
           h(
             "div",
@@ -2443,7 +2915,7 @@
             )
           )
         ),
-        h(TrainingLabelsTable, { rows: visibleRows, preferences, projectNames })
+        h(TrainingLabelsTable, { rows: visibleRows })
       )
     );
   }
@@ -2803,14 +3275,20 @@
     return box.getAttribute("data-ready") || "yes";
   }
 
+  function formIdentityForControl(node) {
+    const form = node.form || node.closest("form");
+    return text(form?.getAttribute("data-form-key") || form?.id || form?.getAttribute("action") || "", "").trim();
+  }
+
   function formControlKey(node) {
+    const formKey = formIdentityForControl(node);
     if (node.id) {
-      return `id:${node.id}`;
+      return `${formKey}:id:${node.id}`;
     }
     if (node instanceof HTMLInputElement) {
       const checkGroup = node.getAttribute("data-check-group");
       if (checkGroup) {
-        return `check:${checkGroup}:${node.value}`;
+        return `${formKey}:check:${checkGroup}:${node.value}`;
       }
     }
     const name = text(node.getAttribute("name") || "", "").trim();
@@ -2818,9 +3296,9 @@
       return "";
     }
     if (node instanceof HTMLInputElement && (node.type === "checkbox" || node.type === "radio")) {
-      return `choice:${name}:${node.value}`;
+      return `${formKey}:choice:${name}:${node.value}`;
     }
-    return `name:${name}`;
+    return `${formKey}:name:${name}`;
   }
 
   function snapshotFormState() {
@@ -2899,12 +3377,13 @@
       return;
     }
     const files = Array.from(input.files || []);
+    const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
     if (files.length === 0) {
       summary.textContent = "No file selected yet.";
     } else if (files.length === 1) {
-      summary.textContent = `Loaded: ${files[0].name}`;
+      summary.textContent = `Loaded: ${files[0].name} (${formatBytes(totalBytes)})`;
     } else {
-      summary.textContent = `Loaded ${files.length} files. First file: ${files[0].name}`;
+      summary.textContent = `Loaded ${files.length} files (${formatBytes(totalBytes)} total). First file: ${files[0].name}`;
     }
   }
 
@@ -2934,6 +3413,193 @@
       textNode.textContent = message || "Submitting request...";
     }
     visual.hidden = false;
+  }
+
+  function uploadProgressNodes(form) {
+    const progressId = form?.getAttribute("data-upload-progress") || "";
+    const tracker = progressId ? document.getElementById(progressId) : null;
+    return {
+      tracker,
+      bar: tracker?.querySelector("[data-upload-progress-bar]") || null,
+      status: tracker?.querySelector("[data-upload-progress-status]") || null,
+      percent: tracker?.querySelector("[data-upload-progress-percent]") || null,
+      meta: tracker?.querySelector("[data-upload-progress-meta]") || null,
+    };
+  }
+
+  function setUploadProgress(form, { loaded = 0, total = 0, status = "", meta = "", percent = null } = {}) {
+    const nodes = uploadProgressNodes(form);
+    if (!nodes.tracker) {
+      return;
+    }
+    nodes.tracker.hidden = false;
+    const safeTotal = Math.max(Number(total) || 0, 0);
+    const safeLoaded = Math.max(Number(loaded) || 0, 0);
+    const computedPercent = percent === null && safeTotal > 0 ? Math.min(100, Math.max(0, (safeLoaded / safeTotal) * 100)) : percent;
+    if (nodes.status) {
+      nodes.status.textContent = status || "Uploading media files";
+    }
+    if (nodes.meta) {
+      nodes.meta.textContent = meta || "Estimating time remaining...";
+    }
+    if (nodes.percent) {
+      nodes.percent.textContent = computedPercent === null ? "Estimating" : `${formatNumber(computedPercent, 0)}%`;
+    }
+    if (nodes.bar instanceof HTMLProgressElement) {
+      nodes.bar.max = 100;
+      if (computedPercent === null) {
+        nodes.bar.removeAttribute("value");
+      } else {
+        nodes.bar.value = Math.min(100, Math.max(0, computedPercent));
+      }
+    }
+  }
+
+  function selectedUploadFiles(form) {
+    return Array.from(form.querySelectorAll("input[type='file']"))
+      .filter((input) => input instanceof HTMLInputElement && !input.disabled)
+      .flatMap((input) => Array.from(input.files || []));
+  }
+
+  function resetSubmittingForm(form) {
+    if (!form) {
+      return;
+    }
+    form.dataset.submitting = "";
+    form.removeAttribute("aria-busy");
+    form.querySelectorAll("button[type='submit'], input[type='submit']").forEach((button) => {
+      if (button instanceof HTMLButtonElement || button instanceof HTMLInputElement) {
+        button.disabled = false;
+      }
+    });
+  }
+
+  function submitFormWithUploadProgress(form, submitter) {
+    if (!form || typeof XMLHttpRequest === "undefined") {
+      return Promise.reject(new Error("Upload progress is unavailable."));
+    }
+    const method = text(form.method || "post", "post").toUpperCase();
+    if (method === "GET") {
+      return Promise.reject(new Error("Upload progress requires a POST form."));
+    }
+    const action = form.action || window.location.href;
+    const formData = new FormData(form);
+    if (submitter && submitter.name) {
+      formData.set(submitter.name, submitter.value || "");
+    }
+    const files = selectedUploadFiles(form);
+    const totalSelectedBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    const startedAt = Date.now();
+    let processingTimer = null;
+    setUploadProgress(form, {
+      loaded: 0,
+      total: totalSelectedBytes,
+      status: `Preparing ${files.length || "selected"} file(s)`,
+      meta: totalSelectedBytes ? `${formatBytes(totalSelectedBytes)} selected.` : "Waiting for the browser to report upload size.",
+      percent: totalSelectedBytes ? 0 : null,
+    });
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const clearProcessingTimer = () => {
+        if (processingTimer) {
+          window.clearInterval(processingTimer);
+          processingTimer = null;
+        }
+      };
+      const rejectOnce = (error) => {
+        clearProcessingTimer();
+        reject(error);
+      };
+      xhr.open(method, action, true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Accept", "text/html,*/*");
+      xhr.upload.addEventListener("progress", (event) => {
+        const elapsedSeconds = Math.max((Date.now() - startedAt) / 1000, 0.001);
+        const speed = event.loaded / elapsedSeconds;
+        if (event.lengthComputable) {
+          const remainingSeconds = speed > 0 ? Math.max((event.total - event.loaded) / speed, 0) : 0;
+          setUploadProgress(form, {
+            loaded: event.loaded,
+            total: event.total,
+            status: `Uploading ${formatBytes(event.loaded)} of ${formatBytes(event.total)}`,
+            meta: speed > 0 ? `${formatBytes(speed)}/s - about ${formatDuration(remainingSeconds)} remaining` : "Estimating time remaining...",
+          });
+        } else {
+          setUploadProgress(form, {
+            loaded: event.loaded,
+            total: totalSelectedBytes,
+            status: `Uploading ${formatBytes(event.loaded)}`,
+            meta: "The browser has not reported the final upload size yet.",
+            percent: null,
+          });
+        }
+      });
+      xhr.upload.addEventListener("load", () => {
+        const processingStartedAt = Date.now();
+        setUploadProgress(form, {
+          loaded: totalSelectedBytes,
+          total: totalSelectedBytes || 1,
+          status: "Upload received. Converting files...",
+          meta: "The server is converting accepted media to WAV and refreshing the library.",
+          percent: 100,
+        });
+        processingTimer = window.setInterval(() => {
+          setUploadProgress(form, {
+            loaded: totalSelectedBytes,
+            total: totalSelectedBytes || 1,
+            status: "Upload received. Converting files...",
+            meta: `Server processing for ${formatDuration((Date.now() - processingStartedAt) / 1000)}.`,
+            percent: 100,
+          });
+        }, 1000);
+      });
+      xhr.addEventListener("load", () => {
+        clearProcessingTimer();
+        if (xhr.status >= 200 && xhr.status < 400) {
+          setUploadProgress(form, {
+            loaded: totalSelectedBytes,
+            total: totalSelectedBytes || 1,
+            status: "Upload complete. Refreshing Media Library...",
+            meta: "Loading the updated tracker.",
+            percent: 100,
+          });
+          window.location.replace(xhr.responseURL || action);
+          resolve();
+          return;
+        }
+        reject(new Error(`Upload failed with ${xhr.status}`));
+      });
+      xhr.addEventListener("error", () => rejectOnce(new Error("Upload failed before the server responded.")));
+      xhr.addEventListener("abort", () => rejectOnce(new Error("Upload was canceled.")));
+      xhr.send(formData);
+    });
+  }
+
+  function submitFormWithHistoryReplace(form, submitter) {
+    if (!form || typeof window.fetch !== "function") {
+      return Promise.reject(new Error("Fetch submit is unavailable."));
+    }
+    const method = text(form.method || "post", "post").toUpperCase();
+    const action = form.action || window.location.href;
+    const formData = new FormData(form);
+    if (submitter && submitter.name) {
+      formData.set(submitter.name, submitter.value || "");
+    }
+    return window
+      .fetch(action, {
+        method,
+        body: method === "GET" ? null : formData,
+        credentials: "same-origin",
+        redirect: "follow",
+        headers: { Accept: "text/html,*/*" },
+      })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Form submit failed with ${response.status}`);
+        }
+        window.location.replace(response.url || action);
+      });
   }
 
   function postRenderSync() {
@@ -2973,6 +3639,10 @@
         // Ignore unsupported or disconnected dialogs during a refresh cycle.
       }
     });
+  }
+
+  function hasRefreshBlockingForm() {
+    return Boolean(document.querySelector("dialog[open] form[data-pause-refresh='true']"));
   }
 
   function currentRefreshInterval() {
@@ -3126,6 +3796,10 @@
       scheduleTrackingPoll(currentIdleRefreshInterval());
       return;
     }
+    if (hasRefreshBlockingForm()) {
+      scheduleTrackingPoll(currentIdleRefreshInterval());
+      return;
+    }
     if (!routes.tracking || typeof window.fetch !== "function") {
       scheduleTrackingPoll();
       return;
@@ -3207,29 +3881,51 @@
       }
 
       function handleSubmit(event) {
-        if (!(event.target instanceof HTMLFormElement)) {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) {
           return;
         }
         if (event.defaultPrevented) {
           return;
         }
-        if (event.target.dataset.submitting === "true") {
+        if (form.hasAttribute("data-training-label-editor")) {
+          syncTrainingLabelEditorForm(form);
+        }
+        if (form.dataset.submitting === "true") {
           event.preventDefault();
           return;
         }
-        event.target.dataset.submitting = "true";
-        event.target.setAttribute("aria-busy", "true");
+        form.dataset.submitting = "true";
+        form.setAttribute("aria-busy", "true");
         const submitter = event.submitter instanceof HTMLElement ? event.submitter : null;
         const message =
           submitter?.getAttribute("data-loading-message") ||
-          event.target.getAttribute("data-loading-message") ||
+          form.getAttribute("data-loading-message") ||
           "Submitting request...";
         showLoadingVisual(message);
+        if (form.hasAttribute("data-upload-progress") && typeof XMLHttpRequest !== "undefined") {
+          event.preventDefault();
+          submitFormWithUploadProgress(form, submitter).catch((error) => {
+            resetSubmittingForm(form);
+            setUploadProgress(form, {
+              status: "Upload failed.",
+              meta: error?.message || "Check the server and try again.",
+              percent: 0,
+            });
+            window.alert("The upload could not be completed. Check the server and try again.");
+          });
+        } else if (form.getAttribute("data-replace-submit") === "true" && typeof window.fetch === "function") {
+          event.preventDefault();
+          submitFormWithHistoryReplace(form, submitter).catch(() => {
+            resetSubmittingForm(form);
+            window.alert("The form could not be submitted. Check the server and try again.");
+          });
+        }
         window.setTimeout(() => {
-          if (event.target.dataset.submitting !== "true") {
+          if (form.dataset.submitting !== "true") {
             return;
           }
-          event.target.querySelectorAll("button[type='submit'], input[type='submit']").forEach((button) => {
+          form.querySelectorAll("button[type='submit'], input[type='submit']").forEach((button) => {
             if (button instanceof HTMLButtonElement || button instanceof HTMLInputElement) {
               button.disabled = true;
             }
