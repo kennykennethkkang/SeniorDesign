@@ -32,25 +32,94 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
-def slurm_job_state(job_id: str) -> str:
+def slurm_job_state(job_id: str, *, include_accounting: bool = True) -> str:
     """Return the current Slurm state for a submitted job when available."""
 
-    if not job_id or not shutil.which("squeue"):
+    normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
+    if not normalized_job_id:
         return ""
+    if shutil.which("squeue"):
+        try:
+            completed = subprocess.run(
+                ["squeue", "-h", "-j", normalized_job_id, "-o", "%T"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            states = [line.strip().lower() for line in completed.stdout.splitlines() if line.strip()]
+            if states:
+                return states[0]
+    if not include_accounting:
+        return ""
+    accounting = slurm_accounting_snapshot(normalized_job_id)
+    return str(accounting.get("state") or "").lower()
+
+
+def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:
+    """Return final Slurm accounting details for a job when sacct is available."""
+
+    normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
+    if not normalized_job_id or not shutil.which("sacct"):
+        return {}
+    fields = [
+        "JobIDRaw",
+        "State",
+        "ExitCode",
+        "Elapsed",
+        "Timelimit",
+        "Submit",
+        "Start",
+        "End",
+        "NodeList",
+        "NNodes",
+        "NCPUS",
+        "Partition",
+        "JobName",
+    ]
     try:
         completed = subprocess.run(
-            ["squeue", "-h", "-j", str(job_id), "-o", "%T"],
+            ["sacct", "-n", "-P", "-j", normalized_job_id, f"--format={','.join(fields)}"],
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=3,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return ""
+        return {}
     if completed.returncode != 0:
-        return ""
-    states = [line.strip().lower() for line in completed.stdout.splitlines() if line.strip()]
-    return states[0] if states else ""
+        return {}
+    for raw in completed.stdout.splitlines():
+        parts = [part.strip() for part in raw.split("|")]
+        if len(parts) < len(fields):
+            continue
+        record = dict(zip(fields, parts))
+        row_job_id = record.get("JobIDRaw", "").split(".", 1)[0]
+        if row_job_id != normalized_job_id:
+            continue
+        state = record.get("State", "")
+        return {
+            "job_id": normalized_job_id,
+            "available": True,
+            "state": state,
+            "state_source": "sacct",
+            "exit_code": record.get("ExitCode", ""),
+            "time_used": record.get("Elapsed", ""),
+            "time_limit": record.get("Timelimit", ""),
+            "submitted_at": record.get("Submit", ""),
+            "started_at": record.get("Start", ""),
+            "ended_at": record.get("End", ""),
+            "nodes": record.get("NodeList", ""),
+            "node_count": record.get("NNodes", ""),
+            "cpus": record.get("NCPUS", ""),
+            "partition": record.get("Partition", ""),
+            "name": record.get("JobName", ""),
+            "message": f"sacct reports {state}." if state else "Job has left squeue.",
+        }
+    return {}
 
 
 def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
@@ -67,7 +136,7 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
         }
     try:
         completed = subprocess.run(
-            ["squeue", "-h", "-t", "PD,R,CG", "-o", "%i|%T|%R|%S"],
+            ["squeue", "-h", "-t", "PD,R,CG", "-o", "%i|%T|%R|%S|%P|%j|%u|%M|%L|%D|%C|%b"],
             check=False,
             capture_output=True,
             text=True,
@@ -87,40 +156,78 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
         }
 
     pending_position = 0
-    jobs_ahead = 0
+    pending_by_partition: dict[str, int] = {}
     for line in completed.stdout.splitlines():
-        parts = line.split("|", 3)
+        parts = [part.strip() for part in line.split("|")]
         if len(parts) < 4:
             continue
-        row_job_id, state, reason, start_time = [part.strip() for part in parts]
+        row_job_id = parts[0]
+        state = parts[1]
+        reason = parts[2]
+        start_time = parts[3]
+        partition = parts[4] if len(parts) > 4 else ""
+        name = parts[5] if len(parts) > 5 else ""
+        user = parts[6] if len(parts) > 6 else ""
+        time_used = parts[7] if len(parts) > 7 else ""
+        time_left = parts[8] if len(parts) > 8 else ""
+        nodes = parts[9] if len(parts) > 9 else ""
+        cpus = parts[10] if len(parts) > 10 else ""
+        gres = parts[11] if len(parts) > 11 else ""
         base_row_job_id = row_job_id.split(".", 1)[0]
         state_key = state.lower()
         if state_key in {"pending", "pd"}:
             pending_position += 1
+            pending_by_partition[partition] = pending_by_partition.get(partition, 0) + 1
         if base_row_job_id != normalized_job_id:
-            if state_key in {"pending", "pd"}:
-                jobs_ahead += 1
             continue
-        if state_key in {"running", "r", "completing", "cg"}:
-            return {
-                "job_id": normalized_job_id,
-                "available": True,
-                "state": state,
-                "queue_position": 0,
-                "jobs_ahead": 0,
-                "reason": reason,
-                "estimated_start": start_time,
-                "message": "Running now.",
-            }
-        return {
+        details = {
             "job_id": normalized_job_id,
             "available": True,
             "state": state,
-            "queue_position": pending_position,
-            "jobs_ahead": max(jobs_ahead, 0),
             "reason": reason,
             "estimated_start": start_time,
+            "partition": partition,
+            "name": name,
+            "user": user,
+            "time_used": time_used,
+            "time_left": time_left,
+            "nodes": nodes,
+            "cpus": cpus,
+            "gres": gres,
+            "fetched_at_utc": utc_now_iso(),
+            "state_source": "squeue",
+        }
+        if state_key in {"running", "r", "completing", "cg"}:
+            return {
+                **details,
+                "queue_position": 0,
+                "jobs_ahead": 0,
+                "jobs_ahead_same_partition": 0,
+                "queue_position_same_partition": 0,
+                "message": "Running now.",
+            }
+        same_partition_position = pending_by_partition.get(partition, pending_position)
+        return {
+            **details,
+            "queue_position": pending_position,
+            "jobs_ahead": max(pending_position - 1, 0),
+            "jobs_ahead_same_partition": max(same_partition_position - 1, 0),
+            "queue_position_same_partition": same_partition_position,
             "message": f"Pending position {pending_position}.",
+        }
+
+    accounting = slurm_accounting_snapshot(normalized_job_id)
+    if accounting:
+        return {
+            **accounting,
+            "queue_position": None,
+            "jobs_ahead": None,
+            "jobs_ahead_same_partition": None,
+            "queue_position_same_partition": None,
+            "reason": "",
+            "estimated_start": accounting.get("started_at", ""),
+            "fetched_at_utc": utc_now_iso(),
+            "message": f"Job left squeue; {accounting.get('message')}",
         }
 
     return {
@@ -129,8 +236,12 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
         "state": "not in queue",
         "queue_position": None,
         "jobs_ahead": None,
+        "jobs_ahead_same_partition": None,
+        "queue_position_same_partition": None,
         "reason": "",
         "estimated_start": "",
+        "fetched_at_utc": utc_now_iso(),
+        "state_source": "squeue",
         "message": "Job is not in squeue. It may have finished or left the queue.",
     }
 
@@ -150,10 +261,31 @@ def run_status(run_dir: Path) -> str:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         slurm_job_id = str(metadata.get("slurm_job_id") or "").strip()
         if slurm_job_id:
-            state = slurm_job_state(slurm_job_id)
+            include_accounting = (
+                str(metadata.get("runner") or "") == "slurm"
+                or str(metadata.get("submission_status") or "") == "submitted"
+                or bool(metadata.get("started_at_utc"))
+            )
+            state = slurm_job_state(slurm_job_id, include_accounting=include_accounting)
             if state:
                 if state in {"running", "completing"}:
                     return "running"
+                if state in {"completed"}:
+                    return "succeeded"
+                if any(
+                    state.startswith(prefix)
+                    for prefix in (
+                        "failed",
+                        "cancelled",
+                        "timeout",
+                        "out_of_memory",
+                        "node_fail",
+                        "preempted",
+                        "boot_fail",
+                        "deadline",
+                    )
+                ):
+                    return "failed"
                 return "submitted"
             return "submitted"
         if process_is_running(int(metadata.get("pid", 0))):
