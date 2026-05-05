@@ -73,7 +73,7 @@ def page_state(body: bytes) -> dict:
 
 
 def multipart_body(fields, files):
-    boundary = "----CodexBoundary"
+    boundary = "----DashboardTestBoundary"
     chunks = []
     for name, value in fields.items():
         chunks.extend(
