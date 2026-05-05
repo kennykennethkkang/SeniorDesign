@@ -282,11 +282,18 @@ class DiarizationMixin:
                     if not experiment_dir.is_dir():
                         continue
                     version_name = str(run.get("version_name") or experiment_dir.name)
+                    # Prefer the user's display rename; fall back to version_name
+                    # so legacy runs that haven't been renamed still get a label.
+                    display_label = str(run.get("display_name") or "").strip() or version_name
                     version_slug = str(run.get("version_slug") or slugify(version_name))
                     version_options_added = append_option(
                         key_suffix=version_slug,
-                        display_name=version_name,
-                        description=f"Reusable fine-tuning artifact from version {version_name}.",
+                        display_name=display_label,
+                        description=(
+                            f"Fine-tuned model {display_label} (v: {version_name})."
+                            if display_label != version_name
+                            else f"Reusable fine-tuning artifact from version {version_name}."
+                        ),
                         artifact_root=experiment_dir,
                     ) or version_options_added
                 if version_options_added:
