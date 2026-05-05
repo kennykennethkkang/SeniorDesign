@@ -582,12 +582,17 @@ class RenderingMixin:
             for run in (project.get("recent_runs") or [])[:5]:
                 if not isinstance(run, dict):
                     continue
+                version_name = str(run.get("version_name") or Path(str(run.get("run_dir", ""))).name)
+                # display_name was set by list_runs; fall back to version_name
+                # so a renamed run shows the friendly label here too.
                 recent_runs.append(
                     {
                         "status": str(run.get("status", "unknown")),
-                        "versionName": str(run.get("version_name") or Path(str(run.get("run_dir", ""))).name),
+                        "versionName": version_name,
+                        "displayName": str(run.get("display_name") or "").strip() or version_name,
                         "versionNumber": run.get("version_number", ""),
                         "runName": Path(str(run.get("run_dir", ""))).name,
+                        "runDir": str(run.get("run_dir", "")),
                         "startedAt": str(run.get("started_at_utc") or ""),
                     }
                 )
@@ -595,6 +600,10 @@ class RenderingMixin:
                 {
                     "backend": str(project.get("backend", "")),
                     "slug": str(project.get("slug", "")),
+                    # Friendly display name from display.json sidecar; falls back
+                    # to the slug so legacy projects without a rename still show
+                    # something readable.
+                    "displayName": str(project.get("display_name") or "").strip() or str(project.get("slug", "")),
                     "sampleCount": sample_count,
                     "prepared": bool(project.get("prepared")),
                     "latestRunText": latest_run_text,
@@ -850,6 +859,9 @@ class RenderingMixin:
                 "fineTuneUpload": self.frontend_route("/fine-tuning/upload-sample", script_name),
                 "fineTunePrepare": self.frontend_route("/fine-tuning/prepare", script_name),
                 "fineTuneLaunch": self.frontend_route("/fine-tuning/launch", script_name),
+                "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
+                "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),
+                "fineTuneScoreRun": self.frontend_route("/api/fine-tuning/score-run", script_name),
             },
             "assets": {
                 "styles": self.frontend_asset("static/css/dashboard.css", script_name),

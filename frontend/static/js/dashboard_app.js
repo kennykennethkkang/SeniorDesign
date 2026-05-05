@@ -130,6 +130,58 @@
     return Array.from(arguments).filter(Boolean).join(" ");
   }
 
+  // Tiny helper so rename buttons across the app can fire a single hidden
+  // POST without each caller re-implementing the same plumbing. The dashboard
+  // is happy with full-page redirects after the post, so we just submit a
+  // throwaway form rather than wiring a fetch + reload dance.
+  function submitHiddenForm(action, fields) {
+    if (!action) {
+      return;
+    }
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = action;
+    Object.entries(fields || {}).forEach(([name, value]) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value == null ? "" : String(value);
+      form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  function promptRenameProject(project) {
+    if (!project || !project.slug) return;
+    const current = project.displayName || project.slug;
+    // window.prompt is plain but it's exactly the right amount of UI for a
+    // senior-project tool — no modal library, no drama. Cancelled or empty
+    // input means leave the name alone.
+    const next = window.prompt(`Rename project "${current}"`, current);
+    if (next === null) return;
+    const cleaned = String(next).trim();
+    if (!cleaned || cleaned === current) return;
+    submitHiddenForm(routes.fineTuneRenameProject, {
+      project_slug: project.slug,
+      backend: project.backend,
+      display_name: cleaned,
+    });
+  }
+
+  function promptRenameRun(run) {
+    if (!run || !run.runDir) return;
+    const current = run.displayName || run.versionName || run.runName || "this run";
+    const next = window.prompt(`Rename run "${current}"`, current);
+    if (next === null) return;
+    const cleaned = String(next).trim();
+    if (!cleaned || cleaned === current) return;
+    submitHiddenForm(routes.fineTuneRenameRun, {
+      run_dir: run.runDir,
+      display_name: cleaned,
+    });
+  }
+
   function StatusPill({ status }) {
     const normalized = text(status || "unknown").toLowerCase().replace(/[_\s]+/g, "-");
     return h("span", { className: `status-pill ${normalized}` }, text(status || "unknown").replace(/_/g, " "));
@@ -3070,10 +3122,36 @@
       ["Prepared", project.prepared ? "yes" : "no"],
       ["Latest run", project.latestRunText],
     ];
+    // The card title is the friendly name the user picked (or the slug
+    // by default). The slug stays visible underneath because it's the
+    // persistent ID — runs and label_status entries reference it.
+    const displayName = project.displayName || project.slug;
+    const showSlugSubtitle = displayName !== project.slug;
     return h(
       "article",
       { className: "project-card" },
-      h("h3", null, `${backendDisplayName(project.backend)} / ${project.slug}`),
+      h(
+        "div",
+        { className: "panel-head compact-head" },
+        h(
+          "div",
+          null,
+          h("h3", null, `${backendDisplayName(project.backend)} / ${displayName}`),
+          showSlugSubtitle
+            ? h("p", { className: "row-note" }, `Slug: ${project.slug} (used by runs and label files)`)
+            : null
+        ),
+        h(
+          "button",
+          {
+            className: "ghost",
+            type: "button",
+            title: "Give this project a friendlier name. The on-disk slug stays the same so labels and runs keep referring to it.",
+            onClick: () => promptRenameProject(project),
+          },
+          "Rename"
+        )
+      ),
       h(
         "div",
         { className: "project-metrics" },
@@ -3098,7 +3176,34 @@
             )
           ),
           project.recentRuns?.length
-            ? h("ul", { className: "compact-list" }, project.recentRuns.map((run) => h("li", { key: run.runName }, `${run.versionName}: ${run.status}`)))
+            ? h(
+                "ul",
+                { className: "compact-list" },
+                project.recentRuns.map((run) =>
+                  h(
+                    "li",
+                    { key: run.runName },
+                    h("strong", null, run.displayName || run.versionName),
+                    `: ${run.status}`,
+                    run.displayName && run.versionName && run.displayName !== run.versionName
+                      ? h("span", { className: "row-note" }, ` (v: ${run.versionName})`)
+                      : null,
+                    run.runDir
+                      ? h(
+                          "button",
+                          {
+                            className: "ghost",
+                            type: "button",
+                            style: { marginLeft: "8px" },
+                            onClick: () => promptRenameRun(run),
+                            title: "Give this training run a friendlier name. Useful when you've got several versions and need to remember which one was the best.",
+                          },
+                          "Rename"
+                        )
+                      : null
+                  )
+                )
+              )
             : h("p", { className: "row-note" }, "No training runs yet."),
           project.warnings?.length ? h("ul", null, project.warnings.map((warning, index) => h("li", { key: index }, warning))) : h("p", { className: "row-note" }, "No preparation warnings.")
         )
@@ -3123,7 +3228,58 @@
       baselineDer: "",
       tunedDer: "",
     }));
+    // The score-against-labels block lets you point at a reference RTTM
+    // (the labeled ground truth) and a hypothesis RTTM (the model output)
+    // and have the four DER inputs filled in for you. Way faster than
+    // typing them in by hand once you've got a real run to compare.
+    const [scoring, setScoring] = React.useState({
+      referencePath: "",
+      hypothesisPath: "",
+      status: "idle", // idle | loading | error | success
+      error: "",
+      lastResult: null,
+    });
     const updateValue = (key) => (event) => setValues((current) => ({ ...current, [key]: event.target.value }));
+    const updateScoringValue = (key) => (event) => setScoring((current) => ({ ...current, [key]: event.target.value }));
+    const runScoring = React.useCallback(() => {
+      const reference = scoring.referencePath.trim();
+      const hypothesis = scoring.hypothesisPath.trim();
+      if (!reference || !hypothesis) {
+        setScoring((current) => ({ ...current, status: "error", error: "Need both a reference and a hypothesis RTTM path." }));
+        return;
+      }
+      const url = routes.fineTuneScoreRun;
+      if (!url) {
+        setScoring((current) => ({ ...current, status: "error", error: "Score endpoint isn't configured for this build." }));
+        return;
+      }
+      setScoring((current) => ({ ...current, status: "loading", error: "" }));
+      const params = new URLSearchParams({ reference, hypothesis });
+      window
+        .fetch(`${url}?${params.toString()}`, { cache: "no-store", headers: { Accept: "application/json" } })
+        .then((response) => response.json().then((payload) => ({ ok: response.ok, payload })))
+        .then(({ ok, payload }) => {
+          if (!ok) {
+            const message = payload && payload.error ? payload.error : "Score request failed.";
+            setScoring((current) => ({ ...current, status: "error", error: message }));
+            return;
+          }
+          // Auto-fill the four manual inputs below so the rest of the
+          // calculator (baseline vs fine-tuned comparison, etc.) just works
+          // off a real run instead of hand-typed numbers.
+          setValues((current) => ({
+            ...current,
+            referenceSpeech: String(payload.reference_speech_seconds ?? ""),
+            missedSpeech: String(payload.miss_seconds ?? ""),
+            falseAlarm: String(payload.false_alarm_seconds ?? ""),
+            speakerConfusion: String(payload.confusion_seconds ?? ""),
+          }));
+          setScoring((current) => ({ ...current, status: "success", error: "", lastResult: payload }));
+        })
+        .catch((err) => {
+          setScoring((current) => ({ ...current, status: "error", error: String((err && err.message) || err) }));
+        });
+    }, [scoring.referencePath, scoring.hypothesisPath]);
     const referenceSpeech = numericValue(values.referenceSpeech);
     const missedSpeech = numericValue(values.missedSpeech);
     const falseAlarm = numericValue(values.falseAlarm);
@@ -3146,7 +3302,59 @@
         h(SummaryCard, { title: "Labeled Speech" }, h("p", null, h("strong", null, formatDuration(summary.total_speech_seconds || 0))), h("p", { className: "row-note" }, `${summary.total_samples || 0} sample(s), ${summary.total_segments || 0} segment(s)`)),
         h(SummaryCard, { title: "Speaker Labels" }, h("p", null, h("strong", null, summary.unique_speaker_labels || 0)), h("p", { className: "row-note" }, `${formatPercent((summary.speech_coverage || 0) * 100)} speech coverage across labeled audio.`)),
         h(SummaryCard, { title: "Overlap" }, h("p", null, h("strong", null, formatDuration(summary.total_overlap_seconds || 0))), h("p", { className: "row-note" }, `${formatPercent((summary.overlap_coverage || 0) * 100)} of active speech, ${summary.max_concurrent_speakers || 0} max concurrent speaker(s).`)),
-        h(SummaryCard, { title: "Largest Project" }, h("p", null, h("strong", null, bestProject ? `${backendDisplayName(bestProject.backend)} / ${bestProject.slug}` : "none")), h("p", { className: "row-note" }, bestProject ? formatDuration(bestProject.metrics?.totalSpeechSeconds || 0) : "No project samples yet."))
+        h(SummaryCard, { title: "Largest Project" }, h("p", null, h("strong", null, bestProject ? `${backendDisplayName(bestProject.backend)} / ${bestProject.displayName || bestProject.slug}` : "none")), h("p", { className: "row-note" }, bestProject ? formatDuration(bestProject.metrics?.totalSpeechSeconds || 0) : "No project samples yet."))
+      ),
+      h(
+        "section",
+        { className: "subpanel", style: { marginBottom: "16px" } },
+        h("h3", null, "Score a model against your labels"),
+        h(
+          "p",
+          { className: "row-note" },
+          "Paste two RTTM paths from this project — the reference (your hand-labeled ground truth) and the hypothesis (whatever a diarization run produced). I'll compute DER, JER, and the miss / false-alarm / confusion split, then drop them into the inputs below."
+        ),
+        h(Field, { id: "score_reference_rttm", label: "Reference RTTM (labels)" },
+          h("input", {
+            id: "score_reference_rttm",
+            type: "text",
+            placeholder: "fine_tuning/projects/nemo/<project>/rttm/<clip>.rttm",
+            value: scoring.referencePath,
+            onChange: updateScoringValue("referencePath"),
+          })
+        ),
+        h(Field, { id: "score_hypothesis_rttm", label: "Hypothesis RTTM (model output)" },
+          h("input", {
+            id: "score_hypothesis_rttm",
+            type: "text",
+            placeholder: "outputs/diarization_runs/<run>/<clip>.rttm",
+            value: scoring.hypothesisPath,
+            onChange: updateScoringValue("hypothesisPath"),
+          })
+        ),
+        h(
+          "div",
+          { className: "button-row" },
+          h(
+            "button",
+            { type: "button", onClick: runScoring, disabled: scoring.status === "loading" },
+            scoring.status === "loading" ? "Scoring..." : "Score now"
+          )
+        ),
+        scoring.status === "error"
+          ? h("p", { className: "field-error" }, scoring.error || "Something went wrong.")
+          : null,
+        scoring.status === "success" && scoring.lastResult
+          ? h(
+              "div",
+              { className: "row-note", style: { marginTop: "8px" } },
+              h("p", null,
+                h("strong", null, `DER: ${formatPercent(scoring.lastResult.der * 100, 2)}`),
+                ` · JER ${formatPercent(scoring.lastResult.jer * 100, 2)}`,
+                ` · ref ${formatNumber(scoring.lastResult.reference_speaker_count, 0)} speakers, hyp ${formatNumber(scoring.lastResult.hypothesis_speaker_count, 0)}.`
+              ),
+              h("p", null, `Filled in below: missed ${formatNumber(scoring.lastResult.miss_seconds, 2)}s · false alarm ${formatNumber(scoring.lastResult.false_alarm_seconds, 2)}s · confusion ${formatNumber(scoring.lastResult.confusion_seconds, 2)}s.`)
+            )
+          : null
       ),
       h(
         "div",
