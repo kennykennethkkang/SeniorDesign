@@ -173,6 +173,88 @@ def normalize_backend(backend: str | None) -> str:
     return normalized
 
 
+# Friendly display names for projects and runs live in a sidecar display.json
+# next to the (regenerated-on-prepare) metadata.json. Keeping it separate means
+# prepare_project can wipe metadata.json without losing the user's chosen label.
+def _read_display_sidecar(path: Path) -> dict[str, object]:
+    """Return parsed display.json, or {} if missing/corrupt."""
+
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_display_sidecar(path: Path, *, updates: dict[str, object]) -> dict[str, object]:
+    """Merge ``updates`` into the display.json at ``path`` and return the result."""
+
+    payload = _read_display_sidecar(path)
+    payload.update(updates)
+    payload = {k: v for k, v in payload.items() if v not in ("", None)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return payload
+
+
+def project_display_path(
+    project_name: str,
+    *,
+    backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    root: Path = PROJECT_ROOT,
+) -> Path:
+    """Return the path to the display sidecar for a project."""
+
+    return project_dir(project_name, backend=backend, root=root) / "display.json"
+
+
+def read_project_display(
+    project_name: str,
+    *,
+    backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    root: Path = PROJECT_ROOT,
+) -> dict[str, object]:
+    """Read the display sidecar for a project (e.g. its renamed display label)."""
+
+    return _read_display_sidecar(project_display_path(project_name, backend=backend, root=root))
+
+
+def set_project_display_name(
+    project_name: str,
+    *,
+    backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    display_name: str,
+    root: Path = PROJECT_ROOT,
+) -> dict[str, object]:
+    """Rename a project for display purposes (the slug/dir stays put)."""
+
+    cleaned = (display_name or "").strip()
+    if not cleaned:
+        raise ValueError("display_name must be a non-empty string.")
+    target = project_dir(project_name, backend=backend, root=root)
+    if not target.is_dir():
+        raise FileNotFoundError(f"Unknown fine-tuning project: {project_name}")
+    return _write_display_sidecar(target / "display.json", updates={"display_name": cleaned})
+
+
+def read_run_display(run_dir: Path) -> dict[str, object]:
+    """Read the display sidecar for a single training run."""
+
+    return _read_display_sidecar(run_dir / "display.json")
+
+
+def set_run_display_name(run_dir: Path, *, display_name: str) -> dict[str, object]:
+    """Rename a single run for display purposes (the run dir stays put)."""
+
+    cleaned = (display_name or "").strip()
+    if not cleaned:
+        raise ValueError("display_name must be a non-empty string.")
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Unknown fine-tuning run: {run_dir}")
+    return _write_display_sidecar(run_dir / "display.json", updates={"display_name": cleaned})
+
+
 def project_dir(
     project_name: str,
     *,
@@ -1370,6 +1452,13 @@ def list_runs(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["status"] = run_status(run_dir)
         metadata["run_dir"] = str(run_dir)
+        # Surface the user-chosen rename (if any). Fall back to version_name so
+        # the dashboard always has SOMETHING to display for legacy runs.
+        display = read_run_display(run_dir)
+        metadata["display_name"] = (
+            str(display.get("display_name") or "").strip()
+            or str(metadata.get("version_name") or "").strip()
+        )
         runs.append(metadata)
         if limit is not None and len(runs) >= limit:
             break
@@ -1433,6 +1522,11 @@ def latest_run_summary(project_dir: Path) -> dict[str, object] | None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["status"] = run_status(run_dir)
         metadata["run_dir"] = str(run_dir)
+        display = read_run_display(run_dir)
+        metadata["display_name"] = (
+            str(display.get("display_name") or "").strip()
+            or str(metadata.get("version_name") or "").strip()
+        )
         return metadata
     return None
 
@@ -1468,9 +1562,15 @@ def list_projects(*, root: Path = PROJECT_ROOT) -> list[dict[str, object]]:
             if audio_dir.is_dir()
             else 0
         )
+        # The slug is the persistent identifier; display_name is a free-form
+        # rename the user can set from the dashboard. Fall back to the slug so
+        # we always have a label even before anyone customizes it.
+        display_payload = _read_display_sidecar(candidate / "display.json")
+        display_name = str(display_payload.get("display_name") or "").strip() or candidate.name
         summary: dict[str, object] = {
             "backend": backend,
             "slug": candidate.name,
+            "display_name": display_name,
             "path": str(candidate),
             "sample_count": sample_count,
             "prepared": metadata_path.is_file(),

@@ -198,6 +198,60 @@ class FineTuningTests(unittest.TestCase):
             self.assertEqual(metadata["version_number"], 2)
             self.assertTrue(pathlib.Path(metadata["experiment_dir"]).name.startswith("clean-speaker-version"))
 
+    def test_set_project_display_name_persists_in_sidecar_and_list(self):
+        # The sidecar lives next to the (regen-on-prepare) metadata.json so a
+        # user-chosen rename has to survive both list_projects() and a future
+        # prepare round-trip.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            project_path = root / "fine_tuning" / "projects" / "nemo" / "site-training"
+            (project_path / "audio").mkdir(parents=True)
+            (project_path / "audio" / "001_clip.wav").write_bytes(wav_bytes())
+
+            fine_tuning.set_project_display_name(
+                "site-training", backend="nemo", display_name="Senior Design Run", root=root
+            )
+            sidecar = json.loads((project_path / "display.json").read_text(encoding="utf-8"))
+            self.assertEqual(sidecar["display_name"], "Senior Design Run")
+
+            display = fine_tuning.read_project_display("site-training", backend="nemo", root=root)
+            self.assertEqual(display["display_name"], "Senior Design Run")
+
+            projects = fine_tuning.list_projects(root=root)
+            named = next(p for p in projects if p["slug"] == "site-training")
+            self.assertEqual(named["display_name"], "Senior Design Run")
+
+            with self.assertRaises(ValueError):
+                fine_tuning.set_project_display_name(
+                    "site-training", backend="nemo", display_name="  ", root=root
+                )
+            with self.assertRaises(FileNotFoundError):
+                fine_tuning.set_project_display_name(
+                    "missing-project", backend="nemo", display_name="x", root=root
+                )
+
+    def test_set_run_display_name_persists_and_surfaces_in_list_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            project_path = root / "fine_tuning" / "projects" / "nemo" / "site-training"
+            run_dir = project_path / "runs" / "20260505T100000Z_v001"
+            run_dir.mkdir(parents=True)
+            (run_dir / "metadata.json").write_text(
+                json.dumps({"version_name": "site-training trained version 1"}), encoding="utf-8"
+            )
+
+            fine_tuning.set_run_display_name(run_dir, display_name="Best v1 (lowest DER)")
+
+            display = fine_tuning.read_run_display(run_dir)
+            self.assertEqual(display["display_name"], "Best v1 (lowest DER)")
+            runs = fine_tuning.list_runs("site-training", backend="nemo", root=root)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["display_name"], "Best v1 (lowest DER)")
+            # Without an explicit display name, list_runs falls back to version_name.
+            (run_dir / "display.json").unlink()
+            runs_again = fine_tuning.list_runs("site-training", backend="nemo", root=root)
+            self.assertEqual(runs_again[0]["display_name"], "site-training trained version 1")
+
     def test_main_returns_clean_error_for_expected_runtime_failures(self):
         stderr = io.StringIO()
 

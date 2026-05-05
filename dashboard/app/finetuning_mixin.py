@@ -62,9 +62,12 @@ from fine_tuning_manager import (
     parse_rttm,
     probe_media_duration,
     prepare_project,
+    project_dir as fine_tune_project_dir,
     run_status as fine_tuning_run_status,
     sanitize_filename,
     save_project_sample_streams,
+    set_project_display_name,
+    set_run_display_name,
     slugify,
 )
 from workflow_background import launch_background_command, run_status, slurm_queue_snapshot, utc_now_iso
@@ -495,6 +498,70 @@ class FineTuningMixin:
             environ,
             "/fine-tuning",
             message=launch_message,
+            status="success",
+        )
+
+    def handle_finetune_rename_project(self, environ):
+        """Set or clear the friendly display name for a fine-tuning project."""
+
+        # We never rename the on-disk slug — that's the persistent ID for runs,
+        # label_status entries, and metadata files. The display label lives in
+        # a sidecar so prepare_project can keep regenerating metadata.json
+        # without nuking the user's chosen name.
+        form = self.parse_form(environ)
+        project_slug = (form.getfirst("project_slug") or form.getfirst("project_name") or "").strip()
+        backend_value = form.getfirst("backend") or form.getfirst("project_backend") or ""
+        display_name = (form.getfirst("display_name") or "").strip()
+        if not project_slug:
+            return self.redirect(environ, "/fine-tuning", message="Pick a fine-tuning project to rename.", status="error")
+        if not display_name:
+            return self.redirect(environ, "/fine-tuning", message="Provide a new display name.", status="error")
+        try:
+            backend = normalize_backend(backend_value)
+            set_project_display_name(
+                project_slug,
+                backend=backend,
+                display_name=display_name,
+                root=self.root,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+        self.invalidate_dashboard_cache()
+        return self.redirect(
+            environ,
+            "/fine-tuning",
+            message=f"Renamed project to '{display_name}'.",
+            status="success",
+        )
+
+    def handle_finetune_rename_run(self, environ):
+        """Set or clear the friendly display name for a single training run."""
+
+        form = self.parse_form(environ)
+        run_dir_value = (form.getfirst("run_dir") or "").strip()
+        display_name = (form.getfirst("display_name") or "").strip()
+        if not run_dir_value:
+            return self.redirect(environ, "/fine-tuning", message="Pick a run to rename.", status="error")
+        if not display_name:
+            return self.redirect(environ, "/fine-tuning", message="Provide a new display name.", status="error")
+        run_dir = self.resolve_local_path(run_dir_value)
+        # Sanity check: the run dir must live inside fine_tuning/projects/. We
+        # don't want a malicious form post writing display.json anywhere on disk.
+        runs_root = (self.root / "fine_tuning" / "projects").resolve()
+        try:
+            resolved = run_dir.resolve()
+            resolved.relative_to(runs_root)
+        except (OSError, ValueError):
+            return self.redirect(environ, "/fine-tuning", message="Run path is outside the fine-tuning workspace.", status="error")
+        try:
+            set_run_display_name(resolved, display_name=display_name)
+        except (FileNotFoundError, ValueError) as exc:
+            return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+        self.invalidate_dashboard_cache()
+        return self.redirect(
+            environ,
+            "/fine-tuning",
+            message=f"Renamed run to '{display_name}'.",
             status="success",
         )
 
