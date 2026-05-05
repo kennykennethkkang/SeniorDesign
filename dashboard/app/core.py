@@ -250,6 +250,8 @@ class CoreMixin:
                 status, headers, body = self.handle_runtime_estimate(environ)
             elif routed_method == "GET" and path == "/api/file-search":
                 status, headers, body = self.handle_file_search(environ)
+            elif routed_method == "GET" and path == "/api/fine-tuning/score-run":
+                status, headers, body = self.handle_finetune_score_run(environ)
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):

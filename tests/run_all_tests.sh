@@ -11,6 +11,7 @@ python3 -m py_compile \
   workflow_background.py \
   workflow_cli.py \
   fine_tuning_manager.py \
+  diarization_metrics.py \
   review_bundle.py \
   audio_numbering.py \
   youtube_audio_batch.py \

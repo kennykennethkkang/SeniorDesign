@@ -534,6 +534,52 @@ class FineTuningMixin:
             status="success",
         )
 
+    def handle_finetune_score_run(self, environ):
+        """Score a hypothesis RTTM against a reference RTTM and return metrics JSON.
+
+        Both paths are validated to live inside the project workspace before
+        we read them — handing arbitrary file paths to a public endpoint is a
+        classic path-traversal foot-gun, even on a single-user dashboard.
+        """
+
+        # Lazy import — diarization_metrics is small but not free, and most
+        # dashboard requests don't need it.
+        import diarization_metrics
+
+        query = parse_qs((environ.get("QUERY_STRING") or ""), keep_blank_values=True)
+        reference_value = (query.get("reference") or [""])[0]
+        hypothesis_value = (query.get("hypothesis") or [""])[0]
+        if not reference_value or not hypothesis_value:
+            return self.json_response(
+                "400 Bad Request",
+                {"error": "Both 'reference' and 'hypothesis' RTTM paths are required."},
+            )
+
+        def _resolve_within_workspace(value: str) -> Path | None:
+            candidate = self.resolve_local_path(value)
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(self.root.resolve())
+            except (OSError, ValueError):
+                return None
+            return resolved
+
+        reference_path = _resolve_within_workspace(reference_value)
+        hypothesis_path = _resolve_within_workspace(hypothesis_value)
+        if reference_path is None or hypothesis_path is None:
+            return self.json_response(
+                "400 Bad Request",
+                {"error": "RTTM paths must point inside the project workspace."},
+            )
+        if not reference_path.is_file() or not hypothesis_path.is_file():
+            return self.json_response("404 Not Found", {"error": "RTTM file not found."})
+
+        try:
+            metrics = diarization_metrics.score_run(reference_path, hypothesis_path)
+        except (ValueError, OSError) as exc:
+            return self.json_response("500 Internal Server Error", {"error": str(exc)})
+        return self.json_response("200 OK", metrics)
+
     def handle_finetune_rename_run(self, environ):
         """Set or clear the friendly display name for a single training run."""
 
