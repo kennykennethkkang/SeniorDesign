@@ -164,9 +164,9 @@ Max speakers per chunk: 3
 Max speakers per frame: 2
 Max epochs: 5
 Slurm partition: gpu
-Slurm time: 04:00:00
-Slurm memory: 32G
-Slurm CPUs: 6
+Slurm time: 08:00:00
+Slurm memory: 48G
+Slurm CPUs: 8
 Slurm GPUs: 1
 ```
 
@@ -206,9 +206,9 @@ python3 fine_tuning_manager.py prepare \
   --pyannote-max-speakers-per-chunk 3 \
   --pyannote-max-speakers-per-frame 2 \
   --slurm-partition gpu \
-  --slurm-time 04:00:00 \
-  --slurm-memory 32G \
-  --slurm-cpus 6 \
+  --slurm-time 08:00:00 \
+  --slurm-memory 48G \
+  --slurm-cpus 8 \
   --slurm-gpus 1
 ```
 
@@ -329,9 +329,9 @@ NeMo speaker model: titanet_large
 Max epochs: 20
 Optional NeMo root: /path/to/NeMo
 Slurm partition: gpu
-Slurm time: 04:00:00
-Slurm memory: 32G
-Slurm CPUs: 6
+Slurm time: 08:00:00
+Slurm memory: 48G
+Slurm CPUs: 8
 Slurm GPUs: 1
 ```
 
@@ -365,9 +365,9 @@ python3 fine_tuning_manager.py prepare \
   --max-epochs 20 \
   --nemo-root /path/to/NeMo \
   --slurm-partition gpu \
-  --slurm-time 04:00:00 \
-  --slurm-memory 32G \
-  --slurm-cpus 6 \
+  --slurm-time 08:00:00 \
+  --slurm-memory 48G \
+  --slurm-cpus 8 \
   --slurm-gpus 1
 ```
 

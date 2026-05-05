@@ -23,6 +23,13 @@ def wav_bytes(duration_seconds: float = 2.0, sample_rate: int = 16000) -> bytes:
 
 
 class FineTuningTests(unittest.TestCase):
+    def assert_default_slurm_resources(self, sbatch_path: pathlib.Path):
+        sbatch_text = sbatch_path.read_text(encoding="utf-8")
+        self.assertIn("#SBATCH --cpus-per-task=8", sbatch_text)
+        self.assertIn("#SBATCH --mem=48G", sbatch_text)
+        self.assertIn("#SBATCH --time=08:00:00", sbatch_text)
+        self.assertIn("#SBATCH --gres=gpu:1", sbatch_text)
+
     def test_prepare_project_generates_session_and_msdd_manifests(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -64,6 +71,7 @@ class FineTuningTests(unittest.TestCase):
             self.assertTrue(artifacts.msdd_manifest_validation.exists())
             self.assertTrue(artifacts.launch_script_path.exists())
             self.assertTrue(artifacts.sbatch_script_path.exists())
+            self.assert_default_slurm_resources(artifacts.sbatch_script_path)
 
             train_session_rows = artifacts.session_manifest_train.read_text(encoding="utf-8").strip().splitlines()
             validation_session_rows = artifacts.session_manifest_validation.read_text(encoding="utf-8").strip().splitlines()
@@ -112,6 +120,7 @@ class FineTuningTests(unittest.TestCase):
             self.assertTrue((artifacts.project_dir / "artifacts" / "train_pyannote.py").exists())
             self.assertTrue(artifacts.launch_script_path.exists())
             self.assertTrue(artifacts.sbatch_script_path.exists())
+            self.assert_default_slurm_resources(artifacts.sbatch_script_path)
 
     def test_launch_training_runs_generated_script_in_background(self):
         with tempfile.TemporaryDirectory() as tmpdir:
