@@ -547,7 +547,76 @@ class CoreMixin:
         body = asset_path.read_bytes()
         return "200 OK", self.response_headers(content_type=content_type, body_length=len(body)), [body]
 
-    def range_response_for_file(self, file_path: Path, content_type: str, range_header: str):
+    # 64 KB per chunk — big enough that the per-yield Python overhead is amortized,
+    # small enough that the browser starts decoding audio almost immediately
+    # instead of waiting for the whole file (or whole range) to be read off the
+    # cluster's networked filesystem before the first byte ships.
+    _FILE_STREAM_CHUNK = 64 * 1024
+
+    def _iter_file_chunks(self, file_path: Path, *, start: int = 0, length: int | None = None):
+        """Yield the file in chunks so WSGI can stream the response without buffering it all in RAM."""
+
+        with file_path.open("rb") as handle:
+            if start:
+                handle.seek(start)
+            remaining = length
+            chunk = self._FILE_STREAM_CHUNK
+            while True:
+                read_size = chunk if remaining is None else min(chunk, remaining)
+                if read_size <= 0:
+                    break
+                buf = handle.read(read_size)
+                if not buf:
+                    break
+                yield buf
+                if remaining is not None:
+                    remaining -= len(buf)
+                    if remaining <= 0:
+                        break
+
+    def _file_cache_validators(self, file_path: Path) -> tuple[str, str]:
+        """Build an ETag and Last-Modified pair from the file's size and mtime.
+
+        Same (size, mtime) → same bytes is good enough for our use case: we never
+        rewrite audio files in-place, and on the off chance a re-upload changes
+        either, the validators flip and the browser will re-fetch.
+        """
+
+        stat = file_path.stat()
+        etag = f'"{stat.st_size:x}-{int(stat.st_mtime):x}"'
+        last_modified = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(stat.st_mtime))
+        return etag, last_modified
+
+    def _client_has_fresh_copy(self, environ, etag: str, last_modified: str) -> bool:
+        """Return True when the browser's cached copy still matches what's on disk."""
+
+        if_none_match = str(environ.get("HTTP_IF_NONE_MATCH") or "").strip()
+        if if_none_match:
+            # The header can be a comma-separated list of ETags or a wildcard.
+            for candidate in (token.strip() for token in if_none_match.split(",")):
+                if candidate in {etag, "*"}:
+                    return True
+        if_modified_since = str(environ.get("HTTP_IF_MODIFIED_SINCE") or "").strip()
+        if if_modified_since and if_modified_since == last_modified:
+            return True
+        return False
+
+    def _cache_control_for(self, content_type: str) -> str:
+        """Pick a cache header per content type — friendly for media, strict for everything else.
+
+        The whole point of this method: audio files are big and immutable once
+        uploaded, so letting the browser cache them for an hour eliminates the
+        re-fetch lag every time the labeling dialog opens. Other artifacts (logs,
+        TSVs, JSON the dashboard re-reads) keep no-store so dashboard reloads
+        always see fresh data.
+        """
+
+        normalized = (content_type or "").split(";", 1)[0].strip().lower()
+        if normalized.startswith(("audio/", "video/", "image/")):
+            return "private, max-age=3600"
+        return "no-store"
+
+    def range_response_for_file(self, file_path: Path, content_type: str, range_header: str, *, extra_headers=()):
         """Serve one byte range so browser media seeking works for `/files/...` audio."""
 
         file_size = file_path.stat().st_size
@@ -557,6 +626,7 @@ class CoreMixin:
         start_text, separator, end_text = raw_range.removeprefix("bytes=").partition("-")
         if not separator:
             return None
+        cache_control = self._cache_control_for(content_type)
         try:
             if start_text:
                 start = int(start_text)
@@ -571,7 +641,7 @@ class CoreMixin:
             return (
                 "416 Range Not Satisfiable",
                 [
-                    *self.response_headers(content_type=content_type, body_length=0),
+                    *self.response_headers(content_type=content_type, body_length=0, cache_control=cache_control),
                     ("Accept-Ranges", "bytes"),
                     ("Content-Range", f"bytes */{file_size}"),
                 ],
@@ -581,7 +651,7 @@ class CoreMixin:
             return (
                 "416 Range Not Satisfiable",
                 [
-                    *self.response_headers(content_type=content_type, body_length=0),
+                    *self.response_headers(content_type=content_type, body_length=0, cache_control=cache_control),
                     ("Accept-Ranges", "bytes"),
                     ("Content-Range", f"bytes */{file_size}"),
                 ],
@@ -589,17 +659,16 @@ class CoreMixin:
             )
         end = min(end, file_size - 1)
         length = end - start + 1
-        with file_path.open("rb") as handle:
-            handle.seek(start)
-            body = handle.read(length)
+        headers = [
+            *self.response_headers(content_type=content_type, body_length=length, cache_control=cache_control),
+            ("Accept-Ranges", "bytes"),
+            ("Content-Range", f"bytes {start}-{end}/{file_size}"),
+            *extra_headers,
+        ]
         return (
             "206 Partial Content",
-            [
-                *self.response_headers(content_type=content_type, body_length=len(body)),
-                ("Accept-Ranges", "bytes"),
-                ("Content-Range", f"bytes {start}-{end}/{file_size}"),
-            ],
-            [body],
+            headers,
+            self._iter_file_chunks(file_path, start=start, length=length),
         )
 
     def serve_file(self, path: str, environ):
@@ -614,18 +683,40 @@ class CoreMixin:
         self.refresh_review_bundle_if_needed(file_path)
 
         content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        cache_control = self._cache_control_for(content_type)
+        etag, last_modified = self._file_cache_validators(file_path)
+        # Cache validators are sent on every response — they're cheap and they
+        # let the browser short-circuit re-fetches with a 304 instead of pulling
+        # the whole audio off the network filesystem again.
+        validator_headers = [("ETag", etag), ("Last-Modified", last_modified)]
+
         range_header = str(environ.get("HTTP_RANGE") or "")
+        if not range_header and self._client_has_fresh_copy(environ, etag, last_modified):
+            not_modified_headers = [
+                ("Cache-Control", cache_control),
+                ("Accept-Ranges", "bytes"),
+                *validator_headers,
+                *SECURITY_RESPONSE_HEADERS,
+            ]
+            return "304 Not Modified", not_modified_headers, [b""]
+
         if range_header:
-            ranged = self.range_response_for_file(file_path, content_type, range_header)
+            ranged = self.range_response_for_file(
+                file_path,
+                content_type,
+                range_header,
+                extra_headers=validator_headers,
+            )
             if ranged is not None:
                 return ranged
 
-        body = file_path.read_bytes()
+        file_size = file_path.stat().st_size
         headers = [
-            *self.response_headers(content_type=content_type, body_length=len(body)),
+            *self.response_headers(content_type=content_type, body_length=file_size, cache_control=cache_control),
             ("Accept-Ranges", "bytes"),
+            *validator_headers,
         ]
-        return "200 OK", headers, [body]
+        return "200 OK", headers, self._iter_file_chunks(file_path)
 
     def refresh_review_bundle_if_needed(self, file_path: Path) -> None:
         """Regenerate older review pages on demand so playback and labeling stay current."""

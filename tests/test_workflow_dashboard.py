@@ -269,14 +269,28 @@ class WorkflowWebTests(unittest.TestCase):
                 method="GET",
                 path="/files/workflow_dashboard.py",
             )
+            cached_status, cached_headers, cached_body = run_wsgi(
+                app,
+                method="GET",
+                path="/files/audio_in/001_clip.wav",
+                environ_overrides={"HTTP_IF_NONE_MATCH": public_headers["ETag"]},
+            )
 
             self.assertEqual(public_status, "200 OK")
-            self.assertEqual(public_headers["Cache-Control"], "no-store")
+            # Audio gets a short browser cache so the labeling dialog stops
+            # re-fetching the same WAV every time the user reopens it; other
+            # artifact types still get no-store from _cache_control_for.
+            self.assertEqual(public_headers["Cache-Control"], "private, max-age=3600")
+            self.assertIn("ETag", public_headers)
+            self.assertIn("Last-Modified", public_headers)
             self.assertEqual(public_headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(public_headers["X-Frame-Options"], "DENY")
             self.assertEqual(secret_status, "404 Not Found")
             self.assertEqual(source_status, "404 Not Found")
             self.assertTrue(public_body)
+            self.assertEqual(cached_status, "304 Not Modified")
+            self.assertEqual(cached_headers["ETag"], public_headers["ETag"])
+            self.assertEqual(cached_body, b"")
 
     def test_file_route_supports_range_requests_for_media_seeking(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -286,14 +300,23 @@ class WorkflowWebTests(unittest.TestCase):
             (root / "job_outputs").mkdir()
             payload = wav_bytes()
             (audio_dir / "001_clip.wav").write_bytes(payload)
+            initial_status, initial_headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="GET",
+                path="/files/audio_in/001_clip.wav",
+            )
 
             status, headers, body = run_wsgi(
                 workflow_web.WorkflowWebApp(root=root),
                 method="GET",
                 path="/files/audio_in/001_clip.wav",
-                environ_overrides={"HTTP_RANGE": "bytes=10-29"},
+                environ_overrides={
+                    "HTTP_RANGE": "bytes=10-29",
+                    "HTTP_IF_NONE_MATCH": initial_headers["ETag"],
+                },
             )
 
+            self.assertEqual(initial_status, "200 OK")
             self.assertEqual(status, "206 Partial Content")
             self.assertEqual(headers["Accept-Ranges"], "bytes")
             self.assertEqual(headers["Content-Range"], f"bytes 10-29/{len(payload)}")
@@ -677,7 +700,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             html = body.decode("utf-8")
             self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="0"', html)
-            self.assertIn('id="showLabelDialogue" type="checkbox"> Save dialogue', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox"> <span id="labelDialogueToggleText">Show Dialogue</span>', html)
             self.assertIn('<table class="label-table hide-dialogue">', html)
 
     def test_diarization_page_tracks_completed_and_retryable_audio(self):
@@ -1857,6 +1880,50 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(row["backendLabel"], "NeMo + pyannote")
             self.assertEqual(row["targetProjects"], ["nemo/uploaded-site-training", "pyannote/uploaded-site-training"])
 
+    def test_training_label_saved_review_path_regenerates_stale_inspect_bundle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            run_dir = root / "outputs" / "diarization_runs" / "pyannote" / "run-01"
+            audio_dir.mkdir()
+            run_dir.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            (run_dir / "001_clip.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:00,500\nSpeaker 0: hello\n",
+                encoding="utf-8",
+            )
+            review_path = run_dir / "001_clip_review.html"
+            review_path.write_text(
+                '<html><head><meta name="review-bundle-version" content="1"></head><body>old inspect</body></html>',
+                encoding="utf-8",
+            )
+            label_status_path = root / "fine_tuning" / "label_status.json"
+            label_status_path.parent.mkdir(parents=True)
+            label_status_path.write_text(
+                json.dumps(
+                    {
+                        "items": {
+                            "001_clip.wav": {
+                                "status": "draft",
+                                "review_path": "outputs/diarization_runs/pyannote/run-01/001_clip_review.html",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path="/training-labels")
+
+            self.assertEqual(status, "200 OK")
+            row = page_state(body)["context"]["trainingLabels"]["rows"][0]
+            self.assertTrue(row["reviewHref"].endswith("/files/outputs/diarization_runs/pyannote/run-01/001_clip_review.html"))
+            refreshed_html = review_path.read_text(encoding="utf-8")
+            self.assertIn("manual-label-toolbar", refreshed_html)
+            self.assertIn('id="currentTimeReadout"', refreshed_html)
+            self.assertIn("Complete For Training", refreshed_html)
+
     def test_training_label_can_be_saved_for_later(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -2018,6 +2085,58 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(payload.get("status"), "saved")
             label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
             self.assertEqual(label_status["items"]["001_clip.wav"]["status"], "draft")
+
+    def test_auto_save_draft_does_not_downgrade_completed_label_when_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            segments = "0.000 0.500 SPEAKER_00"
+
+            complete_body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "speaker-lab"),
+                    ("label_segments", segments),
+                    ("label_action", "complete"),
+                ]
+            ).encode("utf-8")
+            status, _, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=complete_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            self.assertEqual(status, "303 See Other")
+
+            autosave_body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "speaker-lab"),
+                    ("label_segments", segments),
+                    ("label_action", "draft"),
+                    ("label_auto_save", "1"),
+                ]
+            ).encode("utf-8")
+            status, _, response_body = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=autosave_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "200 OK")
+            payload = json.loads(response_body.decode("utf-8"))
+            self.assertEqual(payload.get("kind"), "completed")
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(label_status["items"]["001_clip.wav"]["status"], "completed")
+            self.assertTrue((root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab" / "rttm" / "001_clip.rttm").is_file())
 
     def test_auto_train_uses_project_prepare_settings_and_hf_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2187,6 +2306,61 @@ class WorkflowWebTests(unittest.TestCase):
                 [(item["project_key"], item["auto_train_status"]) for item in record["training_usage"]],
                 [("pyannote/existing-lab", "queued"), ("nemo/new-default-lab", "queued")],
             )
+
+    def test_completed_training_label_queues_named_training_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab"
+            project_dir.mkdir(parents=True)
+
+            queue_calls = []
+            from dashboard import auto_train as auto_train_module
+
+            def fake_queue_auto_train(project_name, *, backend, root, prepare_options=None, extra_env=None, version_name=None):
+                queue_calls.append(
+                    {
+                        "project_name": project_name,
+                        "backend": backend,
+                        "version_name": version_name,
+                    }
+                )
+                return True
+
+            original = auto_train_module.queue_auto_train
+            auto_train_module.queue_auto_train = fake_queue_auto_train
+            try:
+                body = urlencode(
+                    [
+                        ("audio_file", "001_clip.wav"),
+                        ("label_backend", "pyannote"),
+                        ("label_project_name", "speaker-lab"),
+                        ("label_training_targets", "pyannote/speaker-lab"),
+                        ("label_auto_train_targets", "pyannote/speaker-lab"),
+                        ("label_new_training_name", "cleaned-stage-2"),
+                        ("label_segments", "0.00 0.50 SPEAKER_00"),
+                        ("label_action", "complete"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/training-labels/save",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                auto_train_module.queue_auto_train = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertEqual(queue_calls, [{"project_name": "speaker-lab", "backend": "pyannote", "version_name": "cleaned-stage-2"}])
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["training_usage"][0]["requested_version_name"], "cleaned-stage-2")
 
     def test_completed_training_label_can_skip_auto_train_queue(self):
         with tempfile.TemporaryDirectory() as tmpdir:

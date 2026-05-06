@@ -15,6 +15,11 @@ from urllib.parse import quote
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_MEDIA_DIR = PROJECT_ROOT / "audio_in"
 DEFAULT_LABEL_PROJECT = "uploaded-site-training"
+# Bump this whenever the generated review HTML's JS/markup changes in a way
+# that needs old bundles to be regenerated. The dashboard checks this against
+# a meta tag in existing HTMLs and rewrites stale ones the next time the row
+# is opened, so users picking up bug fixes don't have to manually rerun.
+REVIEW_BUNDLE_FORMAT_VERSION = 9
 TRAINING_BACKEND_LABELS = {
     "nemo": "NeMo",
     "pyannote": "pyannote",
@@ -46,7 +51,7 @@ def project_slug(value: object) -> str:
 def build_training_target_payload(
     fine_tuning_projects: Sequence[Mapping[str, object]] | None,
 ) -> list[dict[str, object]]:
-    """Serialize default and existing fine-tuning projects for the completion dialog."""
+    """Serialize existing fine-tuned runs for the completion dialog."""
 
     targets: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -60,19 +65,27 @@ def build_training_target_payload(
         prepared: object = False,
         auto_train: object = False,
         latest_run_text: object = "",
-        kind: str = "existing",
+        kind: str = "fine_tuned",
+        choice_key: object = "",
+        run_name: object = "",
+        version_name: object = "",
+        display_status: object = "",
     ) -> None:
         normalized_backend = str(backend or "").strip().lower()
         if normalized_backend not in TRAINING_BACKEND_LABELS:
             return
         slug = project_slug(project_name)
         key = f"{normalized_backend}/{slug}"
-        if key in seen:
+        choice_id = str(choice_key or f"{key}::{run_name or version_name or kind}").strip()
+        if not choice_id:
+            choice_id = key
+        if choice_id in seen:
             return
-        seen.add(key)
+        seen.add(choice_id)
         targets.append(
             {
                 "key": key,
+                "choiceKey": choice_id,
                 "backend": normalized_backend,
                 "projectName": slug,
                 "displayName": str(display_name or "").strip() or slug,
@@ -81,37 +94,48 @@ def build_training_target_payload(
                 "prepared": bool(prepared),
                 "autoTrain": bool(auto_train),
                 "latestRunText": str(latest_run_text or ""),
+                "runName": str(run_name or ""),
+                "versionName": str(version_name or ""),
+                "displayStatus": str(display_status or ""),
                 "kind": kind,
             }
         )
 
     for project in fine_tuning_projects or []:
+        project_runs = project.get("recent_runs")
+        runs = list(project_runs) if isinstance(project_runs, (list, tuple)) else []
         latest_run = project.get("latest_run") if isinstance(project.get("latest_run"), Mapping) else {}
-        latest_run_text = ""
-        if latest_run:
-            latest_run_text = str(
-                latest_run.get("display_name")
-                or latest_run.get("version_name")
-                or Path(str(latest_run.get("run_dir", ""))).name
+        if latest_run and not runs:
+            runs = [latest_run]
+        for run in runs:
+            if not isinstance(run, Mapping):
+                continue
+            run_dir_name = Path(str(run.get("run_dir", ""))).name
+            version_name = str(run.get("version_name") or run_dir_name or "").strip()
+            display_name = str(
+                run.get("display_name")
+                or version_name
+                or run_dir_name
+                or project.get("display_name")
+                or project.get("slug")
+                or ""
+            ).strip()
+            status = str(run.get("status") or "").strip()
+            latest_run_text = " ".join(part for part in [status, version_name or run_dir_name] if part).strip()
+            add_target(
+                backend=project.get("backend"),
+                project_name=project.get("slug"),
+                display_name=display_name,
+                sample_count=project.get("sample_count"),
+                prepared=project.get("prepared"),
+                auto_train=project.get("auto_train"),
+                latest_run_text=latest_run_text,
+                kind="fine_tuned",
+                choice_key=f"{project.get('backend')}/{project.get('slug')}::{run_dir_name or version_name}",
+                run_name=run_dir_name,
+                version_name=version_name,
+                display_status=status,
             )
-        add_target(
-            backend=project.get("backend"),
-            project_name=project.get("slug"),
-            display_name=project.get("display_name"),
-            sample_count=project.get("sample_count"),
-            prepared=project.get("prepared"),
-            auto_train=project.get("auto_train"),
-            latest_run_text=latest_run_text,
-            kind="existing",
-        )
-
-    for backend in ("nemo", "pyannote"):
-        add_target(
-            backend=backend,
-            project_name=DEFAULT_LABEL_PROJECT,
-            display_name=f"Default {TRAINING_BACKEND_LABELS[backend]} project",
-            kind="default",
-        )
 
     return targets
 
@@ -726,14 +750,21 @@ def build_html(
             f"<td class=\"label-dialogue-cell\"><input class=\"label-dialogue\" type=\"text\" value=\"{html.escape(note, quote=True)}\" placeholder=\"Optional dialogue\"></td>"
             "<td class=\"action-cell\">"
             "<button class=\"play-label\" type=\"button\">Listen</button>"
+            "<button class=\"toggle-done-label\" type=\"button\" aria-pressed=\"false\""
+            " title=\"Click after I've labeled this row. Marks the row green.\""
+            ">Mark done</button>"
             "<button class=\"delete-label\" type=\"button\" aria-label=\"Delete this label\">Delete</button>"
             "</td>"
             "</tr>"
         )
 
     media_tag = media_tag_name(media_path)
+    # preload="metadata" lets the browser show duration + start playing on
+    # demand without slurping the whole file up front. The old preload="auto"
+    # competed with our waveform fetch for bandwidth, so the player took ages
+    # to become interactive on the WAVE-mounted audio shares.
     player_html = (
-        f'<{media_tag} id="media" controls preload="auto" src="{media_href}"></{media_tag}>'
+        f'<{media_tag} id="media" controls preload="metadata" src="{media_href}"></{media_tag}>'
         if media_path is not None
         else "<p class=\"warning\">No matching media file was found, so segment playback is disabled.</p>"
     )
@@ -743,9 +774,11 @@ def build_html(
     include_transcript = bool(label_record is not None and label_record.get("include_transcript") is True)
     include_transcript_value = "1" if include_transcript else "0"
     include_transcript_checked = " checked" if include_transcript else ""
+    dialogue_toggle_text = "Hide Dialogue" if include_transcript else "Show Dialogue"
     label_table_class = "label-table" + ("" if include_transcript else " hide-dialogue")
     review_workspace_path = html.escape(str(output_html), quote=True)
     selected_backend = normalized_label_backend(label_record)
+    selected_create_backend = selected_backend if selected_backend in {"nemo", "pyannote"} else "pyannote"
     project_name = html.escape(record_text(label_record, "project_name", DEFAULT_LABEL_PROJECT), quote=True)
     raw_label_status = record_text(label_record, "status", "not saved").replace("_", " ")
     label_status = html.escape(raw_label_status)
@@ -789,6 +822,7 @@ def build_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="review-bundle-version" content="{REVIEW_BUNDLE_FORMAT_VERSION}">
   <title>Diarization Review | ML Speech Diarization</title>
   <script>
     (function () {{
@@ -1078,6 +1112,60 @@ def build_html(
       align-items: center;
       margin: 0 0 6px;
     }}
+    /* All the buttons I reach for while labeling -- play/pause, jump back
+       two seconds, drop the playhead time into the focused label cell --
+       sit in one row right under the audio so I'm not chasing them around
+       three different sections of the page. */
+    .transport-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0 6px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-solid);
+    }}
+    /* Audio cache status row. The whole point of the cache is that after
+       the first visit, the file is on this device's IndexedDB and playback
+       starts instantly with zero network -- no more WAVE NFS streaming
+       lag. The status here tells me whether I'm currently streaming, in
+       the middle of a background save, or hitting the cache straight. */
+    .audio-cache-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 0 0 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .audio-cache-status {{
+      font-weight: 700;
+    }}
+    .audio-cache-status.is-cached {{
+      color: #2f4a18;
+    }}
+    .audio-cache-status.is-fetching {{
+      color: var(--accent-dark, var(--accent));
+    }}
+    .audio-cache-status.is-error {{
+      color: var(--accent);
+    }}
+    .audio-cache-button {{
+      padding: 5px 10px;
+      font-size: 11px;
+    }}
+    .transport-button {{
+      min-width: 96px;
+      padding: 9px 14px;
+      font-weight: 900;
+    }}
+    .transport-button.is-playing {{
+      background: var(--accent);
+      color: var(--white);
+    }}
     .mode-chip {{
       display: inline-flex;
       align-items: center;
@@ -1199,6 +1287,31 @@ def build_html(
       background: var(--flag);
       color: var(--accent);
     }}
+    .manual-label-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 0 0 10px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-solid);
+    }}
+    .current-time-chip {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      color: var(--slate-dark);
+      background: rgba(77, 135, 152, 0.1);
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }}
     .summary-chips {{
       display: flex;
       flex-wrap: wrap;
@@ -1273,6 +1386,16 @@ def build_html(
       gap: 12px;
       margin-bottom: 12px;
     }}
+    .fine-tuned-target-fields {{
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-solid);
+    }}
+    .training-target-create h4 {{
+      margin: 0 0 8px;
+      font-size: 15px;
+    }}
     .training-target-dialog {{
       width: min(760px, calc(100vw - 28px));
       max-height: min(720px, calc(100vh - 28px));
@@ -1316,6 +1439,16 @@ def build_html(
       display: block;
       color: var(--muted);
       font-weight: 700;
+    }}
+    .training-target-option.create-new {{
+      border-color: rgba(77, 135, 152, 0.44);
+      background: rgba(77, 135, 152, 0.1);
+    }}
+    .training-target-empty {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
     }}
     .dialog-actions {{
       justify-content: flex-end;
@@ -1486,6 +1619,40 @@ def build_html(
       padding: 8px 9px;
       font-size: 13px;
     }}
+    /* Per-row "done" toggle that lives next to Listen / Delete. The auto
+       save status pill at the top tells me whether the *file* has any
+       saved labels; this is finer-grained -- "I've personally checked
+       this single row, leave it alone." Color-shifts the whole row so
+       my eye can find the unchecked work fast on long files. */
+    .toggle-done-label {{
+      width: 100%;
+      min-width: 0;
+      margin-top: 4px;
+      padding: 7px 8px;
+      font-size: 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--line);
+      background: var(--panel-solid);
+      color: var(--bg-ink);
+      font-weight: 800;
+      cursor: pointer;
+    }}
+    .toggle-done-label.is-on {{
+      background: rgba(85, 113, 46, 0.18);
+      color: #2f4a18;
+      border-color: rgba(85, 113, 46, 0.55);
+    }}
+    [data-label-row].is-done > td {{
+      background: rgba(85, 113, 46, 0.10);
+    }}
+    [data-label-row].is-done .row-number::after {{
+      content: " ✓";
+      color: #2f4a18;
+      font-weight: 900;
+    }}
+    [data-label-row].is-done.current > td {{
+      background: rgba(85, 113, 46, 0.20);
+    }}
     .label-table .action-cell {{
       width: 132px;
     }}
@@ -1623,10 +1790,17 @@ def build_html(
     <section class="player-panel" aria-label="Audio playback">
       <div class="source-line"><span>Audio</span><strong>{media_label}</strong></div>
       {player_html}
+      <div class="audio-cache-row" aria-live="polite">
+        <span id="audioCacheStatus" class="audio-cache-status">Local cache: checking...</span>
+        <button id="cacheAudioButton" class="secondary audio-cache-button" type="button" hidden>Cache audio</button>
+        <button id="cacheAllAudioButton" class="secondary audio-cache-button" type="button">Cache all audio</button>
+        <button id="clearAudioCacheButton" class="ghost audio-cache-button" type="button" hidden>Clear cached audio</button>
+      </div>
       <div class="waveform-panel">
         <canvas id="waveformCanvas" class="waveform-canvas" aria-label="Audio waveform"></canvas>
         <div class="waveform-tools">
           <span id="waveformStatus" class="waveform-status">Waveform loading...</span>
+          <button id="loadWaveformButton" class="secondary" type="button" hidden>Reload waveform</button>
         </div>
       </div>
       <div class="playback-options">
@@ -1656,14 +1830,18 @@ def build_html(
           <textarea id="labelSegments" name="label_segments" hidden>{default_segments}</textarea>
           <textarea id="labelTranscript" name="label_transcript_text" hidden>{default_dialogue}</textarea>
           <div id="trainingTargetFields" hidden></div>
-          <div class="field-grid">
-            <label><span>Training backend</span><select name="label_backend"><option value="both"{selected_attr("both", selected_backend)}>NeMo + pyannote</option><option value="pyannote"{selected_attr("pyannote", selected_backend)}>pyannote only</option><option value="nemo"{selected_attr("nemo", selected_backend)}>NeMo only</option></select></label>
-            <label><span>Project</span><input name="label_project_name" type="text" value="{project_name}"></label>
-          </div>
           <div id="labelHealth" class="label-health" aria-live="polite">
             <span class="health-chip"><strong>0</strong> usable labels</span>
             <span class="health-chip"><strong>0</strong> speakers</span>
             <span class="health-chip needs-work"><strong>Check</strong> ready state</span>
+          </div>
+          <div class="manual-label-toolbar" role="toolbar" aria-label="Manual label controls">
+            <button id="playPauseButton" class="primary transport-button" type="button" aria-pressed="false">Play</button>
+            <button id="rewind" class="secondary transport-button" type="button">Back 2 sec</button>
+            <span id="currentTimeReadout" class="current-time-chip" role="status">Current: 0.000s</span>
+            <button id="setLabelTimeFromPlayer" class="secondary transport-button" type="button">Use Current Seconds</button>
+            <button id="addLabelAtCurrentTime" class="secondary transport-button" type="button" title="Create a fresh label row with start time set to wherever the audio is right now.">Add label @ current time</button>
+            <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox"{include_transcript_checked}> <span id="labelDialogueToggleText">{dialogue_toggle_text}</span></label>
           </div>
           <datalist id="speakerOptions">{speaker_options}</datalist>
           <div class="tool-grid">
@@ -1673,8 +1851,6 @@ def build_html(
           </div>
           <div class="label-table-toolbar">
             <button type="button" id="addLabelRowTop" class="add-segment-btn">Add Label</button>
-            <button type="button" id="setLabelTimeFromPlayer" class="add-segment-btn">Use Current Seconds</button>
-            <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox"{include_transcript_checked}> Save dialogue</label>
             <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
           <div class="table-wrap review-table-wrap">
@@ -1712,6 +1888,14 @@ def build_html(
               <h3 id="trainingTargetTitle">Select Training Targets</h3>
               <button type="button" id="closeTrainingTargetDialog" class="secondary">Cancel</button>
             </div>
+            <div class="training-target-create">
+              <h4>Create New Fine-Tuned Model</h4>
+              <div class="field-grid fine-tuned-target-fields">
+                <label><span>Backend</span><select id="newTrainingBackend"><option value="pyannote"{selected_attr("pyannote", selected_create_backend)}>pyannote</option><option value="nemo"{selected_attr("nemo", selected_create_backend)}>NeMo</option></select></label>
+                <label><span>Fine-tuned model name</span><input id="newTrainingProjectName" type="text" value="{project_name}" placeholder="speaker-lab"></label>
+                <label><span>New trained version name</span><input id="newTrainingVersionName" type="text" placeholder="cleaned-stage-2"></label>
+              </div>
+            </div>
             <div id="trainingTargetOptions" class="training-target-options"></div>
             <div class="controls dialog-actions">
               <button type="button" id="skipTrainingQueue" class="secondary">Complete Without Queue</button>
@@ -1735,7 +1919,6 @@ def build_html(
           <label><span>Speaker</span><select id="cueSpeakerFilter">{speaker_filter_options}</select></label>
           <label><span>Flag</span><select id="flagFilter">{flag_filter_options}</select></label>
           <label class="checkbox-row"><input id="flaggedOnly" type="checkbox"> Flagged only</label>
-          <button id="rewind" class="secondary" type="button">Back 2 Seconds</button>
         </div>
         <div class="table-wrap review-table-wrap">
           <table>
@@ -1798,9 +1981,11 @@ def build_html(
     const labelSpeakerFilter = document.getElementById("labelSpeakerFilter");
     const labelIssueFilter = document.getElementById("labelIssueFilter");
     const showLabelDialogue = document.getElementById("showLabelDialogue");
+    const labelDialogueToggleText = document.getElementById("labelDialogueToggleText");
     const addLabelRow = document.getElementById("addLabelRow");
     const addLabelRowTop = document.getElementById("addLabelRowTop");
     const setLabelTimeFromPlayer = document.getElementById("setLabelTimeFromPlayer");
+    const currentTimeReadout = document.getElementById("currentTimeReadout");
     const trainingTargetDataElement = document.getElementById("trainingTargetData");
     const trainingTargetFields = document.getElementById("trainingTargetFields");
     const trainingTargetDialog = document.getElementById("trainingTargetDialog");
@@ -1808,6 +1993,9 @@ def build_html(
     const closeTrainingTargetDialog = document.getElementById("closeTrainingTargetDialog");
     const confirmTrainingTargets = document.getElementById("confirmTrainingTargets");
     const skipTrainingQueue = document.getElementById("skipTrainingQueue");
+    const newTrainingBackend = document.getElementById("newTrainingBackend");
+    const newTrainingProjectName = document.getElementById("newTrainingProjectName");
+    const newTrainingVersionName = document.getElementById("newTrainingVersionName");
     const saveStatus = document.getElementById("saveStatus");
     const labelReturnTo = document.getElementById("labelReturnTo");
     const trainingLabelsLink = document.getElementById("trainingLabelsLink");
@@ -1854,6 +2042,13 @@ def build_html(
       fineTuningLink.href = base + "/fine-tuning";
       dashboardLink.href = base + "/";
       backButton.addEventListener("click", function () {{
+        // Belt-and-braces: pagehide should already flush the draft, but the
+        // Back button is the most common path off this page so flush sync
+        // before we navigate. flushLabelAutoSaveOnUnload uses sendBeacon so
+        // it survives the location change.
+        if (typeof flushLabelAutoSaveOnUnload === "function") {{
+          flushLabelAutoSaveOnUnload();
+        }}
         window.location.href = base + "/training-labels";
       }});
     }}
@@ -1885,19 +2080,18 @@ def build_html(
     }}
 
     function selectedTrainingBackends() {{
-      const select = labelForm.querySelector("[name='label_backend']");
-      const value = select ? String(select.value || "both").toLowerCase() : "both";
-      if (value === "both" || value === "all" || value.indexOf("+") >= 0) return ["nemo", "pyannote"];
-      return value === "nemo" ? ["nemo"] : ["pyannote"];
+      const value = newTrainingBackend ? String(newTrainingBackend.value || "pyannote").toLowerCase() : "pyannote";
+      return [value === "nemo" ? "nemo" : "pyannote"];
     }}
 
     function currentTrainingTargets() {{
-      const projectInput = labelForm.querySelector("[name='label_project_name']");
+      const projectInput = newTrainingProjectName;
       const projectName = trainingProjectSlug(projectInput ? projectInput.value : trainingTargetData.defaultProjectName);
       return selectedTrainingBackends().map(function (backend) {{
         const key = backend + "/" + projectName;
         return {{
           key: key,
+          choiceKey: "new::" + key,
           backend: backend,
           projectName: projectName,
           displayName: projectName,
@@ -1906,7 +2100,10 @@ def build_html(
           prepared: false,
           autoTrain: false,
           latestRunText: "",
-          kind: "current",
+          runName: "",
+          versionName: "",
+          displayStatus: "",
+          kind: "new",
           checked: true,
         }};
       }});
@@ -1915,12 +2112,14 @@ def build_html(
     function addTrainingTargetChoice(choices, target, checked) {{
       if (!target || !target.key) return;
       const key = String(target.key);
-      if (choices.has(key)) {{
-        if (checked) choices.get(key).checked = true;
+      const choiceKey = String(target.choiceKey || key);
+      if (choices.has(choiceKey)) {{
+        if (checked) choices.get(choiceKey).checked = true;
         return;
       }}
-      choices.set(key, {{
+      choices.set(choiceKey, {{
         key: key,
+        choiceKey: choiceKey,
         backend: target.backend || key.split("/")[0],
         projectName: target.projectName || key.split("/").slice(1).join("/"),
         displayName: target.displayName || target.projectName || key,
@@ -1929,6 +2128,9 @@ def build_html(
         prepared: Boolean(target.prepared),
         autoTrain: Boolean(target.autoTrain),
         latestRunText: target.latestRunText || "",
+        runName: target.runName || "",
+        versionName: target.versionName || "",
+        displayStatus: target.displayStatus || "",
         kind: target.kind || "existing",
         checked: Boolean(checked),
       }});
@@ -1944,47 +2146,73 @@ def build_html(
     function renderTrainingTargetChoices() {{
       if (!trainingTargetOptions) return;
       trainingTargetOptions.innerHTML = "";
-      trainingTargetChoices().forEach(function (target) {{
+      const choices = trainingTargetChoices();
+      choices.forEach(function (target) {{
         const label = document.createElement("label");
-        label.className = "training-target-option";
+        label.className = "training-target-option " + (target.kind === "new" ? "create-new" : "existing-fine-tuned");
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.value = target.key;
         checkbox.checked = Boolean(target.checked);
         checkbox.dataset.targetKey = target.key;
+        checkbox.dataset.choiceKey = target.choiceKey;
         label.appendChild(checkbox);
 
         const body = document.createElement("span");
         const title = document.createElement("strong");
-        title.textContent = target.backendLabel + " / " + (target.displayName || target.projectName);
+        title.textContent = target.kind === "new"
+          ? "Create new " + target.backendLabel + " fine-tuned model / " + (target.displayName || target.projectName)
+          : target.backendLabel + " / " + (target.displayName || target.projectName);
         body.appendChild(title);
 
         const meta = document.createElement("small");
         const details = [];
-        if (target.kind === "default") details.push("default setup");
+        if (target.kind === "new") details.push("new fine-tuned model");
+        if (target.kind === "fine_tuned") details.push("previous fine-tuned model");
         if (target.prepared) details.push("prepared");
         if (target.autoTrain) details.push("auto-train saved");
         details.push(String(target.sampleCount || 0) + " sample(s)");
+        if (target.versionName && target.versionName !== target.displayName) details.push("version: " + target.versionName);
+        if (target.runName) details.push("run: " + target.runName);
         if (target.latestRunText) details.push("latest: " + target.latestRunText);
         meta.textContent = details.join(" | ");
         body.appendChild(meta);
         label.appendChild(body);
         trainingTargetOptions.appendChild(label);
       }});
+      if (!choices.some(function (target) {{ return target.kind === "fine_tuned"; }})) {{
+        const note = document.createElement("p");
+        note.className = "training-target-empty";
+        note.textContent = "No previous fine-tuned runs are available yet. Use the checked create-new target above.";
+        trainingTargetOptions.appendChild(note);
+      }}
     }}
 
     function selectedDialogTargets() {{
       if (!trainingTargetOptions) return [];
-      return Array.from(trainingTargetOptions.querySelectorAll("input[data-target-key]:checked")).map(function (input) {{
-        return input.value;
-      }});
+      const seenTargets = new Set();
+      return Array.from(trainingTargetOptions.querySelectorAll("input[data-target-key]:checked"))
+        .map(function (input) {{ return input.value; }})
+        .filter(function (value) {{
+          if (seenTargets.has(value)) return false;
+          seenTargets.add(value);
+          return true;
+        }});
     }}
 
     function setTrainingTargetHiddenInputs(targets, queueSelected) {{
       if (!trainingTargetFields) return;
       trainingTargetFields.innerHTML = "";
       const values = targets && targets.length ? targets : currentTrainingTargets().map(function (target) {{ return target.key; }});
+      const labelByTarget = new Map();
+      trainingTargetChoices().forEach(function (target) {{
+        if (labelByTarget.has(target.key)) return;
+        const label = target.kind === "new"
+          ? "Create new " + target.backendLabel + " fine-tuned model / " + (target.displayName || target.projectName)
+          : target.backendLabel + " / " + (target.displayName || target.projectName);
+        labelByTarget.set(target.key, label);
+      }});
       function appendHidden(name, value) {{
         const input = document.createElement("input");
         input.type = "hidden";
@@ -1994,6 +2222,20 @@ def build_html(
       }}
       values.forEach(function (value) {{
         appendHidden("label_training_targets", value);
+      }});
+      const firstValue = String(values[0] || "");
+      if (firstValue.indexOf("/") > 0) {{
+        const firstBackend = firstValue.split("/", 1)[0];
+        const firstProject = firstValue.split("/").slice(1).join("/");
+        appendHidden("label_backend", firstBackend);
+        appendHidden("label_project_name", firstProject);
+      }}
+      const versionName = newTrainingVersionName ? String(newTrainingVersionName.value || "").trim() : "";
+      if (versionName) {{
+        appendHidden("label_new_training_name", versionName);
+      }}
+      values.forEach(function (value) {{
+        appendHidden("label_training_target_label", labelByTarget.get(value) || value);
       }});
       if (queueSelected) {{
         values.forEach(function (value) {{
@@ -2604,19 +2846,54 @@ def build_html(
       return speaker + " | " + formatSeconds(start) + "s to " + formatSeconds(end) + "s";
     }}
 
+    // Track the rows we last marked .current so we can flip just those two
+    // instead of touching every row on the page each tick. Used to call
+    // foreach across cueRows + labelRows -- with a few thousand rows that was
+    // ~6000 classList writes per playback frame, which felt like the page was
+    // frozen. Diff-based update is O(1).
+    let lastCurrentCue = null;
+    let lastCurrentLabel = null;
+    let lastNowPlayingTime = null;
+    let lastNowPlayingCueIndex = null;
+    let lastNowPlayingLabelKey = null;
     function setCurrentRows() {{
       if (!media) return;
-      syncLabelSegments(false);
+      // Important: do NOT walk rows here to refresh their datasets. That used
+      // to live at the top of this function, but it ran on every timeupdate
+      // (so 60x/sec via rAF) and was the dominant cost on long files. Row
+      // datasets are kept in sync by the input/change handlers, which is the
+      // only time they actually change.
       const time = media.currentTime;
+      updateCurrentTimeReadout();
       const labelRowsNow = labelRowList();
       const currentCue = activeRow(cueRows, time);
       const currentLabel = activeRow(labelRowsNow, time);
-      cueRows.forEach(function (row) {{
-        row.classList.toggle("current", row === currentCue);
-      }});
-      labelRowsNow.forEach(function (row) {{
-        row.classList.toggle("current", row === currentLabel);
-      }});
+      if (currentCue !== lastCurrentCue) {{
+        if (lastCurrentCue) lastCurrentCue.classList.remove("current");
+        if (currentCue) currentCue.classList.add("current");
+        lastCurrentCue = currentCue;
+      }}
+      if (currentLabel !== lastCurrentLabel) {{
+        if (lastCurrentLabel) lastCurrentLabel.classList.remove("current");
+        if (currentLabel) currentLabel.classList.add("current");
+        lastCurrentLabel = currentLabel;
+      }}
+      // Avoid rebuilding the now-playing strip every tick if nothing visible
+      // would change. innerHTML rewrites force layout; skipping when the
+      // underlying values match the previous frame is essentially free.
+      const cueIdentity = currentCue ? (currentCue.dataset.index || "") + ":" + (currentCue.dataset.speaker || "") : "";
+      const labelIdentity = currentLabel ? (currentLabel.dataset.position || "") + ":" + (currentLabel.dataset.speaker || "") : "";
+      const roundedTime = Math.round(time * 10) / 10;
+      if (
+        roundedTime === lastNowPlayingTime &&
+        cueIdentity === lastNowPlayingCueIndex &&
+        labelIdentity === lastNowPlayingLabelKey
+      ) {{
+        return;
+      }}
+      lastNowPlayingTime = roundedTime;
+      lastNowPlayingCueIndex = cueIdentity;
+      lastNowPlayingLabelKey = labelIdentity;
       nowPlaying.innerHTML = "";
       const mainLine = document.createElement("span");
       mainLine.textContent = "Time " + formatSeconds(time) + " seconds | " + cueSummary(currentCue);
@@ -2662,6 +2939,13 @@ def build_html(
       if (!table || !showLabelDialogue) return;
       table.classList.toggle("hide-dialogue", !showLabelDialogue.checked);
       if (labelIncludeTranscript) labelIncludeTranscript.value = showLabelDialogue.checked ? "1" : "0";
+      if (labelDialogueToggleText) labelDialogueToggleText.textContent = showLabelDialogue.checked ? "Hide Dialogue" : "Show Dialogue";
+    }}
+
+    function updateCurrentTimeReadout() {{
+      if (!currentTimeReadout) return;
+      const time = media && Number.isFinite(media.currentTime) ? media.currentTime : 0;
+      currentTimeReadout.textContent = "Current: " + formatSeconds(time) + "s";
     }}
 
     function clearLabelAutoSave() {{
@@ -2681,6 +2965,23 @@ def build_html(
       saveStatus.style.display = "block";
       saveStatus.textContent = message;
     }}
+
+    // The dashboard's labels list polls the file-system record for status. If
+    // the user edits and immediately hits Back, we want the row to show
+    // "draft" rather than "not started" — so flip the visible status pill the
+    // moment any edit happens, instead of waiting for the round-trip to land.
+    const labelStatePill = document.querySelector(".label-state");
+    let visibleStatusFlipped = false;
+    function markVisibleStatusDraft() {{
+      if (visibleStatusFlipped || !labelStatePill) return;
+      visibleStatusFlipped = true;
+      labelStatePill.textContent = "Status: draft";
+    }}
+
+    // Force a save on the very first edit so the dashboard sees "draft" right
+    // away. Subsequent edits keep using the 1500 ms debounce so we don't slam
+    // the server while someone is mid-typing.
+    let firstEditSaved = false;
 
     function runLabelAutoSave() {{
       labelAutoSaveTimer = null;
@@ -2724,9 +3025,79 @@ def build_html(
 
     function scheduleLabelAutoSave() {{
       if (!window.fetch || labelForm.dataset.submitting === "true") return;
+      markVisibleStatusDraft();
+      if (!firstEditSaved) {{
+        // First edit after the page loads: skip the debounce so the row flips
+        // to "draft" on the dashboard before the user has a chance to navigate
+        // back. Bug we hit otherwise: edit, immediately hit Back, come back,
+        // and the row was still "not started" because the 1500 ms timer never
+        // fired.
+        firstEditSaved = true;
+        if (labelAutoSaveTimer) {{
+          window.clearTimeout(labelAutoSaveTimer);
+          labelAutoSaveTimer = null;
+        }}
+        runLabelAutoSave();
+        return;
+      }}
       if (labelAutoSaveTimer) window.clearTimeout(labelAutoSaveTimer);
       labelAutoSaveTimer = window.setTimeout(runLabelAutoSave, 1500);
     }}
+
+    // Last-ditch flush when the page is being torn down (Back button, tab
+    // close, refresh). sendBeacon survives unload where a normal fetch would
+    // be cancelled, so any change still sitting in the debounce window gets
+    // delivered. fetch with keepalive is the fallback for browsers that don't
+    // implement sendBeacon (older Safari).
+    function flushLabelAutoSaveOnUnload() {{
+      if (labelForm.dataset.submitting === "true") return;
+      const hasPending = labelAutoSaveTimer || labelAutoSaveController;
+      if (!hasPending && !firstEditSaved) return;
+      if (labelAutoSaveTimer) {{
+        window.clearTimeout(labelAutoSaveTimer);
+        labelAutoSaveTimer = null;
+      }}
+      if (labelAutoSaveController) {{
+        labelAutoSaveController.abort();
+        labelAutoSaveController = null;
+      }}
+      try {{
+        syncLabelSegments(false);
+        syncLabelDialogueVisibility();
+      }} catch (_err) {{}}
+      const formData = new FormData(labelForm);
+      formData.set("label_segments", labelSegments.value);
+      if (labelIncludeTranscript) formData.set("label_include_transcript", labelIncludeTranscript.value);
+      formData.set("label_action", "draft");
+      formData.set("label_auto_save", "1");
+      let delivered = false;
+      if (navigator.sendBeacon) {{
+        try {{
+          delivered = navigator.sendBeacon(labelForm.action, formData);
+        }} catch (_err) {{
+          delivered = false;
+        }}
+      }}
+      if (!delivered && window.fetch) {{
+        try {{
+          window.fetch(labelForm.action, {{
+            method: "POST",
+            body: formData,
+            credentials: "same-origin",
+            keepalive: true,
+            redirect: "manual",
+          }});
+        }} catch (_err) {{}}
+      }}
+    }}
+
+    window.addEventListener("pagehide", flushLabelAutoSaveOnUnload);
+    // visibilitychange catches the case where the OS / browser puts the tab
+    // in the background without unloading it (mobile, tab discard); we still
+    // want any pending edits durable before the tab can be killed.
+    document.addEventListener("visibilitychange", function () {{
+      if (document.visibilityState === "hidden") flushLabelAutoSaveOnUnload();
+    }});
 
     function playRange(start, end, selectedRow) {{
       if (!media) return;
@@ -2816,7 +3187,7 @@ def build_html(
       const row = document.createElement("tr");
       row.setAttribute("data-label-row", "");
       row.setAttribute("tabindex", "0");
-      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="text" inputmode="decimal" value=""></label><label><span>End</span><input class="label-end" type="text" inputmode="decimal" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
+      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="text" inputmode="decimal" value=""></label><label><span>End</span><input class="label-end" type="text" inputmode="decimal" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="toggle-done-label" type="button" aria-pressed="false" title="Click after I have labeled this row. Marks the row green.">Mark done</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
       labelRows.appendChild(row);
       renumberLabelRows();
       return row;
@@ -2828,6 +3199,9 @@ def build_html(
       row.querySelector(".label-speaker").value = speaker && speaker !== "-" ? speaker : "";
       row.querySelector(".label-dialogue").value = note || "";
       updateLabelRowDataset(row);
+      // Newly-populated row may match a previously-marked-done identity from
+      // an earlier session (e.g. dragged the same cue back in); refresh.
+      if (typeof applyDoneStateToRow === "function") applyDoneStateToRow(row);
     }}
 
     function useCueAsLabel(cueRow) {{
@@ -2885,12 +3259,87 @@ def build_html(
       scheduleLabelAutoSave();
     }}
 
+    // "I've already labeled this row" -- a manual checkmark per row, stored
+     // in localStorage keyed by the audio file. The pipeline doesn't see it,
+     // it just helps me visually track which rows I've already gone through
+     // on long files. Identity is the row's content (start|end|speaker), so
+     // editing a row clears its done-mark automatically (which is the right
+     // behavior -- if I changed the times, I should re-confirm it).
+    const DONE_LABEL_STORAGE_KEY = "doneLabels.v1." + (mediaFileNameForStorage() || "_unknown_");
+    function mediaFileNameForStorage() {{
+      const audioInput = labelForm.querySelector("input[name='audio_file']");
+      return audioInput ? String(audioInput.value || "").trim() : "";
+    }}
+    function readDoneRowSet() {{
+      try {{
+        const raw = window.localStorage.getItem(DONE_LABEL_STORAGE_KEY);
+        if (!raw) return new Set();
+        const parsed = JSON.parse(raw);
+        return new Set(Array.isArray(parsed) ? parsed.filter(function (v) {{ return typeof v === "string"; }}) : []);
+      }} catch (_err) {{ return new Set(); }}
+    }}
+    function writeDoneRowSet(set) {{
+      try {{
+        window.localStorage.setItem(DONE_LABEL_STORAGE_KEY, JSON.stringify(Array.from(set)));
+      }} catch (_err) {{}}
+    }}
+    let doneRowSet = readDoneRowSet();
+    function rowDoneIdentity(row) {{
+      if (!row) return "";
+      const start = row.dataset.start || "";
+      const end = row.dataset.end || "";
+      const speaker = row.dataset.speaker || "";
+      // Empty rows would all share the same id and would mass-toggle together.
+      // Require some content before we treat a row as identifiable.
+      if (!start && !end && !speaker) return "";
+      return start + "|" + end + "|" + speaker;
+    }}
+    function applyDoneStateToRow(row) {{
+      if (!row) return;
+      const identity = rowDoneIdentity(row);
+      const button = row.querySelector(".toggle-done-label");
+      const isDone = Boolean(identity) && doneRowSet.has(identity);
+      row.classList.toggle("is-done", isDone);
+      if (button) {{
+        button.classList.toggle("is-on", isDone);
+        button.setAttribute("aria-pressed", isDone ? "true" : "false");
+        button.textContent = isDone ? "Done ✓" : "Mark done";
+      }}
+    }}
+    function applyDoneStateToAllRows() {{
+      labelRowList().forEach(applyDoneStateToRow);
+    }}
+    function toggleRowDone(row) {{
+      if (!row) return;
+      // updateLabelRowDataset keeps row.dataset.start/end/speaker fresh from
+      // the current input values, so identity is computed against the latest
+      // text the user has typed -- not whatever was there at page load.
+      updateLabelRowDataset(row);
+      const identity = rowDoneIdentity(row);
+      if (!identity) {{
+        window.alert("Fill in start, end, or speaker before marking the row done.");
+        return;
+      }}
+      if (doneRowSet.has(identity)) {{
+        doneRowSet.delete(identity);
+      }} else {{
+        doneRowSet.add(identity);
+      }}
+      writeDoneRowSet(doneRowSet);
+      applyDoneStateToRow(row);
+    }}
+
     labelRows.addEventListener("click", function (event) {{
       const row = event.target.closest("[data-label-row]");
       if (!row) return;
       if (event.target.closest("button.delete-label")) {{
         event.stopPropagation();
         deleteLabelRow(row);
+        return;
+      }}
+      if (event.target.closest("button.toggle-done-label")) {{
+        event.stopPropagation();
+        toggleRowDone(row);
         return;
       }}
       setSelectedLabelRow(row);
@@ -2907,16 +3356,34 @@ def build_html(
       if (row) setSelectedLabelRow(row);
     }});
 
-    labelRows.addEventListener("input", function () {{
-      syncLabelSegments();
-      applyLabelFilters();
-      setCurrentRows();
+    // The big lag culprit during typing was that every keystroke ran
+    // syncLabelSegments + applyLabelFilters + setCurrentRows -- each of those
+    // walks every row. On a long file with hundreds of labels, that's the
+    // page locking up while you type. The fix: just refresh the *one* row
+    // that changed, and let the auto-save (1.5 s debounce) rebuild the
+    // serialized segments before it actually POSTs. Filter visibility only
+    // needs a full walk when the filter UI changes, not on every keystroke.
+    labelRows.addEventListener("input", function (event) {{
+      const row = event.target.closest("[data-label-row]");
+      if (row) {{
+        updateLabelRowDataset(row);
+        // Identity is content-based, so editing start/end/speaker can clear
+        // an existing "done" mark. Refresh the visual right away.
+        applyDoneStateToRow(row);
+      }}
       scheduleLabelAutoSave();
     }});
-    labelRows.addEventListener("change", function () {{
+    labelRows.addEventListener("change", function (event) {{
+      // "change" fires on blur / select-change -- we're stepping off a field,
+      // so it's worth doing the slightly heavier sync once to refresh health
+      // chips and filter visibility.
+      const row = event.target.closest("[data-label-row]");
+      if (row) {{
+        updateLabelRowDataset(row);
+        applyDoneStateToRow(row);
+      }}
       syncLabelSegments();
       applyLabelFilters();
-      setCurrentRows();
       scheduleLabelAutoSave();
     }});
 
@@ -3002,6 +3469,36 @@ def build_html(
     addLabelRow.addEventListener("click", appendBlankLabelRow);
     if (addLabelRowTop) addLabelRowTop.addEventListener("click", appendBlankLabelRow);
     if (setLabelTimeFromPlayer) setLabelTimeFromPlayer.addEventListener("click", setActiveLabelTimeFromPlayer);
+
+    // One-click "I just heard a speaker change, capture it now". Creates a
+    // fresh row, drops the playhead time into Start, focuses the speaker
+    // box so you can type the speaker name and keep listening.
+    const addLabelAtCurrentTime = document.getElementById("addLabelAtCurrentTime");
+    if (addLabelAtCurrentTime) {{
+      addLabelAtCurrentTime.addEventListener("click", function () {{
+        if (!media || !Number.isFinite(media.currentTime)) {{
+          window.alert("The audio player has no current time yet -- start playback or click the waveform first.");
+          return;
+        }}
+        const row = createLabelRow();
+        const stamp = formatSeconds(media.currentTime);
+        const startInput = row.querySelector(".label-start");
+        if (startInput) startInput.value = stamp;
+        updateLabelRowDataset(row);
+        setSelectedLabelRow(row);
+        renumberLabelRows();
+        syncLabelSegments();
+        applyLabelFilters();
+        row.scrollIntoView({{ block: "nearest" }});
+        const speakerInput = row.querySelector(".label-speaker");
+        if (speakerInput) {{
+          speakerInput.focus();
+          speakerInput.select();
+        }}
+        scheduleLabelAutoSave();
+        setPlaybackMessage("Started a new label at " + stamp + "s.", "Type the speaker name and the End time when ready.");
+      }});
+    }}
 
     function setLabelFormBusy(isBusy) {{
       labelForm.dataset.submitting = isBusy ? "true" : "";
@@ -3091,14 +3588,426 @@ def build_html(
       }});
     }}
 
+    // timeupdate fires several times a second during playback. drawWaveform
+    // does a full canvas redraw and setCurrentRows walks every row, so calling
+    // them straight from the event handler used to chew CPU and make the page
+    // feel laggy. Coalesce the work into one rAF tick per frame instead.
+    let waveformDrawScheduled = false;
+    let currentRowsScheduled = false;
+    function requestDrawWaveform() {{
+      if (waveformDrawScheduled) return;
+      waveformDrawScheduled = true;
+      window.requestAnimationFrame(function () {{
+        waveformDrawScheduled = false;
+        drawWaveform();
+      }});
+    }}
+    function requestSetCurrentRows() {{
+      if (currentRowsScheduled) return;
+      currentRowsScheduled = true;
+      window.requestAnimationFrame(function () {{
+        currentRowsScheduled = false;
+        setCurrentRows();
+      }});
+    }}
     if (media) {{
       media.load();
-      media.addEventListener("timeupdate", setCurrentRows);
-      media.addEventListener("timeupdate", drawWaveform);
+      media.addEventListener("timeupdate", requestSetCurrentRows);
+      media.addEventListener("timeupdate", requestDrawWaveform);
       media.addEventListener("seeked", setCurrentRows);
-      media.addEventListener("seeked", drawWaveform);
+      media.addEventListener("seeked", requestDrawWaveform);
       media.addEventListener("pause", setCurrentRows);
       media.addEventListener("loadedmetadata", drawWaveform);
+    }}
+
+    /*
+     * Local audio cache (IndexedDB).
+     *
+     * The dashboard serves WAVs over a WAVE-cluster NFS mount. Every time I
+     * open a review page the browser has to stream chunks back through that
+     * mount before playback can start, and that's where most of the felt
+     * lag was coming from. Once the file lives in IndexedDB on this device,
+     * the next visit (and every visit after) skips the network entirely:
+     * we read the Blob locally, hand it to the <audio> element as a
+     * blob: URL, and playback starts instantly.
+     *
+     * First visit: keep the streaming src so playback starts immediately.
+     * The Cache audio button saves the whole file locally without forcing that
+     * full download during page load.
+     *
+     * Cache invalidation is by URL + content-length, so if a file is
+     * regenerated server-side with a different size it's redownloaded
+     * instead of returning stale audio.
+     */
+    const AUDIO_CACHE_DB_NAME = "ml-speech-audio-cache";
+    const AUDIO_CACHE_STORE = "blobs";
+    const AUDIO_CACHE_DB_VERSION = 1;
+    const audioCacheStatus = document.getElementById("audioCacheStatus");
+    const cacheAudioButton = document.getElementById("cacheAudioButton");
+    const cacheAllAudioButton = document.getElementById("cacheAllAudioButton");
+    const clearAudioCacheButton = document.getElementById("clearAudioCacheButton");
+
+    function setAudioCacheStatus(message, kind) {{
+      if (!audioCacheStatus) return;
+      audioCacheStatus.textContent = message;
+      audioCacheStatus.classList.remove("is-cached", "is-fetching", "is-error");
+      if (kind) audioCacheStatus.classList.add(kind);
+    }}
+    function showClearAudioCacheButton(show) {{
+      if (clearAudioCacheButton) clearAudioCacheButton.hidden = !show;
+    }}
+    function showCacheAudioButton(show) {{
+      if (cacheAudioButton) cacheAudioButton.hidden = !show;
+    }}
+    function setCacheAudioButtonBusy(isBusy) {{
+      if (cacheAudioButton) cacheAudioButton.disabled = isBusy;
+      if (cacheAllAudioButton) cacheAllAudioButton.disabled = isBusy;
+    }}
+    function normalizedAudioCacheUrl(href) {{
+      const raw = String(href || "").trim();
+      if (!raw) return "";
+      try {{
+        return new URL(raw, window.location.href).href;
+      }} catch (_err) {{
+        return "";
+      }}
+    }}
+
+    function openAudioCacheDb() {{
+      return new Promise(function (resolve) {{
+        if (!window.indexedDB) {{ resolve(null); return; }}
+        let request;
+        try {{
+          request = window.indexedDB.open(AUDIO_CACHE_DB_NAME, AUDIO_CACHE_DB_VERSION);
+        }} catch (_err) {{ resolve(null); return; }}
+        request.onupgradeneeded = function () {{
+          const db = request.result;
+          if (!db.objectStoreNames.contains(AUDIO_CACHE_STORE)) {{
+            db.createObjectStore(AUDIO_CACHE_STORE);
+          }}
+        }};
+        request.onsuccess = function () {{ resolve(request.result); }};
+        request.onerror = function () {{ resolve(null); }};
+        request.onblocked = function () {{ resolve(null); }};
+      }});
+    }}
+    function audioCacheRead(db, key) {{
+      return new Promise(function (resolve) {{
+        try {{
+          const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
+          const get = tx.objectStore(AUDIO_CACHE_STORE).get(key);
+          get.onsuccess = function () {{ resolve(get.result || null); }};
+          get.onerror = function () {{ resolve(null); }};
+        }} catch (_err) {{ resolve(null); }}
+      }});
+    }}
+    function audioCacheWrite(db, key, value) {{
+      return new Promise(function (resolve) {{
+        try {{
+          const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
+          const put = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
+          put.onsuccess = function () {{ resolve(true); }};
+          put.onerror = function () {{ resolve(false); }};
+        }} catch (_err) {{ resolve(false); }}
+      }});
+    }}
+    function audioCacheDelete(db, key) {{
+      return new Promise(function (resolve) {{
+        try {{
+          const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
+          const del = tx.objectStore(AUDIO_CACHE_STORE).delete(key);
+          del.onsuccess = function () {{ resolve(true); }};
+          del.onerror = function () {{ resolve(false); }};
+        }} catch (_err) {{ resolve(false); }}
+      }});
+    }}
+
+    function formatMb(bytes) {{
+      if (!Number.isFinite(bytes) || bytes <= 0) return "?";
+      return (bytes / 1048576).toFixed(1) + " MB";
+    }}
+
+    function swapMediaToBlob(blob, sourceUrl) {{
+      if (!media) return;
+      // If the user is already listening, swapping the src would briefly
+      // pause-and-restart playback, which is jarring mid-segment. Defer
+      // until the next pause/end -- the blob is already saved in IDB, so
+      // the next visit will pick it up instantly even if we never swap on
+      // this visit.
+      const performSwap = function () {{
+        const wasPlaying = !media.paused && !media.ended;
+        const previousTime = Number.isFinite(media.currentTime) ? media.currentTime : 0;
+        if (media.dataset.cacheBlobUrl) {{
+          try {{ URL.revokeObjectURL(media.dataset.cacheBlobUrl); }} catch (_e) {{}}
+        }}
+        const blobUrl = URL.createObjectURL(blob);
+        media.dataset.cacheBlobUrl = blobUrl;
+        media.dataset.cacheStreamingSrc = sourceUrl;
+        media.src = blobUrl;
+        media.load();
+        const onReady = function () {{
+          media.removeEventListener("loadedmetadata", onReady);
+          try {{ media.currentTime = previousTime; }} catch (_e) {{}}
+          if (wasPlaying) {{
+            const playPromise = media.play();
+            if (playPromise && typeof playPromise.catch === "function") playPromise.catch(function () {{}});
+          }}
+          requestDrawWaveform();
+        }};
+        media.addEventListener("loadedmetadata", onReady, {{ once: true }});
+      }};
+      if (media.paused || media.ended) {{
+        performSwap();
+      }} else {{
+        media.addEventListener("pause", performSwap, {{ once: true }});
+        media.addEventListener("ended", performSwap, {{ once: true }});
+      }}
+    }}
+
+    async function fetchAudioWithProgress(sourceUrl) {{
+      const response = await window.fetch(sourceUrl, {{ credentials: "same-origin", cache: "force-cache" }});
+      if (!response.ok) {{
+        throw new Error("audio fetch returned " + response.status);
+      }}
+      const totalHeader = response.headers.get("content-length");
+      const total = totalHeader ? parseInt(totalHeader, 10) : 0;
+      if (!response.body || !response.body.getReader) {{
+        setAudioCacheStatus("Caching to local: downloading audio...", "is-fetching");
+        const blob = await response.blob();
+        return {{
+          blob,
+          contentLength: total || blob.size,
+        }};
+      }}
+      const reader = response.body.getReader();
+      const chunks = [];
+      let received = 0;
+      while (true) {{
+        const step = await reader.read();
+        if (step.done) break;
+        chunks.push(step.value);
+        received += step.value.length;
+        if (total > 0) {{
+          const percent = Math.min(99, Math.floor((received / total) * 100));
+          setAudioCacheStatus("Caching to local: " + percent + "% (" + formatMb(received) + " / " + formatMb(total) + ")", "is-fetching");
+        }} else {{
+          setAudioCacheStatus("Caching to local: " + formatMb(received), "is-fetching");
+        }}
+      }}
+      const contentType = response.headers.get("content-type") || "audio/wav";
+      return {{
+        blob: new Blob(chunks, {{ type: contentType }}),
+        contentLength: total || received,
+      }};
+    }}
+
+    async function refreshAudioCacheWithNewDb(sourceUrl) {{
+      const db = await openAudioCacheDb();
+      if (!db) {{
+        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
+        return;
+      }}
+      try {{
+        await refreshAudioCache(db, sourceUrl);
+      }} finally {{
+        try {{ db.close(); }} catch (_e) {{}}
+      }}
+    }}
+
+    async function ensureAudioCached() {{
+      if (!media) return;
+      const sourceUrl = media.currentSrc || media.src;
+      if (!sourceUrl || sourceUrl.startsWith("blob:") || sourceUrl.startsWith("data:")) {{
+        setAudioCacheStatus("Local cache: not applicable");
+        return;
+      }}
+      const db = await openAudioCacheDb();
+      if (!db) {{
+        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
+        return;
+      }}
+      try {{
+        const cached = await audioCacheRead(db, sourceUrl);
+        if (cached && cached.blob && cached.blob.size > 0) {{
+          swapMediaToBlob(cached.blob, sourceUrl);
+          setAudioCacheStatus("Cached locally · " + formatMb(cached.size || cached.blob.size) + " · zero network for playback", "is-cached");
+          showCacheAudioButton(false);
+          showClearAudioCacheButton(true);
+          // Background validation: if the server file's size differs from
+          // the cached entry, redownload silently so we don't keep stale
+          // audio. HEAD is cheap and won't compete with playback. Reopen IDB
+          // if the refresh is needed because this function closes its handle
+          // as soon as the cache check is done.
+          window.fetch(sourceUrl, {{ method: "HEAD", credentials: "same-origin" }})
+            .then(function (response) {{
+              if (!response.ok) return;
+              const total = parseInt(response.headers.get("content-length") || "0", 10);
+              if (total > 0 && cached.size && total !== cached.size) {{
+                refreshAudioCacheWithNewDb(sourceUrl);
+              }}
+            }})
+            .catch(function () {{}});
+          return;
+        }}
+        setAudioCacheStatus("Local cache: not saved yet. Use Cache audio to make future opens faster.");
+        showCacheAudioButton(true);
+        showClearAudioCacheButton(false);
+      }} finally {{
+        try {{ db.close(); }} catch (_e) {{}}
+      }}
+    }}
+
+    async function refreshAudioCache(db, sourceUrl) {{
+      showCacheAudioButton(false);
+      setCacheAudioButtonBusy(true);
+      setAudioCacheStatus("Caching audio locally. Playback can continue while this runs...", "is-fetching");
+      try {{
+        const result = await fetchAudioWithProgress(sourceUrl);
+        const stored = await audioCacheWrite(db, sourceUrl, {{
+          blob: result.blob,
+          size: result.contentLength,
+          savedAt: Date.now(),
+        }});
+        if (stored) {{
+          swapMediaToBlob(result.blob, sourceUrl);
+          setAudioCacheStatus("Cached locally · " + formatMb(result.contentLength) + " · zero network for playback", "is-cached");
+          showCacheAudioButton(false);
+          showClearAudioCacheButton(true);
+        }} else {{
+          setAudioCacheStatus("Local cache: write failed (likely out of quota)", "is-error");
+          showCacheAudioButton(true);
+        }}
+      }} catch (err) {{
+        setAudioCacheStatus("Local cache: download failed, staying on streaming src", "is-error");
+        showCacheAudioButton(true);
+      }} finally {{
+        setCacheAudioButtonBusy(false);
+      }}
+    }}
+
+    async function cacheAudioSourceWithoutSwap(db, sourceUrl) {{
+      const cached = await audioCacheRead(db, sourceUrl);
+      if (cached && cached.blob && cached.blob.size > 0) {{
+        return {{ status: "cached", bytes: cached.size || cached.blob.size }};
+      }}
+      const result = await fetchAudioWithProgress(sourceUrl);
+      const stored = await audioCacheWrite(db, sourceUrl, {{
+        blob: result.blob,
+        size: result.contentLength,
+        savedAt: Date.now(),
+      }});
+      if (!stored) throw new Error("cache write failed");
+      return {{ status: "stored", bytes: result.contentLength }};
+    }}
+
+    async function loadTrainingAudioCacheUrls() {{
+      const urls = [];
+      const seen = new Set();
+      const addUrl = function (href) {{
+        const url = normalizedAudioCacheUrl(href);
+        if (!url || seen.has(url) || url.startsWith("blob:") || url.startsWith("data:")) return;
+        seen.add(url);
+        urls.push(url);
+      }};
+      if (media) addUrl(media.dataset.cacheStreamingSrc || media.currentSrc || media.src);
+      try {{
+        const stateUrl = appBasePath() + "/api/page-state?path=/training-labels";
+        const response = await window.fetch(stateUrl, {{ credentials: "same-origin", cache: "no-store" }});
+        if (!response.ok) return urls;
+        const payload = await response.json();
+        const rows = payload && payload.context && payload.context.trainingLabels
+          ? payload.context.trainingLabels.rows || []
+          : [];
+        rows.forEach(function (row) {{ addUrl(row.audioHref); }});
+      }} catch (_err) {{}}
+      return urls;
+    }}
+
+    async function cacheAllTrainingAudio() {{
+      if (!window.fetch || !window.indexedDB) {{
+        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
+        return;
+      }}
+      const urls = await loadTrainingAudioCacheUrls();
+      if (!urls.length) {{
+        setAudioCacheStatus("No audio files were found to cache.", "is-error");
+        return;
+      }}
+      const db = await openAudioCacheDb();
+      if (!db) {{
+        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
+        return;
+      }}
+      let stored = 0;
+      let alreadyCached = 0;
+      let failed = 0;
+      let bytes = 0;
+      setCacheAudioButtonBusy(true);
+      try {{
+        for (let index = 0; index < urls.length; index += 1) {{
+          const url = urls[index];
+          setAudioCacheStatus("Caching all audio: " + (index + 1) + " of " + urls.length, "is-fetching");
+          try {{
+            const result = await cacheAudioSourceWithoutSwap(db, url);
+            if (result.status === "cached") alreadyCached += 1;
+            else stored += 1;
+            bytes += Number(result.bytes || 0);
+          }} catch (_err) {{
+            failed += 1;
+          }}
+        }}
+        setAudioCacheStatus(
+          "Cache all finished: " + stored + " added, " + alreadyCached + " already cached" + (failed ? ", " + failed + " failed" : "") + ". " + formatMb(bytes) + " available locally.",
+          failed ? "is-error" : "is-cached"
+        );
+        showCacheAudioButton(false);
+        showClearAudioCacheButton(true);
+      }} finally {{
+        setCacheAudioButtonBusy(false);
+        try {{ db.close(); }} catch (_e) {{}}
+      }}
+    }}
+
+    if (cacheAudioButton) {{
+      cacheAudioButton.addEventListener("click", async function () {{
+        if (!media) return;
+        const sourceUrl = media.dataset.cacheStreamingSrc || media.currentSrc || media.src;
+        if (!sourceUrl || sourceUrl.startsWith("blob:") || sourceUrl.startsWith("data:")) return;
+        await refreshAudioCacheWithNewDb(sourceUrl);
+      }});
+    }}
+    if (cacheAllAudioButton) {{
+      cacheAllAudioButton.addEventListener("click", cacheAllTrainingAudio);
+    }}
+
+    if (clearAudioCacheButton) {{
+      clearAudioCacheButton.addEventListener("click", async function () {{
+        if (!media) return;
+        const sourceUrl = media.dataset.cacheStreamingSrc || media.currentSrc || media.src;
+        if (!sourceUrl) return;
+        const db = await openAudioCacheDb();
+        if (!db) return;
+        try {{
+          await audioCacheDelete(db, sourceUrl);
+          setAudioCacheStatus("Local cache cleared. Reload to re-download.");
+          showCacheAudioButton(true);
+          showClearAudioCacheButton(false);
+        }} finally {{
+          try {{ db.close(); }} catch (_e) {{}}
+        }}
+      }});
+    }}
+
+    if (media) {{
+      // Defer the first cache check until the page is past first paint so
+      // we don't fight with everything else loading. requestIdleCallback
+      // is best when available, otherwise just delay a tick.
+      const kickCache = function () {{ ensureAudioCached(); }};
+      if (typeof window.requestIdleCallback === "function") {{
+        window.requestIdleCallback(kickCache, {{ timeout: 1500 }});
+      }} else {{
+        window.setTimeout(kickCache, 250);
+      }}
     }}
     if (playbackRate && media) {{
       playbackRate.addEventListener("change", function () {{
@@ -3117,8 +4026,65 @@ def build_html(
         setCurrentRows();
         drawWaveform();
       }});
-      window.addEventListener("resize", drawWaveform);
-      loadWaveform();
+      window.addEventListener("resize", requestDrawWaveform);
+      // Auto-load the waveform like the original program did. The IndexedDB
+      // audio cache means after the first visit the WAV is local on this
+      // device, so the fetch is fast; decodeAudioData still does the bulk of
+      // the work but it's a one-shot cost per page load and runs off the
+      // critical path (idle callback / short delay), so the rest of the UI
+      // stays responsive while it's working. The "Reload waveform" button
+      // is kept as a manual escape hatch for when decoding fails.
+      const loadWaveformButton = document.getElementById("loadWaveformButton");
+      let waveformLoadKicked = false;
+      function kickWaveformLoad() {{
+        if (waveformLoadKicked) return;
+        waveformLoadKicked = true;
+        if (waveformStatus) waveformStatus.textContent = "Loading waveform...";
+        if (loadWaveformButton) {{
+          loadWaveformButton.hidden = true;
+          loadWaveformButton.disabled = true;
+        }}
+        loadWaveform().finally(function () {{
+          if (loadWaveformButton) {{
+            loadWaveformButton.hidden = false;
+            loadWaveformButton.disabled = false;
+          }}
+        }});
+      }}
+      if (loadWaveformButton) {{
+        loadWaveformButton.addEventListener("click", function () {{
+          waveformLoadKicked = false;
+          waveformPeaks = [];
+          waveformLoaded = false;
+          requestDrawWaveform();
+          kickWaveformLoad();
+        }});
+      }}
+      // Draw the empty canvas right away so the panel isn't blank, then kick
+      // off the waveform decode after the page has had a beat to paint /
+      // restore audio from cache. requestIdleCallback when available keeps
+      // the main thread free for first input.
+      requestDrawWaveform();
+      const scheduleWaveform = function () {{
+        if (typeof window.requestIdleCallback === "function") {{
+          window.requestIdleCallback(kickWaveformLoad, {{ timeout: 2000 }});
+        }} else {{
+          window.setTimeout(kickWaveformLoad, 400);
+        }}
+      }};
+      // If the audio is already loaded enough to know its duration, kick the
+      // waveform right away. Otherwise wait for metadata so the fetch can
+      // benefit from the in-flight cache fill.
+      if (media && media.readyState >= 1) {{
+        scheduleWaveform();
+      }} else if (media) {{
+        media.addEventListener("loadedmetadata", scheduleWaveform, {{ once: true }});
+        // Backstop in case loadedmetadata never fires (slow / failed audio):
+        // the user still gets a chance at the waveform decode.
+        window.setTimeout(scheduleWaveform, 6000);
+      }} else {{
+        scheduleWaveform();
+      }}
     }} else if (waveformStatus) {{
       waveformStatus.textContent = "Waveform unavailable.";
     }}
@@ -3129,6 +4095,10 @@ def build_html(
     renumberLabelRows();
     syncLabelSegments();
     applyLabelFilters();
+    // syncLabelSegments populated row.dataset.start/.end/.speaker, so identity
+    // is now stable for every existing row. Restore checkmarks from the last
+    // session's localStorage view of which rows I'd already gone through.
+    applyDoneStateToAllRows();
     setCurrentRows();
     search.addEventListener("input", applyFilters);
     cueSpeakerFilter.addEventListener("change", applyFilters);
@@ -3137,21 +4107,53 @@ def build_html(
     labelSearch.addEventListener("input", applyLabelFilters);
     labelSpeakerFilter.addEventListener("change", applyLabelFilters);
     labelIssueFilter.addEventListener("change", applyLabelFilters);
-    labelForm.querySelectorAll("[name='label_backend'], [name='label_project_name']").forEach(function (field) {{
-      field.addEventListener("input", scheduleLabelAutoSave);
-      field.addEventListener("change", scheduleLabelAutoSave);
+    [newTrainingBackend, newTrainingProjectName, newTrainingVersionName].forEach(function (field) {{
+      if (!field) return;
+      field.addEventListener("input", renderTrainingTargetChoices);
+      field.addEventListener("change", renderTrainingTargetChoices);
     }});
     if (showLabelDialogue) showLabelDialogue.addEventListener("change", function () {{
       syncLabelDialogueVisibility();
       scheduleLabelAutoSave();
     }});
     syncLabelDialogueVisibility();
+    updateCurrentTimeReadout();
     rewind.addEventListener("click", function () {{
       if (!media) return;
       media.currentTime = Math.max(media.currentTime - 2, 0);
       setCurrentRows();
       drawWaveform();
     }});
+
+    // Big play/pause button next to the other transport controls. The native
+    // <audio> player still has its own controls; this just gives a larger
+    // hit-target right next to "Back 2 sec" and "Use Current Seconds" so
+    // labeling doesn't bounce between two corners of the page.
+    const playPauseButton = document.getElementById("playPauseButton");
+    function refreshPlayPauseButton() {{
+      if (!playPauseButton || !media) return;
+      const playing = !media.paused && !media.ended;
+      playPauseButton.textContent = playing ? "Pause" : "Play";
+      playPauseButton.setAttribute("aria-pressed", playing ? "true" : "false");
+      playPauseButton.classList.toggle("is-playing", playing);
+    }}
+    if (playPauseButton && media) {{
+      playPauseButton.addEventListener("click", function () {{
+        if (media.paused || media.ended) {{
+          const playPromise = media.play();
+          if (playPromise && typeof playPromise.catch === "function") {{
+            playPromise.catch(function () {{}});
+          }}
+        }} else {{
+          media.pause();
+        }}
+      }});
+      media.addEventListener("play", refreshPlayPauseButton);
+      media.addEventListener("playing", refreshPlayPauseButton);
+      media.addEventListener("pause", refreshPlayPauseButton);
+      media.addEventListener("ended", refreshPlayPauseButton);
+      refreshPlayPauseButton();
+    }}
   </script>
 </body>
 </html>

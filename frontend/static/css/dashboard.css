@@ -2593,6 +2593,33 @@ dialog.dashboard-dialog {
   margin: 0;
 }
 
+.label-audio-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.label-audio-toolbar button {
+  width: auto;
+  min-width: 104px;
+  padding: 7px 11px;
+  font-size: 13px;
+}
+
+.label-current-time {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+  color: var(--slate-dark);
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
 .label-audio .row-note {
   margin: 0;
   font-size: 13px;
@@ -2619,6 +2646,22 @@ dialog.dashboard-dialog {
   text-align: left;
   border-style: dashed;
   background: transparent;
+}
+
+.label-training-target {
+  margin: var(--space-3) 0 var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+}
+
+.label-training-target .inline {
+  align-items: flex-end;
+}
+
+.label-queue-toggle {
+  margin-bottom: 0;
 }
 
 .label-editor {
@@ -2652,7 +2695,7 @@ dialog.dashboard-dialog {
 }
 
 .label-editor-table {
-  min-width: 760px;
+  min-width: 980px;
   border: 0;
   table-layout: fixed;
 }
@@ -2672,8 +2715,25 @@ dialog.dashboard-dialog {
 .label-editor-table th:nth-child(3),
 .label-editor-table td:nth-child(2),
 .label-editor-table td:nth-child(3) {
+  width: 130px;
+  min-width: 130px;
+}
+
+.label-editor-table th:nth-child(4),
+.label-editor-table td:nth-child(4) {
   width: 150px;
   min-width: 150px;
+}
+
+.label-editor-table .label-dialogue-col,
+.label-editor-table .label-dialogue-cell {
+  width: 260px;
+  min-width: 260px;
+}
+
+.label-editor-table.hide-dialogue .label-dialogue-col,
+.label-editor-table.hide-dialogue .label-dialogue-cell {
+  display: none;
 }
 
 .label-editor-table input {
@@ -2685,8 +2745,21 @@ dialog.dashboard-dialog {
   background: rgba(255, 182, 0, 0.14);
 }
 
+.label-editor-table tr.is-done {
+  background: rgba(85, 113, 46, 0.14);
+}
+
 .label-editor-index {
   text-align: center;
+}
+
+.label-editor-table tr.is-done .label-editor-index::after {
+  display: block;
+  margin-top: 4px;
+  color: var(--palm);
+  font-size: 11px;
+  font-weight: 800;
+  content: "Done";
 }
 
 .label-row-handle {
@@ -2712,6 +2785,12 @@ dialog.dashboard-dialog {
   white-space: nowrap;
 }
 
+.label-done-button.is-on {
+  border-color: var(--palm);
+  color: var(--palm);
+  font-weight: 800;
+}
+
 .label-optional-details {
   margin-top: var(--space-3);
 }
@@ -2733,6 +2812,31 @@ dialog.dashboard-dialog {
   align-items: center;
   gap: var(--space-3);
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.training-cache-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  max-width: 360px;
+}
+
+.training-cache-controls .field-status {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  text-align: right;
+}
+
+.training-cache-controls .cache-status-error {
+  color: #9f2f2f;
+}
+
+.training-cache-controls .cache-status-done {
+  color: #2f4a18;
 }
 
 .training-labels-toggle {
@@ -2766,6 +2870,9 @@ dialog.dashboard-dialog {
   }
   .label-editor-head button {
     align-self: flex-start;
+  }
+  .label-audio-toolbar button {
+    width: 100%;
   }
 }
 

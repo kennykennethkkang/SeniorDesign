@@ -1646,6 +1646,38 @@ def list_projects(*, root: Path = PROJECT_ROOT) -> list[dict[str, object]]:
     return summaries
 
 
+def _read_base_model_snapshot(metadata_path: Path, normalized_backend: str) -> dict[str, object]:
+    """Pull the base/pretrained model details out of a prepared project's metadata.json.
+
+    Different backends record the starting checkpoint under different keys
+    (pyannote stores `pyannote_pretrained_model`, NeMo stores `speaker_model` /
+    `config_name`), so we normalize them here into one structure the runs UI
+    can render without caring which backend produced it.
+    """
+
+    snapshot: dict[str, object] = {}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return snapshot
+    if not isinstance(metadata, dict):
+        return snapshot
+    if normalized_backend == "pyannote":
+        model = str(metadata.get("pyannote_pretrained_model") or "").strip()
+        if model:
+            snapshot["base_model"] = model
+            snapshot["base_model_kind"] = "pyannote_pretrained_model"
+    else:
+        speaker_model = str(metadata.get("speaker_model") or "").strip()
+        if speaker_model:
+            snapshot["base_model"] = speaker_model
+            snapshot["base_model_kind"] = "nemo_speaker_model"
+        config_name = str(metadata.get("config_name") or "").strip()
+        if config_name:
+            snapshot["base_model_config"] = config_name
+    return snapshot
+
+
 def launch_training(
     *,
     project_name: str,
@@ -1679,6 +1711,11 @@ def launch_training(
         version_name=version_name,
         root=root,
     )
+    # Snapshot the base model from the project's prepare-time metadata so the
+    # run record stands on its own. The project metadata gets rewritten every
+    # `prepare`, so without copying this in here we'd lose track of which
+    # checkpoint a finished run was actually based on.
+    base_model_snapshot = _read_base_model_snapshot(metadata_path, normalized_backend)
     run_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{version_slug}"
     run_dir = paths["runs_dir"] / run_name
     if run_dir.exists():
@@ -1755,6 +1792,7 @@ def launch_training(
             "nemo_root": str(nemo_root.resolve()) if nemo_root else "",
             "python_bin": python_bin,
             "submission_returncode": completed.returncode,
+            **base_model_snapshot,
         }
         run_metadata_path = run_dir / "metadata.json"
         run_metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")
@@ -1840,6 +1878,7 @@ def launch_training(
         "wrapper_path": str(wrapper_path),
         "nemo_root": str(nemo_root.resolve()) if nemo_root else "",
         "python_bin": python_bin,
+        **base_model_snapshot,
     }
     run_metadata_path = run_dir / "metadata.json"
     run_metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")

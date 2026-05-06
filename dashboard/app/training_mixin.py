@@ -643,6 +643,17 @@ class TrainingLabelsMixin:
         requested_auto_target_keys = {target["key"] for target in requested_auto_targets}
         explicit_auto_train_targets = bool(requested_auto_target_keys)
         skip_auto_train = bool(form.getfirst("label_auto_train_skip"))
+        # "Start a new training run" toggle from the label-complete form. When the
+        # user ticks it on, every project this label gets saved into should also
+        # queue an auto-train, regardless of the project-wide auto_train flag.
+        # Lets the user opt in per-completion without flipping the persistent
+        # toggle on the project itself.
+        auto_train_now = bool(form.getfirst("label_auto_train_now"))
+        # Optional human-friendly name for the training run kicked off by this
+        # specific completion. Empty string means "let launch_training pick a
+        # default name" - same behavior as before this field existed.
+        new_training_name = (form.getfirst("label_new_training_name") or "").strip()
+        selected_training_target_label = (form.getfirst("label_training_target_label") or "").strip()
         raw_segments = (form.getfirst("label_segments") or "").strip()
         # Dialogue toggle: when off, drop the transcript before it gets stored in
         # the training sample. Diarization training never reads it, but it would
@@ -661,21 +672,23 @@ class TrainingLabelsMixin:
         label_review_path = (form.getfirst("label_review_path") or "").strip()
         action = (form.getfirst("label_action") or "draft").strip().lower()
         # Auto-save flag means the browser is debouncing a draft save in the
-        # background — skip the user-facing redirect/notification chain.
+        # background - skip the user-facing redirect/notification chain.
         auto_save = bool(form.getfirst("label_auto_save"))
+        existing_record = self.load_training_label_records().get(audio_name, {})
 
         base_record = {
             "backend": backend,
             "target_backends": target_backends,
             "target_projects": target_projects,
             "project_name": project_name,
+            "selected_training_target_label": selected_training_target_label,
             "label_segments": raw_segments,
             "transcript_text": transcript_text,
             "include_transcript": include_transcript,
             "issue_questions": issue_questions,
             "system_questions": [],
         }
-        # We always tag transcripts as "not aligned" with the speech-time labels —
+        # We always tag transcripts as "not aligned" with the speech-time labels -
         # we don't have time-stamped dialogue, so any saved transcript is just a
         # bag of text alongside the RTTM, not a per-segment annotation.
         if include_transcript and raw_transcript_text:
@@ -689,8 +702,20 @@ class TrainingLabelsMixin:
                 base_record["review_path"] = label_review_path
         if action != "complete":
             status = "needs_review" if issue_questions else "draft"
+            if (
+                auto_save
+                and status == "draft"
+                and self.training_label_status(existing_record) == "completed"
+                and str(existing_record.get("label_segments") or "").strip().replace("\r\n", "\n")
+                == raw_segments.replace("\r\n", "\n")
+            ):
+                # Opening a completed review page can trigger a background
+                # draft save with unchanged form data. Preserve the completed
+                # state and training-file bookkeeping unless the user makes a
+                # real edit or explicitly clicks Save For Later.
+                status = "completed"
             self.upsert_training_label_record(audio_name, {**base_record, "status": status})
-            # Auto-save shouldn't navigate the user away — the browser is
+            # Auto-save shouldn't navigate the user away - the browser is
             # debouncing this in the background while they keep editing.
             if auto_save:
                 return self.json_response("200 OK", {"status": "saved", "kind": status})
@@ -868,7 +893,7 @@ class TrainingLabelsMixin:
             "segment_count": len(segments),
         }
 
-        # Auto-train hook — explicit popup selections queue immediately. Legacy
+        # Auto-train hook - explicit popup selections queue immediately. Legacy
         # posts still honor the per-project auto-train toggle.
         from dashboard import auto_train as _auto_train
         auto_train_messages: list[str] = []
@@ -893,7 +918,7 @@ class TrainingLabelsMixin:
             should_queue = (
                 target_key in requested_auto_target_keys
                 if explicit_auto_train_targets
-                else bool(project_summary.get("auto_train"))
+                else (auto_train_now or bool(project_summary.get("auto_train")))
             )
             if not should_queue:
                 continue
@@ -909,19 +934,27 @@ class TrainingLabelsMixin:
                     f"Auto-train not queued for {target_key}: {exc}"
                 )
                 continue
-            queued = _auto_train.queue_auto_train(
-                target_project_name,
-                backend=target_backend,
-                root=self.root,
-                prepare_options=prepare_options,
-                extra_env=extra_env,
-            )
+            # Only forward version_name when the user actually typed one - keeps
+            # the call signature backward-compatible with anything (including
+            # tests) that monkey-patches queue_auto_train without the new kwarg.
+            queue_kwargs = {
+                "backend": target_backend,
+                "root": self.root,
+                "prepare_options": prepare_options,
+                "extra_env": extra_env,
+            }
+            if new_training_name:
+                queue_kwargs["version_name"] = new_training_name
+            queued = _auto_train.queue_auto_train(target_project_name, **queue_kwargs)
             if usage is not None:
                 usage["auto_train_requested"] = True
                 usage["auto_train_status"] = "queued" if queued else "pending"
+                if new_training_name:
+                    usage["requested_version_name"] = new_training_name
             queued_training_projects.append(target_key)
+            named_suffix = f" as '{new_training_name}'" if new_training_name else ""
             auto_train_messages.append(
-                f"Auto-train {'queued' if queued else 'pending'} for {target_key}."
+                f"Auto-train {'queued' if queued else 'pending'}{named_suffix} for {target_key}."
             )
         completed_record["training_usage"] = training_usage
         completed_record["queued_training_projects"] = queued_training_projects

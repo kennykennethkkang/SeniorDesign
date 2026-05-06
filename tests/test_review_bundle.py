@@ -57,6 +57,14 @@ class ReviewOutputsTests(unittest.TestCase):
                         "sample_count": 3,
                         "prepared": True,
                         "auto_train": True,
+                        "recent_runs": [
+                            {
+                                "status": "completed",
+                                "version_name": "speaker-lab-v2",
+                                "display_name": "Speaker Lab v2",
+                                "run_dir": str(temp_path / "fine_tuning" / "projects" / "pyannote" / "speaker-lab" / "runs" / "20260417T120000_speaker-lab-v2"),
+                            }
+                        ],
                     }
                 ],
                 quiet=True,
@@ -86,12 +94,22 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("id=\"setLabelTimeFromPlayer\"", html)
             self.assertIn("setActiveLabelTimeFromPlayer", html)
             self.assertIn("Use Current Seconds", html)
+            self.assertIn("manual-label-toolbar", html)
+            self.assertIn("id=\"currentTimeReadout\"", html)
             self.assertIn("formatSeconds", html)
             self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="0"', html)
-            self.assertIn('id="showLabelDialogue" type="checkbox"> Save dialogue', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox"> <span id="labelDialogueToggleText">Show Dialogue</span>', html)
             self.assertIn('<table class="label-table hide-dialogue">', html)
             self.assertIn("scheduleLabelAutoSave", html)
             self.assertIn("label_auto_save", html)
+            self.assertIn("flushLabelAutoSaveOnUnload", html)
+            self.assertIn("sendBeacon", html)
+            self.assertIn("firstEditSaved", html)
+            self.assertIn('id="cacheAudioButton"', html)
+            self.assertIn('id="cacheAllAudioButton"', html)
+            self.assertIn("cacheAllTrainingAudio", html)
+            self.assertIn("fetchAudioWithProgress", html)
+            self.assertIn("response.blob()", html)
             self.assertNotIn("Adjust selected label", html)
             self.assertNotIn("Set Start Here", html)
             self.assertIn("id=\"labelHealth\"", html)
@@ -102,6 +120,12 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("id=\"trainingTargetDialog\"", html)
             self.assertIn("id=\"trainingTargetData\"", html)
             self.assertIn("\"key\": \"pyannote/speaker-lab\"", html)
+            self.assertIn("Speaker Lab v2", html)
+            self.assertIn("previous fine-tuned model", html)
+            self.assertIn("Create new", html)
+            self.assertIn("id=\"newTrainingBackend\"", html)
+            self.assertIn("id=\"newTrainingProjectName\"", html)
+            self.assertIn("id=\"newTrainingVersionName\"", html)
             self.assertIn("Queue Selected", html)
 
             with report_path.open("r", encoding="utf-8", newline="") as handle:
@@ -143,7 +167,7 @@ class ReviewOutputsTests(unittest.TestCase):
 
             html = html_path.read_text(encoding="utf-8")
             self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="1"', html)
-            self.assertIn('id="showLabelDialogue" type="checkbox" checked> Save dialogue', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox" checked> <span id="labelDialogueToggleText">Hide Dialogue</span>', html)
             self.assertIn('<table class="label-table">', html)
             self.assertNotIn('<table class="label-table hide-dialogue">', html)
 

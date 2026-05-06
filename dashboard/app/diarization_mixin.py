@@ -69,7 +69,7 @@ from fine_tuning_manager import (
 )
 from workflow_background import launch_background_command, run_status, slurm_queue_snapshot, utc_now_iso
 from audio_numbering import AUDIO_EXTENSIONS, NUMBERED_PREFIX, normalize_audio_dir
-from review_bundle import parse_srt, write_review_bundle
+from review_bundle import REVIEW_BUNDLE_FORMAT_VERSION, parse_srt, write_review_bundle
 from workflow_cli import (
     DIARIZATION_RUNS_ROOT,
     OUTPUTS_ROOT,
@@ -1122,11 +1122,19 @@ class DiarizationMixin:
         r'<(?:audio|video)\b[^>]*\bsrc="([^"]+)"',
         re.IGNORECASE,
     )
+    # The bundle stamps its own format version into a meta tag. We use it to
+    # auto-regenerate stale review HTMLs (e.g. ones built before an auto-save
+    # or audio-loading fix) the next time the row is opened, so users picking
+    # up a fix don't have to manually rerun diarization.
+    _REVIEW_HTML_BUNDLE_VERSION = re.compile(
+        r'<meta\s+name="review-bundle-version"\s+content="(\d+)"',
+        re.IGNORECASE,
+    )
 
     def _review_html_is_missing_media(self, review_path: Path) -> bool:
         """Decide whether the existing review HTML's audio reference is broken.
 
-        Two failure modes regenerate the bundle:
+        Three failure modes regenerate the bundle:
 
         1. The HTML was generated when no media could be located, so it
            contains the explicit "No matching media file was found" marker.
@@ -1135,6 +1143,10 @@ class DiarizationMixin:
            cycle: the old src points at ``audio_in/002_clip.wav`` but the
            replacement now lives at ``audio_in/youtube_links/001_clip.wav``,
            so the player surface is technically present but loads a 404.
+        3. The HTML predates the current review-bundle format. We bump
+           ``REVIEW_BUNDLE_FORMAT_VERSION`` whenever the embedded JS or
+           markup changes in a way old bundles need to pick up — typically
+           bug fixes around auto-save, status display, or audio handling.
         """
 
         try:
@@ -1142,6 +1154,16 @@ class DiarizationMixin:
         except OSError:
             return False
         if "No matching media file was found" in text:
+            return True
+        version_match = self._REVIEW_HTML_BUNDLE_VERSION.search(text)
+        if version_match is None:
+            # Pre-versioned bundle. Definitely older than the current format.
+            return True
+        try:
+            bundle_version = int(version_match.group(1))
+        except ValueError:
+            return True
+        if bundle_version < REVIEW_BUNDLE_FORMAT_VERSION:
             return True
         match = self._REVIEW_HTML_AUDIO_SRC.search(text)
         if not match:

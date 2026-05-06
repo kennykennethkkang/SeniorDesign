@@ -9,6 +9,10 @@
   const IDLE_TRACKING_INTERVAL_MS = 5000;
   const ACTIVE_RUN_STATUSES = ["running", "submitted", "pending", "waiting", "configuring"];
   const THEME_STORAGE_KEY = "ml-speech-diarization-theme";
+  const AUDIO_CACHE_DB_NAME = "ml-speech-audio-cache";
+  const AUDIO_CACHE_STORE = "blobs";
+  const AUDIO_CACHE_DB_VERSION = 1;
+  const AUDIO_CACHE_ALL_CONCURRENCY = 2;
   const root = ReactDOM.createRoot(document.getElementById("dashboard-root"));
   let state = initialState;
   let ctx = state.context || {};
@@ -746,6 +750,7 @@
       start: text(values.start),
       end: text(values.end),
       speaker: text(values.speaker),
+      dialogue: text(values.dialogue),
     };
   }
 
@@ -812,6 +817,22 @@
       .filter(Boolean);
   }
 
+  function labelEditorRowsWithDialogue(rows, rawDialogue) {
+    const dialogueLines = text(rawDialogue).split(/\r?\n/);
+    return (rows || []).map((row, index) => ({
+      ...row,
+      dialogue: text(row.dialogue || dialogueLines[index] || ""),
+    }));
+  }
+
+  function serializeLabelDialogueRows(rows) {
+    const lines = (rows || []).map((row) => text(row.dialogue).replace(/\s+$/g, ""));
+    while (lines.length && !lines[lines.length - 1].trim()) {
+      lines.pop();
+    }
+    return lines.join("\n");
+  }
+
   function labelEditorRowHasAnyValue(row) {
     return Boolean(text(row.start).trim() || text(row.end).trim() || text(row.speaker).trim());
   }
@@ -849,6 +870,7 @@
         start: fieldValue("start"),
         end: fieldValue("end"),
         speaker: fieldValue("speaker"),
+        dialogue: fieldValue("dialogue"),
       });
     });
   }
@@ -867,6 +889,13 @@
     const segmentsInput = form?.querySelector("[data-label-segments-input]");
     if (segmentsInput) {
       segmentsInput.value = serializedSegments;
+    }
+    const transcriptInput = form?.querySelector("[data-label-transcript-input]");
+    if (transcriptInput) {
+      const dialogueText = serializeLabelDialogueRows(rows);
+      if (dialogueText) {
+        transcriptInput.value = dialogueText;
+      }
     }
     return { rows, serializedSegments, ...labelEditorStats(rows) };
   }
@@ -945,6 +974,120 @@
       return `${formatNumber(safeBytes / 1024, 1)} KB`;
     }
     return `${formatNumber(safeBytes, 0)} bytes`;
+  }
+
+  function normalizedAudioCacheUrl(href) {
+    const raw = text(href).trim();
+    if (!raw) return "";
+    try {
+      return new URL(raw, window.location.href).href;
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function openAudioCacheDb() {
+    return new Promise((resolve) => {
+      if (!window.indexedDB) {
+        resolve(null);
+        return;
+      }
+      let request;
+      try {
+        request = window.indexedDB.open(AUDIO_CACHE_DB_NAME, AUDIO_CACHE_DB_VERSION);
+      } catch (_error) {
+        resolve(null);
+        return;
+      }
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(AUDIO_CACHE_STORE)) {
+          db.createObjectStore(AUDIO_CACHE_STORE);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    });
+  }
+
+  function audioCacheRead(db, key) {
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
+        const request = tx.objectStore(AUDIO_CACHE_STORE).get(key);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => resolve(null);
+      } catch (_error) {
+        resolve(null);
+      }
+    });
+  }
+
+  function audioCacheWrite(db, key, value) {
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
+        const request = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
+        request.onsuccess = () => resolve(true);
+        request.onerror = () => resolve(false);
+      } catch (_error) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function fetchAudioBlobForCache(url, signal, onProgress) {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      cache: "force-cache",
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Audio fetch failed with status ${response.status}`);
+    }
+    const total = Number.parseInt(response.headers.get("content-length") || "0", 10) || 0;
+    if (!response.body || !response.body.getReader) {
+      const blob = await response.blob();
+      if (onProgress) onProgress(blob.size, total || blob.size);
+      return { blob, size: total || blob.size };
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    let lastProgressAt = 0;
+    while (true) {
+      const step = await reader.read();
+      if (step.done) break;
+      chunks.push(step.value);
+      received += step.value.byteLength || step.value.length || 0;
+      const now = Date.now();
+      if (onProgress && now - lastProgressAt > 500) {
+        lastProgressAt = now;
+        onProgress(received, total);
+      }
+    }
+    const contentType = response.headers.get("content-type") || "audio/wav";
+    const blob = new Blob(chunks, { type: contentType });
+    if (onProgress) onProgress(blob.size, total || blob.size);
+    return { blob, size: total || blob.size };
+  }
+
+  async function cacheAudioUrl(db, item, signal, onProgress) {
+    const cached = await audioCacheRead(db, item.url);
+    if (cached && cached.blob && cached.blob.size > 0) {
+      return { status: "cached", bytes: cached.size || cached.blob.size };
+    }
+    const result = await fetchAudioBlobForCache(item.url, signal, onProgress);
+    const stored = await audioCacheWrite(db, item.url, {
+      blob: result.blob,
+      size: result.size,
+      savedAt: Date.now(),
+    });
+    if (!stored) {
+      throw new Error("Could not write audio to local cache");
+    }
+    return { status: "stored", bytes: result.size };
   }
 
   function formatPercent(value, digits = 1) {
@@ -2647,7 +2790,7 @@
     const formKey = `training-label:${row.name}`;
     const [segmentRows, setSegmentRows] = React.useState(() => {
       const parsedRows = parseLabelSegmentRows(row.labelSegments || "");
-      return parsedRows.length ? parsedRows : [makeLabelEditorRow()];
+      return labelEditorRowsWithDialogue(parsedRows.length ? parsedRows : [makeLabelEditorRow()], row.transcriptText || "");
     });
     const [transcriptText, setTranscriptText] = React.useState(row.transcriptText || "");
     // Default off unless the saved label explicitly kept dialogue.
@@ -2657,14 +2800,44 @@
     const [issueQuestions, setIssueQuestions] = React.useState(row.issueQuestions || "");
     const [selectedModelKey, setSelectedModelKey] = React.useState("");
     const [autoSaveStatus, setAutoSaveStatus] = React.useState({ state: "idle", at: "" });
+    const targetOptions = React.useMemo(() => fineTunedTrainingTargetOptions(ctx.projects || []), []);
+    const initialTarget = React.useMemo(() => {
+      const savedTargets = row.targetProjects || [];
+      return targetOptions.find((option) => savedTargets.includes(option.targetKey))?.optionKey || (targetOptions[0]?.optionKey || "__new__");
+    }, [row.targetProjects, targetOptions]);
+    const [targetSelection, setTargetSelection] = React.useState(initialTarget);
+    const [newTargetBackend, setNewTargetBackend] = React.useState(() => {
+      const normalized = text(row.backend).toLowerCase();
+      if (normalized === "nemo" || normalized === "pyannote") return normalized;
+      const preferred = text(preferences?.fine_tuning_backend || preferences?.default_backend).toLowerCase();
+      return preferred === "nemo" ? "nemo" : "pyannote";
+    });
+    const [newTargetName, setNewTargetName] = React.useState(row.projectName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training");
+    const [queueTraining, setQueueTraining] = React.useState(true);
+    const [trainingName, setTrainingName] = React.useState("");
+    const doneStorageKey = `trainingLabelDoneRows.v1.${row.name || row.fileName || "unknown"}`;
+    const [doneRows, setDoneRows] = React.useState(() => readDoneRows(doneStorageKey));
+    const [audioStatus, setAudioStatus] = React.useState({ currentTime: 0, duration: 0, paused: true });
+    const trainingNameId = `label_training_name_${suffix}`;
     const audioRef = React.useRef(null);
     const stopHandlerRef = React.useRef(null);
     const dragRowIdRef = React.useRef("");
     const formRef = React.useRef(null);
     const autoSaveAbortRef = React.useRef(null);
+    const autoSaveTimerRef = React.useRef(null);
     const initialAutoSaveSkipRef = React.useRef(true);
+    const firstDraftSaveRef = React.useRef(false);
+    const draftDirtyRef = React.useRef(false);
+    const autoSaveGenerationRef = React.useRef(0);
     const activeTimeFieldRef = React.useRef(null);
     const serializedSegments = serializeLabelSegmentRows(segmentRows);
+    const rowDialogueText = serializeLabelDialogueRows(segmentRows);
+    const submittedTranscriptText = includeTranscript ? rowDialogueText || transcriptText : "";
+    const selectedTargetOption = targetOptions.find((option) => option.optionKey === targetSelection) || null;
+    const targetBackend = selectedTargetOption?.backend || newTargetBackend;
+    const targetProjectName = selectedTargetOption?.projectName || slugFineTuningTargetName(newTargetName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training");
+    const targetKey = `${targetBackend}/${targetProjectName}`;
+    const targetDisplayLabel = selectedTargetOption?.label || `${backendDisplayName(targetBackend)} / ${targetProjectName}`;
     const validSegmentCount = segmentRows.filter(labelEditorRowIsValid).length;
     const incompleteSegmentCount = segmentRows.filter((segment) => labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment)).length;
     const completeDisabled = validSegmentCount === 0 || incompleteSegmentCount > 0;
@@ -2674,43 +2847,151 @@
         if (audioRef.current && stopHandlerRef.current) {
           audioRef.current.removeEventListener("timeupdate", stopHandlerRef.current);
         }
-        // Don't leave a half-finished auto-save in flight when the dialog unmounts —
-        // it would race against a real save submitted right after.
+        flushAutoSaveDraft();
         if (autoSaveAbortRef.current) {
           autoSaveAbortRef.current.abort();
+          autoSaveAbortRef.current = null;
         }
       };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Debounced auto-save: any time labels, transcript, or questions change
-    // we re-save as a draft. Skip the first render (we just opened the dialog
-    // with existing data — no need to save it back). Don't auto-save when
-    // there's an in-flight request — the abort controller handles cancellation.
+    React.useEffect(() => {
+      writeDoneRows(doneStorageKey, doneRows);
+    }, [doneRows, doneStorageKey]);
+
+    React.useEffect(() => {
+      const audio = audioRef.current;
+      if (!audio) return undefined;
+      const syncAudioStatus = () => {
+        setAudioStatus({
+          currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+          duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+          paused: audio.paused || audio.ended,
+        });
+      };
+      syncAudioStatus();
+      audio.addEventListener("loadedmetadata", syncAudioStatus);
+      audio.addEventListener("timeupdate", syncAudioStatus);
+      audio.addEventListener("seeked", syncAudioStatus);
+      audio.addEventListener("play", syncAudioStatus);
+      audio.addEventListener("pause", syncAudioStatus);
+      audio.addEventListener("ended", syncAudioStatus);
+      return () => {
+        audio.removeEventListener("loadedmetadata", syncAudioStatus);
+        audio.removeEventListener("timeupdate", syncAudioStatus);
+        audio.removeEventListener("seeked", syncAudioStatus);
+        audio.removeEventListener("play", syncAudioStatus);
+        audio.removeEventListener("pause", syncAudioStatus);
+        audio.removeEventListener("ended", syncAudioStatus);
+      };
+    }, [row.audioHref]);
+
+    React.useEffect(() => {
+      const handlePageHide = () => flushAutoSaveDraft();
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === "hidden") flushAutoSaveDraft();
+      };
+      window.addEventListener("pagehide", handlePageHide);
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+      return () => {
+        window.removeEventListener("pagehide", handlePageHide);
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Auto-save every manual-label change as a draft. The first edit saves
+    // immediately so the label leaves "not started" even if the user navigates
+    // away right after editing; later edits are debounced.
     React.useEffect(() => {
       if (initialAutoSaveSkipRef.current) {
         initialAutoSaveSkipRef.current = false;
-        return;
+        return undefined;
       }
-      const handle = window.setTimeout(() => {
-        runAutoSaveDraft();
+      draftDirtyRef.current = true;
+      autoSaveGenerationRef.current += 1;
+      const saveGeneration = autoSaveGenerationRef.current;
+      if (!firstDraftSaveRef.current) {
+        firstDraftSaveRef.current = true;
+        runAutoSaveDraft(saveGeneration);
+        return undefined;
+      }
+      if (autoSaveTimerRef.current) window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = window.setTimeout(() => {
+        autoSaveTimerRef.current = null;
+        runAutoSaveDraft(saveGeneration);
       }, 1500);
-      return () => window.clearTimeout(handle);
+      return () => {
+        if (autoSaveTimerRef.current) {
+          window.clearTimeout(autoSaveTimerRef.current);
+          autoSaveTimerRef.current = null;
+        }
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [serializedSegments, transcriptText, issueQuestions, includeTranscript]);
+    }, [serializedSegments, rowDialogueText, transcriptText, issueQuestions, includeTranscript]);
 
-    function runAutoSaveDraft() {
+    function slugFineTuningTargetName(value) {
+      let cleaned = text(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      while (cleaned.includes("--")) cleaned = cleaned.replace(/--/g, "-");
+      return cleaned.replace(/^-+|-+$/g, "") || "uploaded-site-training";
+    }
+
+    function fineTunedTrainingTargetOptions(projects) {
+      const options = [];
+      (projects || []).forEach((project) => {
+        const backend = text(project.backend).toLowerCase();
+        if (backend !== "nemo" && backend !== "pyannote") return;
+        const projectName = slugFineTuningTargetName(project.slug || project.displayName);
+        const targetKey = `${backend}/${projectName}`;
+        const projectLabel = project.displayName || project.slug || projectName;
+        const backendLabel = backendDisplayName(backend);
+        const runs = Array.isArray(project.recentRuns) ? project.recentRuns : [];
+        if (runs.length) {
+          runs.forEach((run, index) => {
+            const runLabel = run.displayName || run.versionName || run.runName || `trained version ${index + 1}`;
+            options.push({
+              optionKey: `${targetKey}::${run.versionName || run.runName || index}`,
+              targetKey,
+              backend,
+              projectName,
+              label: `${backendLabel} / ${runLabel}`,
+              detail: projectLabel !== projectName ? projectLabel : "",
+            });
+          });
+          return;
+        }
+        if (Number(project.sampleCount || 0) > 0 || project.prepared) {
+          options.push({
+            optionKey: `${targetKey}::project`,
+            targetKey,
+            backend,
+            projectName,
+            label: `${backendLabel} / ${projectLabel}`,
+            detail: project.prepared ? "prepared project" : "label project",
+          });
+        }
+      });
+      return options.sort((left, right) => left.label.localeCompare(right.label));
+    }
+
+    function autoSaveFormData() {
+      if (!formRef.current) return null;
+      const data = new FormData(formRef.current);
+      data.set("label_action", "draft");
+      data.set("label_auto_save", "1");
+      return data;
+    }
+
+    function runAutoSaveDraft(saveGeneration = autoSaveGenerationRef.current) {
       if (!routes.saveTrainingLabel || !formRef.current) return;
-      // Cancel any prior auto-save still in flight so we never save stale state.
       if (autoSaveAbortRef.current) {
         autoSaveAbortRef.current.abort();
       }
       const controller = new AbortController();
       autoSaveAbortRef.current = controller;
-      const data = new FormData(formRef.current);
-      data.set("label_action", "draft");
-      // The "auto" flag lets the server skip the redirect chain and treat
-      // this as a background draft instead of a user-driven submission.
-      data.set("label_auto_save", "1");
+      const data = autoSaveFormData();
+      if (!data) return;
       setAutoSaveStatus({ state: "saving", at: "" });
       fetch(routes.saveTrainingLabel, {
         method: "POST",
@@ -2720,8 +3001,11 @@
         redirect: "manual",
       })
         .then((response) => {
-          // redirect: "manual" turns 30x into an opaqueredirect with status 0.
           if (response.type === "opaqueredirect" || (response.status >= 200 && response.status < 400) || response.status === 0) {
+            autoSaveAbortRef.current = null;
+            if (saveGeneration === autoSaveGenerationRef.current) {
+              draftDirtyRef.current = false;
+            }
             const stamp = new Date().toLocaleTimeString();
             setAutoSaveStatus({ state: "saved", at: stamp });
           } else {
@@ -2730,8 +3014,140 @@
         })
         .catch((error) => {
           if (error?.name === "AbortError") return;
+          autoSaveAbortRef.current = null;
           setAutoSaveStatus({ state: "error", at: "" });
         });
+    }
+
+    function flushAutoSaveDraft() {
+      if (!routes.saveTrainingLabel || !formRef.current || !draftDirtyRef.current) return;
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      if (autoSaveAbortRef.current) {
+        autoSaveAbortRef.current.abort();
+        autoSaveAbortRef.current = null;
+      }
+      const data = autoSaveFormData();
+      if (!data) return;
+      let delivered = false;
+      if (navigator.sendBeacon) {
+        try {
+          delivered = navigator.sendBeacon(routes.saveTrainingLabel, data);
+        } catch (_error) {
+          delivered = false;
+        }
+      }
+      if (!delivered) {
+        try {
+          fetch(routes.saveTrainingLabel, {
+            method: "POST",
+            body: data,
+            credentials: "same-origin",
+            keepalive: true,
+            redirect: "manual",
+          });
+        } catch (_error) {}
+      }
+    }
+
+    function readDoneRows(storageKey) {
+      try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (!raw) return new Set();
+        const parsed = JSON.parse(raw);
+        return new Set(Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : []);
+      } catch (_error) {
+        return new Set();
+      }
+    }
+
+    function writeDoneRows(storageKey, rows) {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(Array.from(rows || [])));
+      } catch (_error) {}
+    }
+
+    function doneIdentityForSegment(segment) {
+      if (!segment) return "";
+      const start = secondsForLabelInput(segment.start) || text(segment.start).trim();
+      const end = secondsForLabelInput(segment.end) || text(segment.end).trim();
+      const speaker = text(segment.speaker).trim();
+      if (!start && !end && !speaker) return "";
+      return `${start}|${end}|${speaker}`;
+    }
+
+    function segmentIsDone(segment) {
+      const identity = doneIdentityForSegment(segment);
+      return Boolean(identity && doneRows.has(identity));
+    }
+
+    function toggleSegmentDone(segment) {
+      const identity = doneIdentityForSegment(segment);
+      if (!identity || !labelEditorRowIsValid(segment)) {
+        window.alert("Fill in a valid start, end, and speaker before marking the row done.");
+        return;
+      }
+      setDoneRows((current) => {
+        const next = new Set(current);
+        if (next.has(identity)) {
+          next.delete(identity);
+        } else {
+          next.add(identity);
+        }
+        return next;
+      });
+    }
+
+    function clearSegmentStopHandler() {
+      const audio = audioRef.current;
+      if (audio && stopHandlerRef.current) {
+        audio.removeEventListener("timeupdate", stopHandlerRef.current);
+      }
+      stopHandlerRef.current = null;
+    }
+
+    function syncAudioStatusNow() {
+      const audio = audioRef.current;
+      if (!audio) return;
+      setAudioStatus({
+        currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        paused: audio.paused || audio.ended,
+      });
+    }
+
+    function toggleAudioPlayback() {
+      const audio = audioRef.current;
+      if (!audio) return;
+      clearSegmentStopHandler();
+      if (audio.paused || audio.ended) {
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => {});
+        }
+      } else {
+        audio.pause();
+      }
+      syncAudioStatusNow();
+    }
+
+    function rewindAudio(seconds = 2) {
+      const audio = audioRef.current;
+      if (!audio || !Number.isFinite(audio.currentTime)) return;
+      try {
+        audio.currentTime = Math.max(0, audio.currentTime - seconds);
+      } catch (_error) {
+        return;
+      }
+      syncAudioStatusNow();
+    }
+
+    function appendTranscriptToRows(value) {
+      const nextTranscript = transcriptText ? `${transcriptText}\n\n${value}` : value;
+      setTranscriptText(nextTranscript);
+      setSegmentRows((currentRows) => labelEditorRowsWithDialogue(currentRows, nextTranscript));
     }
 
     function replaceSegmentRows(rawSegments) {
@@ -2792,10 +3208,7 @@
       if (!audio || !labelEditorRowIsValid(segment)) {
         return;
       }
-      if (stopHandlerRef.current) {
-        audio.removeEventListener("timeupdate", stopHandlerRef.current);
-        stopHandlerRef.current = null;
-      }
+      clearSegmentStopHandler();
       const start = parseLabelTimestampInput(segment.start);
       const end = parseLabelTimestampInput(segment.end);
       try {
@@ -2870,7 +3283,13 @@
         "data-loading-message": "Saving training label...",
       },
       h("input", { type: "hidden", name: "audio_file", value: row.name }),
+      h("input", { type: "hidden", name: "label_backend", value: targetBackend, readOnly: true }),
+      h("input", { type: "hidden", name: "label_project_name", value: targetProjectName, readOnly: true }),
+      h("input", { type: "hidden", name: "label_training_targets", value: targetKey, readOnly: true }),
+      h("input", { type: "hidden", name: "label_training_target_label", value: targetDisplayLabel, readOnly: true }),
+      queueTraining ? h("input", { type: "hidden", name: "label_auto_train_targets", value: targetKey, readOnly: true }) : h("input", { type: "hidden", name: "label_auto_train_skip", value: "1", readOnly: true }),
       h("input", { type: "hidden", id: segmentsId, name: "label_segments", value: serializedSegments, readOnly: true, "data-label-segments-input": "true" }),
+      h("input", { type: "hidden", name: "label_transcript_text", value: submittedTranscriptText, readOnly: true, "data-label-transcript-input": "true" }),
       row.systemQuestions?.length
         ? h("div", { className: "callout warm compact-callout" }, h("h2", null, "Questions To Resolve"), h("ul", null, row.systemQuestions.map((question, index) => h("li", { key: index }, question))))
         : null,
@@ -2885,7 +3304,15 @@
             { className: "label-audio" },
             h("p", { className: "label-audio-caption" }, "Audio sample"),
             h("h3", { className: "label-audio-title" }, row.fileName || row.name),
-            h("audio", { ref: audioRef, controls: true, preload: "metadata", src: row.audioHref, "aria-label": `Audio preview for ${row.fileName || row.name}` })
+            h("audio", { ref: audioRef, controls: true, preload: "metadata", src: row.audioHref, "aria-label": `Audio preview for ${row.fileName || row.name}` }),
+            h(
+              "div",
+              { className: "label-audio-toolbar", role: "toolbar", "aria-label": "Manual label playback controls" },
+              h("button", { className: "secondary", type: "button", onClick: toggleAudioPlayback }, audioStatus.paused ? "Play" : "Pause"),
+              h("button", { className: "secondary", type: "button", onClick: () => rewindAudio(2) }, "Back 2 sec"),
+              h("button", { className: "secondary", type: "button", onClick: fillActiveTimeField }, "Use Current Seconds"),
+              h("span", { className: "label-current-time", role: "status" }, `Current: ${secondsForLabelInput(audioStatus.currentTime) || "0.000"}s`)
+            )
           )
         : h(
             "div",
@@ -2899,14 +3326,74 @@
         selectedModelKey,
         onSelectedModelKeyChange: setSelectedModelKey,
         onUseSegments: replaceSegmentRows,
-        onUseTranscript: (value) => setTranscriptText((current) => (current ? `${current}\n\n${value}` : value)),
+        onUseTranscript: appendTranscriptToRows,
         pickerId: `label-dialog-${suffix}`,
       }),
       h(
-        "div",
-        { className: "inline" },
-        h(Field, { id: backendId, label: "Training backend" }, h(SelectInput, { id: backendId, name: "label_backend", defaultValue: row.backend || "both" }, h(Option, { value: "both" }, "NeMo + pyannote"), h(Option, { value: "nemo" }, "NeMo only"), h(Option, { value: "pyannote" }, "pyannote only"))),
-        h(Field, { id: projectId, label: "Fine-tuning project" }, h("input", { id: projectId, name: "label_project_name", list: "training_label_project_names", defaultValue: row.projectName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training", placeholder: "uploaded-site-training", required: true }))
+        "section",
+        { className: "label-training-target" },
+        h(
+          "div",
+          { className: "inline" },
+          h(
+            Field,
+            { id: `label_target_${suffix}`, label: "Fine-tuned target" },
+            h(
+              "select",
+              {
+                id: `label_target_${suffix}`,
+                value: targetSelection,
+                onChange: (event) => setTargetSelection(event.target.value),
+              },
+              targetOptions.map((option) =>
+                h("option", { key: option.optionKey, value: option.optionKey }, option.detail ? `${option.label} (${option.detail})` : option.label)
+              ),
+              h("option", { value: "__new__" }, "Create new fine-tuned model")
+            )
+          ),
+          h(
+            Field,
+            { id: trainingNameId, label: "New trained version name" },
+            h("input", {
+              id: trainingNameId,
+              name: "label_new_training_name",
+              type: "text",
+              value: trainingName,
+              onChange: (event) => setTrainingName(event.target.value),
+              placeholder: "cleaned-stage-2",
+              maxLength: 80,
+            })
+          )
+        ),
+        targetSelection === "__new__"
+          ? h(
+              "div",
+              { className: "inline" },
+              h(
+                Field,
+                { id: backendId, label: "Backend" },
+                h("select", { id: backendId, value: newTargetBackend, onChange: (event) => setNewTargetBackend(event.target.value) }, h("option", { value: "pyannote" }, "pyannote"), h("option", { value: "nemo" }, "NeMo"))
+              ),
+              h(
+                Field,
+                { id: projectId, label: "Fine-tuned model name" },
+                h("input", {
+                  id: projectId,
+                  list: "training_label_project_names",
+                  value: newTargetName,
+                  onChange: (event) => setNewTargetName(event.target.value),
+                  placeholder: "uploaded-site-training",
+                  required: true,
+                })
+              )
+            )
+          : null,
+        h(
+          "label",
+          { className: "checkbox-row label-queue-toggle" },
+          h("input", { type: "checkbox", checked: queueTraining, onChange: (event) => setQueueTraining(event.target.checked) }),
+          " Queue sbatch training when complete"
+        )
       ),
       h(
         "section",
@@ -2919,7 +3406,12 @@
             "div",
             { className: "label-editor-actions" },
             h("button", { className: "secondary", type: "button", onClick: addSegmentRow }, "Add Label"),
-            h("button", { className: "secondary", type: "button", onClick: fillActiveTimeField, disabled: !row.audioHref }, "Use Current Seconds")
+            h(
+              "label",
+              { className: "checkbox-row label-dialogue-toggle" },
+              h("input", { type: "checkbox", checked: includeTranscript, onChange: (event) => setIncludeTranscript(event.target.checked) }),
+              " Show Dialogue"
+            )
           )
         ),
         h(
@@ -2927,19 +3419,20 @@
           { className: "table-scroll label-editor-table-wrap" },
           h(
             "table",
-            { className: "label-editor-table" },
-            h("thead", null, h("tr", null, h("th", null, "#"), h("th", null, "Start"), h("th", null, "End"), h("th", null, "Speaker"), h("th", null, "Actions"))),
+            { className: classNames("label-editor-table", !includeTranscript && "hide-dialogue") },
+            h("thead", null, h("tr", null, h("th", null, "#"), h("th", null, "Start"), h("th", null, "End"), h("th", null, "Speaker"), h("th", { className: "label-dialogue-col" }, "Dialogue"), h("th", null, "Actions"))),
             h(
               "tbody",
               null,
-              segmentRows.map((segment, index) =>
-                h(
+              segmentRows.map((segment, index) => {
+                const isDone = segmentIsDone(segment);
+                return h(
                   "tr",
                   {
                     key: segment.id,
                     "data-label-editor-row": "true",
                     "data-label-row-id": segment.id,
-                    className: classNames(labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment) ? "needs-work" : ""),
+                    className: classNames(labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment) ? "needs-work" : "", isDone && "is-done"),
                     onDragOver: (event) => event.preventDefault(),
                     onDrop: (event) => {
                       event.preventDefault();
@@ -2978,6 +3471,7 @@
                     h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onFocus: () => rememberActiveTimeField(segment.id, "end"), onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) })
                   ),
                   h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),
+                  h("td", { className: "label-dialogue-cell" }, h("input", { "aria-label": `Dialogue for label ${index + 1}`, type: "text", value: segment.dialogue || "", "data-label-field": "dialogue", onChange: (event) => updateSegmentRow(segment.id, { dialogue: event.target.value }), placeholder: "Optional dialogue" })),
                   h(
                     "td",
                     null,
@@ -2985,13 +3479,14 @@
                       "div",
                       { className: "label-editor-actions" },
                       h("button", { className: "secondary", type: "button", onClick: () => playSegmentRow(segment), disabled: !row.audioHref || !labelEditorRowIsValid(segment) }, "Listen"),
+                      h("button", { className: classNames("secondary label-done-button", isDone && "is-on"), type: "button", onClick: () => toggleSegmentDone(segment), "aria-pressed": isDone ? "true" : "false" }, isDone ? "Done" : "Mark Done"),
                       h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, -1), disabled: index === 0 }, "Up"),
                       h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, 1), disabled: index === segmentRows.length - 1 }, "Down"),
                       h("button", { className: "ghost danger", type: "button", onClick: () => deleteSegmentRow(segment.id) }, "Delete")
                     )
                   )
-                )
-              )
+                );
+              })
             )
           )
         )
@@ -3019,7 +3514,7 @@
           " Include dialogue with this sample (does not affect diarization training)"
         ),
         includeTranscript
-          ? h(Field, { id: transcriptId, label: "Transcript export", note: "Saved in the project's text/ folder. Marked as not aligned with speech-time labels." }, h("textarea", { id: transcriptId, name: "label_transcript_text", value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" }))
+          ? h(Field, { id: transcriptId, label: "Transcript export", note: "Saved in the project's text/ folder. Marked as not aligned with speech-time labels." }, h("textarea", { id: transcriptId, value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" }))
           : h("p", { className: "row-note" }, "Dialogue is excluded from this sample. Toggle on to save it for your records (training is unaffected either way)."),
         h(Field, { id: questionsId, label: "Questions or issues", note: "Anything here keeps the item out of completed training until it is answered." }, h("textarea", { id: questionsId, name: "label_issue_questions", value: issueQuestions, onChange: (event) => setIssueQuestions(event.target.value), placeholder: "What needs to be clarified before this can be used for training?" }))
       ),
@@ -3027,7 +3522,7 @@
         "div",
         { className: "button-row" },
         h("button", { className: "secondary", type: "submit", name: "label_action", value: "draft" }, "Save For Later"),
-        h("button", { type: "submit", name: "label_action", value: "complete", disabled: completeDisabled }, "Complete Label"),
+        h("button", { type: "submit", name: "label_action", value: "complete", disabled: completeDisabled }, "Complete For Training"),
         row.reviewHref ? h("a", { className: "tab-link", href: row.reviewHref }, "Open Review Page") : null,
         h(
           "span",
@@ -3040,6 +3535,157 @@
                 ? "Auto-save failed (changes still in form)"
                 : "Auto-save ready"
         )
+      )
+    );
+  }
+
+  function TrainingAudioCacheAll({ rows }) {
+    const cacheItems = React.useMemo(() => {
+      const seen = new Set();
+      const items = [];
+      (rows || []).forEach((row) => {
+        const url = normalizedAudioCacheUrl(row.audioHref);
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        items.push({
+          url,
+          name: row.fileName || row.name || url,
+        });
+      });
+      return items;
+    }, [rows]);
+    const [cacheState, setCacheState] = React.useState({
+      status: "idle",
+      done: 0,
+      total: 0,
+      message: "",
+    });
+    const cacheAbortRef = React.useRef(null);
+    React.useEffect(() => {
+      return () => {
+        if (cacheAbortRef.current) {
+          cacheAbortRef.current.abort();
+          cacheAbortRef.current = null;
+        }
+      };
+    }, []);
+    const isRunning = cacheState.status === "running";
+    const browserCacheAvailable = Boolean(window.indexedDB && window.fetch);
+    const canCache = cacheItems.length > 0 && browserCacheAvailable;
+
+    async function startCachingAll() {
+      if (isRunning || !canCache) return;
+      const db = await openAudioCacheDb();
+      if (!db) {
+        setCacheState({
+          status: "error",
+          done: 0,
+          total: cacheItems.length,
+          message: "Audio cache is not available in this browser.",
+        });
+        return;
+      }
+      const controller = new AbortController();
+      cacheAbortRef.current = controller;
+      let nextIndex = 0;
+      let done = 0;
+      let stored = 0;
+      let alreadyCached = 0;
+      let failed = 0;
+      let cachedBytes = 0;
+      const total = cacheItems.length;
+      setCacheState({ status: "running", done: 0, total, message: `Caching 0 of ${total} audio file(s)...` });
+
+      async function worker() {
+        while (!controller.signal.aborted) {
+          const item = cacheItems[nextIndex];
+          nextIndex += 1;
+          if (!item) return;
+          setCacheState((previous) => ({
+            ...previous,
+            message: `Caching ${done + 1} of ${total}: ${item.name}`,
+          }));
+          try {
+            const result = await cacheAudioUrl(db, item, controller.signal, (received, expected) => {
+              setCacheState((previous) => ({
+                ...previous,
+                message: expected
+                  ? `Caching ${item.name}: ${formatBytes(received)} of ${formatBytes(expected)}`
+                  : `Caching ${item.name}: ${formatBytes(received)}`,
+              }));
+            });
+            if (result.status === "cached") {
+              alreadyCached += 1;
+            } else {
+              stored += 1;
+            }
+            cachedBytes += Number(result.bytes || 0);
+          } catch (error) {
+            if (error && error.name === "AbortError") return;
+            failed += 1;
+          } finally {
+            done += 1;
+            setCacheState({
+              status: "running",
+              done,
+              total,
+              message: `Cached ${done} of ${total}.`,
+            });
+          }
+        }
+      }
+
+      try {
+        const workerCount = Math.min(AUDIO_CACHE_ALL_CONCURRENCY, total);
+        await Promise.all(Array.from({ length: workerCount }, () => worker()));
+        const wasCancelled = controller.signal.aborted;
+        setCacheState({
+          status: wasCancelled ? "idle" : failed ? "error" : "done",
+          done,
+          total,
+          message: wasCancelled
+            ? `Stopped after ${done} of ${total} audio file(s).`
+            : `Cache all finished: ${stored} added, ${alreadyCached} already cached${failed ? `, ${failed} failed` : ""}. ${formatBytes(cachedBytes)} available locally.`,
+        });
+      } finally {
+        try {
+          db.close();
+        } catch (_error) {}
+        if (cacheAbortRef.current === controller) {
+          cacheAbortRef.current = null;
+        }
+      }
+    }
+
+    function stopCachingAll() {
+      if (cacheAbortRef.current) {
+        cacheAbortRef.current.abort();
+      }
+    }
+
+    return h(
+      "div",
+      { className: "training-cache-controls" },
+      h(
+        "button",
+        {
+          className: "secondary",
+          type: "button",
+          onClick: startCachingAll,
+          disabled: isRunning || !canCache,
+        },
+        isRunning ? "Caching Audio..." : "Cache All Audio"
+      ),
+      isRunning ? h("button", { className: "ghost", type: "button", onClick: stopCachingAll }, "Stop") : null,
+      h(
+        "p",
+        { className: `field-status cache-status-${cacheState.status}` },
+        cacheState.message ||
+          (browserCacheAvailable
+            ? cacheItems.length
+              ? `${cacheItems.length} audio file(s) available to cache.`
+              : "No audio files to cache."
+            : "Audio cache is not available in this browser.")
       )
     );
   }
@@ -3152,12 +3798,13 @@
             h("h2", null, "Uploaded Material To Label"),
             h("p", null, "Open Inspect to label from the review page with audio playback, timing rows, and fine-tuning save actions.")
           ),
-          h(
-            "div",
-            { className: "training-labels-controls" },
-            h(
-              "label",
-              { className: "checkbox-row training-labels-toggle" },
+	          h(
+	            "div",
+	            { className: "training-labels-controls" },
+	            h(TrainingAudioCacheAll, { rows }),
+	            h(
+	              "label",
+	              { className: "checkbox-row training-labels-toggle" },
               h("input", { type: "checkbox", checked: showCompleted, onChange: (event) => setShowCompleted(event.target.checked) }),
               ` Show completed labels${completedCount ? ` (${completedCount})` : ""}`
             )
@@ -3420,6 +4067,9 @@
                     `: ${run.status}`,
                     run.displayName && run.versionName && run.displayName !== run.versionName
                       ? h("span", { className: "row-note" }, ` (v: ${run.versionName})`)
+                      : null,
+                    run.baseModel
+                      ? h("span", { className: "row-note" }, ` · base: ${run.baseModel}`)
                       : null,
                     run.runDir
                       ? h(

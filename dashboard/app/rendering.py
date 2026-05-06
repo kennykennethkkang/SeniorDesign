@@ -593,6 +593,12 @@ class RenderingMixin:
                         "runName": Path(str(run.get("run_dir", ""))).name,
                         "runDir": str(run.get("run_dir", "")),
                         "startedAt": str(run.get("started_at_utc") or ""),
+                        # Surface the snapshotted base/pretrained model so the user
+                        # can tell at a glance which checkpoint each fine-tuned run
+                        # was built on top of. Empty for legacy runs that predate
+                        # the metadata snapshot — UI just hides the row.
+                        "baseModel": str(run.get("base_model") or "").strip(),
+                        "baseModelKind": str(run.get("base_model_kind") or "").strip(),
                     }
                 )
             serialized.append(
@@ -640,6 +646,50 @@ class RenderingMixin:
             )
         return serialized
 
+    def refresh_training_label_review_html(
+        self,
+        review_path: Path,
+        review_record: dict[str, object] | None,
+    ) -> None:
+        """Regenerate a saved training-label review page when its embedded bundle is stale."""
+
+        if not isinstance(review_path, Path) or not review_path.is_file():
+            return
+        try:
+            needs_refresh = self._review_html_is_missing_media(review_path)
+        except Exception:
+            return
+        if not needs_refresh:
+            return
+
+        srt_candidates: list[Path] = []
+        if isinstance(review_record, dict) and isinstance(review_record.get("srt_path"), Path):
+            srt_candidates.append(review_record["srt_path"])
+        if review_path.name.endswith("_review.html"):
+            srt_candidates.append(review_path.with_name(f"{review_path.name[:-len('_review.html')]}.srt"))
+        srt_candidates.append(review_path.with_suffix(".srt"))
+
+        for srt_path in srt_candidates:
+            if not isinstance(srt_path, Path) or not srt_path.is_file():
+                continue
+            flags_path = review_record.get("flags_path") if isinstance(review_record, dict) else None
+            if not isinstance(flags_path, Path):
+                flags_path = srt_path.with_name(f"{srt_path.stem}_review_flags.tsv")
+            try:
+                write_review_bundle(
+                    srt_path=srt_path,
+                    output_html=review_path,
+                    report_tsv=flags_path,
+                    audio_dir=self.audio_dir,
+                    training_label_records=self.load_training_label_records(),
+                    model_comparisons=self.review_model_comparisons_for_srt(srt_path),
+                    fine_tuning_projects=list_projects(root=self.root),
+                    quiet=True,
+                )
+            except Exception:
+                continue
+            return
+
     def frontend_training_label_rows(
         self,
         audio_paths: list[Path],
@@ -653,6 +703,7 @@ class RenderingMixin:
         for index, path in enumerate(audio_paths, start=1):
             audio_name = self.audio_relative_path(path)
             record = records.get(audio_name) or records.get(path.name) or {}
+            review_record = self.preferred_review_record(diarization_records.get(audio_name, {}))
             status = self.training_label_status(record)
             review_path_value = str(record.get("review_path") or "")
             review_href = ""
@@ -662,9 +713,9 @@ class RenderingMixin:
                 except ValueError:
                     review_path = None
                 if review_path and review_path.is_file():
+                    self.refresh_training_label_review_html(review_path, review_record if isinstance(review_record, dict) else None)
                     review_href = self.file_link(review_path, script_name)
             if not review_href:
-                review_record = self.preferred_review_record(diarization_records.get(audio_name, {}))
                 review_path = review_record.get("review_path") if isinstance(review_record, dict) else None
                 if isinstance(review_path, Path) and review_path.is_file():
                     review_path_value = self.describe_path(review_path)

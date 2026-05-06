@@ -112,12 +112,17 @@ def _prepare_and_launch(
     root: Path,
     prepare_options: Mapping[str, object] | None = None,
     extra_env: Mapping[str, str] | None = None,
+    version_name: str | None = None,
 ) -> dict[str, object]:
     """Run prepare_project + launch_training with defaults baked into the constants.
 
     We deliberately call prepare_project first to regenerate manifests with the
     newly-completed sample included; if we skipped that step, the new label
     would never make it into the training set.
+
+    ``version_name`` lets the caller (e.g. the label-complete popup) name the
+    training run instead of falling back to the auto-generated "<project>
+    trained version N" label. Empty/None means "use the auto-generated name."
     """
 
     artifacts = ftm.prepare_project(
@@ -126,12 +131,14 @@ def _prepare_and_launch(
         root=root,
         **dict(prepare_options or {}),
     )
+    cleaned_version = (version_name or "").strip()
     run = ftm.launch_training(
         project_name=project_name,
         backend=backend,
         prefer_sbatch=True,
         python_bin=sys.executable,
         extra_env=dict(extra_env or {}),
+        version_name=cleaned_version or None,
         root=root,
     )
     return {
@@ -149,6 +156,7 @@ def _runner(
     root: Path,
     prepare_options: Mapping[str, object] | None,
     extra_env: Mapping[str, str] | None,
+    version_name: str | None = None,
 ) -> None:
     """Long-running thread body. Holds the project lock for the whole flow."""
 
@@ -193,6 +201,7 @@ def _runner(
                 root=root,
                 prepare_options=prepare_options,
                 extra_env=extra_env,
+                version_name=version_name,
             )
         except Exception as exc:  # noqa: BLE001 — log everything in the runner thread
             _append_log(
@@ -225,6 +234,7 @@ def queue_auto_train(
     root: Path,
     prepare_options: Mapping[str, object] | None = None,
     extra_env: Mapping[str, str] | None = None,
+    version_name: str | None = None,
 ) -> bool:
     """Spawn a daemon thread to auto-train a project; returns False if already queued.
 
@@ -232,6 +242,10 @@ def queue_auto_train(
     next pass" case — exactly what we want when multiple label completions land
     in quick succession on the same project. The currently-running thread will
     re-check ``_has_active_run`` and re-prepare with the latest sample set.
+
+    ``version_name`` is forwarded to launch_training. The label-complete popup
+    can use this to give the next run a human-friendly name; everything else
+    leaves it None and gets the default auto-generated label.
     """
 
     target = ftm.project_dir(project_name, backend=backend, root=root)
@@ -251,6 +265,7 @@ def queue_auto_train(
             "root": root,
             "prepare_options": prepare_options,
             "extra_env": extra_env,
+            "version_name": version_name,
         },
         name=f"auto-train-{backend}-{project_name}",
         daemon=True,
