@@ -134,6 +134,8 @@
   // POST without each caller re-implementing the same plumbing. The dashboard
   // is happy with full-page redirects after the post, so we just submit a
   // throwaway form rather than wiring a fetch + reload dance.
+  // We need to trigger a POST from JavaScript without building a full SPA form
+  // submission flow — a throwaway hidden form is the simplest correct way to do it.
   function submitHiddenForm(action, fields) {
     if (!action) {
       return;
@@ -155,9 +157,8 @@
   function promptRenameProject(project) {
     if (!project || !project.slug) return;
     const current = project.displayName || project.slug;
-    // window.prompt is plain but it's exactly the right amount of UI for a
-    // senior-project tool — no modal library, no drama. Cancelled or empty
-    // input means leave the name alone.
+    // window.prompt is exactly the right amount of UI for a single-field rename —
+    // no modal lib, no extra state, and it works without any event wiring.
     const next = window.prompt(`Rename project "${current}"`, current);
     if (next === null) return;
     const cleaned = String(next).trim();
@@ -1887,45 +1888,86 @@
   function SlurmQueueTracker({ queue = {}, metadata = {} }) {
     const jobId = queue.job_id || metadata.slurm_job_id || "";
     const localPid = metadata.pid ? String(metadata.pid) : "";
+    // When state_source is "sacct" the job has already left the live queue —
+    // show timing/exit fields instead of position counts, which are null for finished jobs.
+    const isTerminal = queue.state_source === "sacct";
     const samePartitionPosition = queue.queue_position_same_partition;
     const resourceSummary = [
       queue.partition ? `partition ${queue.partition}` : "",
       queue.nodes ? `${queue.nodes} node(s)` : "",
+      queue.node_count && !queue.nodes ? `${queue.node_count} node(s)` : "",
       queue.cpus ? `${queue.cpus} CPU(s)` : "",
       queue.gres ? `GRES ${queue.gres}` : "",
     ].filter(Boolean).join(" / ");
     const fetchedAt = queue.fetched_at_utc ? text(queue.fetched_at_utc).replace("T", " ").replace(/\..*$/, "") : "";
+    const fmtUtc = (v) => (v && v !== "Unknown" ? text(v).replace("T", " ").replace(/\..*$/, "") : null);
     return h(
       "article",
       { className: "queue-tracker" },
-      h("div", null, h("h3", null, "Slurm Queue Tracker"), h("p", null, "Updates live while this run is submitted or running.")),
+      h(
+        "div",
+        null,
+        h("h3", null, "Slurm Queue Tracker"),
+        isTerminal
+          ? h("p", null, "This job has left the live queue — details below are from ", h("code", null, "sacct"), ".")
+          : h("p", null, "Updates live while this run is submitted or running.")
+      ),
       jobId
         ? h(
             "div",
             { className: "queue-tracker-grid" },
             h("p", null, h("strong", null, "Job ID: "), jobId),
             h("p", null, h("strong", null, "State: "), h(StatusPill, { status: queue.state || "unknown" })),
-            h("p", null, h("strong", null, "Queue position: "), queue.queue_position === 0 ? "running now" : queue.queue_position ?? "not in queue"),
-            samePartitionPosition === undefined || samePartitionPosition === null
+            queue.exit_code
+              ? h("p", null, h("strong", null, "Exit code: "), h("code", null, queue.exit_code))
+              : null,
+            isTerminal
+              ? null
+              : h("p", null, h("strong", null, "Queue position: "), queue.queue_position === 0 ? "running now" : queue.queue_position ?? "not in queue"),
+            isTerminal || samePartitionPosition === undefined || samePartitionPosition === null
               ? null
               : h("p", null, h("strong", null, "Partition position: "), samePartitionPosition === 0 ? "running now" : samePartitionPosition),
-            h("p", null, h("strong", null, "Jobs ahead: "), queue.jobs_ahead ?? "unknown"),
-            queue.jobs_ahead_same_partition === undefined || queue.jobs_ahead_same_partition === null
+            isTerminal
+              ? null
+              : h("p", null, h("strong", null, "Jobs ahead: "), queue.jobs_ahead ?? "unknown"),
+            isTerminal || queue.jobs_ahead_same_partition === undefined || queue.jobs_ahead_same_partition === null
               ? null
               : h("p", null, h("strong", null, "Ahead in partition: "), queue.jobs_ahead_same_partition),
+            fmtUtc(queue.started_at)
+              ? h("p", null, h("strong", null, "Started: "), fmtUtc(queue.started_at), " UTC")
+              : null,
+            fmtUtc(queue.ended_at)
+              ? h("p", null, h("strong", null, "Ended: "), fmtUtc(queue.ended_at), " UTC")
+              : null,
             resourceSummary ? h("p", null, h("strong", null, "Resources: "), resourceSummary) : null,
             queue.time_used || queue.time_left || queue.time_limit
-              ? h("p", null, h("strong", null, "Runtime: "), queue.time_used || "0:00", queue.time_left ? ` elapsed / ${queue.time_left} left` : queue.time_limit ? ` elapsed / ${queue.time_limit} limit` : " elapsed")
+              ? h(
+                  "p",
+                  null,
+                  h("strong", null, "Runtime: "),
+                  queue.time_used || "0:00",
+                  queue.time_left
+                    ? ` elapsed / ${queue.time_left} left`
+                    : queue.time_limit
+                      ? ` elapsed / ${queue.time_limit} limit`
+                      : " elapsed"
+                )
               : null,
             queue.name || queue.user ? h("p", null, h("strong", null, "Job: "), [queue.name, queue.user].filter(Boolean).join(" / ")) : null,
-            h("p", null, h("strong", null, "Reason: "), queue.reason || queue.message || "none reported"),
-            h("p", null, h("strong", null, "Estimated start: "), queue.estimated_start || "not reported"),
-            queue.exit_code ? h("p", null, h("strong", null, "Exit code: "), queue.exit_code) : null,
+            !isTerminal
+              ? h("p", null, h("strong", null, "Reason: "), queue.reason || queue.message || "none reported")
+              : null,
+            !isTerminal
+              ? h("p", null, h("strong", null, "Estimated start: "), queue.estimated_start || "not reported")
+              : null,
+            isTerminal && queue.message
+              ? h("p", null, h("strong", null, "Note: "), queue.message)
+              : null,
             fetchedAt ? h("p", null, h("strong", null, "Checked: "), fetchedAt, " UTC", queue.state_source ? ` via ${queue.state_source}` : "") : null
           )
         : localPid
-          ? h("p", { className: "empty" }, "This run was launched as a local background process, so it does not have a Slurm queue position. Local PID: ", localPid)
-          : h("p", { className: "empty" }, "No Slurm job id is attached to this run yet.")
+          ? h("p", { className: "empty" }, "This run was launched as a local background process, so it doesn't have a Slurm queue position. Local PID: ", localPid)
+          : h("p", { className: "empty" }, "No Slurm job ID attached to this run yet. Submit the run and refresh to see queue details.")
     );
   }
 
@@ -3418,7 +3460,19 @@
         "article",
         { className: "panel", id: "fine-tune-projects" },
         h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Fine-Tuning Projects"), h("p", null, "Each card summarizes preparation state, latest run state, and generated artifacts."))),
-        h("div", { className: "project-grid" }, projects.length ? projects.map((project) => h(FineTuneProjectCard, { key: `${project.backend}/${project.slug}`, project })) : h("article", { className: "project-card" }, h("h3", null, "No fine-tuning projects yet"), h("p", null, "Upload audio + RTTM pairs to create the first project.")))
+        h(
+          "div",
+          { className: "project-grid" },
+          projects.length
+            ? projects.map((project) => h(FineTuneProjectCard, { key: `${project.backend}/${project.slug}`, project }))
+            : h(
+                "article",
+                { className: "project-card empty-card" },
+                h("h3", null, "No fine-tuning projects yet"),
+                h("p", null, "Once you upload a labeled audio + RTTM pair above, the project will show up here with sample counts, speech coverage, and run status."),
+                h("p", { className: "row-note" }, "Use the Training Workflow cards above to upload, prepare, and launch.")
+              )
+        )
       ),
       h(ClusterQueuePanel, { title: "Cluster Queue" })
     );

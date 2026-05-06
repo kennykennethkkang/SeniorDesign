@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Page context construction and final HTML rendering."""
+"""Rendering mixin: builds the JSON page-state blob and injects it into the React HTML shell."""
 from __future__ import annotations
 
 
@@ -146,10 +146,10 @@ from dashboard.cli import build_parser
 
 
 class RenderingMixin:
-    """Page context construction and final HTML rendering."""
+    """Assembles the per-page JSON state blob that the frontend's React components read from window.__STATE__."""
 
     def shared_page_context(self) -> dict[str, object]:
-        """Collect the lightweight context shared across all dashboard pages."""
+        """Build the small context dict that every page needs (audio count, queue size, latest run paths)."""
 
         return {
             "audio_count": self.audio_input_count(),
@@ -166,7 +166,7 @@ class RenderingMixin:
         *,
         diarization_model_key: str = "",
     ) -> dict[str, object]:
-        """Collect only the context needed by the requested page."""
+        """Lazy-load per-page data — expensive scans (audio inventory, project list) only happen for pages that show them."""
 
         effective_path = current_path if current_path in PAGE_PATHS else "/"
         context = self.shared_page_context()
@@ -175,9 +175,8 @@ class RenderingMixin:
             context["audio_files"] = audio_files
             context["audio_folders"] = self.audio_folder_rows(audio_files=audio_files)
         if effective_path == "/youtube" and "audio_folders" not in context:
-            # /youtube is not an AUDIO_INVENTORY_PAGES member, so reuse here is
-            # only available when audio_inventory was loaded above. The folder
-            # dropdown is small enough that a separate walk is acceptable.
+            # /youtube isn't in AUDIO_INVENTORY_PAGES, so we only get the pre-loaded
+            # inventory if another page on the same request already triggered it.
             context["audio_folders"] = self.audio_folder_rows()
         if effective_path in RECENT_OUTPUT_PAGES:
             context["recent_outputs"] = self.recent_output_files(limit=30)
@@ -246,17 +245,17 @@ class RenderingMixin:
         return context
 
     def frontend_route(self, path: str, script_name: str) -> str:
-        """Return an unescaped route for JSON state consumed by React."""
+        """Build an absolute-path URL for a backend route so the frontend never hard-codes paths."""
 
         return self.with_prefix(path, script_name)
 
     def frontend_asset(self, relative_path: str, script_name: str) -> str:
-        """Return a URL for a static frontend asset."""
+        """Resolve a URL for a static asset under /assets/ so templates don't need to know the prefix."""
 
         return self.with_prefix("/assets/" + quote(relative_path, safe="/"), script_name)
 
     def frontend_file_record(self, path: Path, script_name: str) -> dict[str, str]:
-        """Serialize one workspace file for React tables."""
+        """Turn a workspace Path into the flat dict the React file-table components expect."""
 
         try:
             relative = str(path.resolve().relative_to(self.root))
@@ -270,7 +269,7 @@ class RenderingMixin:
         }
 
     def frontend_artifact_link(self, label: str, path: object, script_name: str) -> dict[str, str] | None:
-        """Serialize one optional artifact link."""
+        """Build a clickable artifact entry for the run-details dialog, or None if the file doesn't exist yet."""
 
         if not isinstance(path, Path) or not path.is_file():
             return None
@@ -288,7 +287,7 @@ class RenderingMixin:
         rows: list[dict[str, str]],
         script_name: str,
     ) -> list[dict[str, str]]:
-        """Serialize YouTube history rows and attach audio-file links when possible."""
+        """Turn raw YouTube history TSV rows into the normalized dicts the React table expects, with audio hrefs resolved."""
 
         serialized_rows: list[dict[str, str]] = []
         for row in rows:
@@ -316,7 +315,7 @@ class RenderingMixin:
         return serialized_rows
 
     def frontend_youtube_run(self, latest_run: object, script_name: str) -> dict[str, object] | None:
-        """Serialize the latest YouTube run for the React details dialog."""
+        """Shape a YouTube run summary dict into the payload the details-dialog component reads."""
 
         if not isinstance(latest_run, dict):
             return None
@@ -348,7 +347,7 @@ class RenderingMixin:
         }
 
     def frontend_diarization_run(self, latest_run: object, script_name: str) -> dict[str, object] | None:
-        """Serialize the latest diarization run for React."""
+        """Shape a diarization run summary (with per-file records) into the payload the run-details dialog reads."""
 
         if not isinstance(latest_run, dict):
             return None
@@ -420,7 +419,7 @@ class RenderingMixin:
         }
 
     def frontend_diarization_label_preview(self, srt_path_value: object) -> dict[str, object]:
-        """Convert one SRT into editable label-preview text for comparison views."""
+        """Parse an SRT into the segment/transcript preview the training-label comparison panel shows."""
 
         if not isinstance(srt_path_value, Path) or not srt_path_value.is_file():
             return {}
@@ -462,7 +461,7 @@ class RenderingMixin:
         rows: list[dict[str, object]],
         script_name: str,
     ) -> list[dict[str, object]]:
-        """Serialize per-file diarization history rows with useful artifact links."""
+        """Enrich per-file diarization history rows with resolved artifact hrefs and label previews."""
 
         serialized_rows: list[dict[str, object]] = []
         for row in rows:
@@ -517,7 +516,7 @@ class RenderingMixin:
         self,
         rows: list[dict[str, str]],
     ) -> list[dict[str, str]]:
-        """Serialize selectable diarization model profiles for the React frontend."""
+        """Normalize model-option rows into the flat shape the model-picker dropdown expects."""
 
         serialized: list[dict[str, str]] = []
         for row in rows:
@@ -537,7 +536,7 @@ class RenderingMixin:
         return serialized
 
     def frontend_projects(self, projects: list[dict[str, object]], script_name: str) -> list[dict[str, object]]:
-        """Serialize fine-tuning project cards and their direct artifact links."""
+        """Build the fine-tuning project card payloads — includes step completion state, recent runs, and artifact links."""
 
         serialized: list[dict[str, object]] = []
         for project in projects:
@@ -645,7 +644,7 @@ class RenderingMixin:
         records: dict[str, dict[str, object]],
         script_name: str,
     ) -> list[dict[str, object]]:
-        """Serialize uploaded audio files with their current training-label state."""
+        """Combine audio-file metadata with label_status records so the training-labels page shows everything in one row."""
 
         rows: list[dict[str, object]] = []
         diarization_records = self.diarization_model_history_lookup()
@@ -745,7 +744,7 @@ class RenderingMixin:
         message: str,
         message_status: str,
     ) -> dict[str, object]:
-        """Build the JSON state consumed by the React frontend."""
+        """Assemble the full window.__STATE__ blob — everything React needs to render the current page."""
 
         projects = self.frontend_projects(list(context.get("projects", [])), script_name)
         recent_outputs = [
@@ -958,7 +957,7 @@ class RenderingMixin:
         current_path: str,
         diarization_model_key: str = "",
     ) -> str:
-        """Inject workflow state into the frontend-owned React HTML shell."""
+        """Produce the final HTML response — builds page context, serializes state, and injects it into the HTML shell."""
 
         context = self.page_context(
             current_path,

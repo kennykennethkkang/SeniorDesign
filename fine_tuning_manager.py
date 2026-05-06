@@ -59,7 +59,7 @@ DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME = 2
 
 @dataclass(frozen=True)
 class RttmSegment:
-    """Represent one RTTM speaker region after validation and normalization."""
+    """One validated RTTM speaker segment, stored immutably so we can't accidentally mutate training data."""
 
     session_id: str
     start: float
@@ -73,11 +73,7 @@ class RttmSegment:
 
 @dataclass(frozen=True)
 class TrainingSample:
-    """Bundle the per-sample information reused throughout preparation.
-
-    Keeping parsed RTTM segments and transcript text here avoids repeating disk
-    reads in the manifest generation phase.
-    """
+    """Bundle all per-sample metadata so manifest generation doesn't re-read the same files multiple times."""
 
     stem: str
     audio_path: Path
@@ -95,7 +91,7 @@ class TrainingSample:
 
 @dataclass(frozen=True)
 class FineTuneArtifacts:
-    """Describe the files emitted by one `prepare_project` run."""
+    """Capture the paths of every artifact that prepare_project wrote, so callers don't have to guess them."""
 
     backend: str
     project_slug: str
@@ -116,7 +112,7 @@ class FineTuneArtifacts:
 
 @dataclass(frozen=True)
 class FineTuneRun:
-    """Describe one launch attempt, whether local or submitted via Slurm."""
+    """Track one launch attempt — we store both the local PID and the SLURM job ID so we can query status either way."""
 
     run_dir: Path
     stdout_path: Path
@@ -132,7 +128,7 @@ class FineTuneRun:
 
 
 def slugify(value: str) -> str:
-    """Normalize user-facing names into directory-safe project identifiers."""
+    """Turn a user-typed project name into a filesystem-safe slug — keeps the dir names clean and predictable."""
 
     cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
     while "--" in cleaned:
@@ -142,7 +138,7 @@ def slugify(value: str) -> str:
 
 
 def unique_child_path(parent: Path, slug: str) -> Path:
-    """Return a non-existing child path by appending a numeric suffix if needed."""
+    """Find a free path under parent so we never silently overwrite a prior project with the same name."""
 
     candidate = parent / slug
     if not candidate.exists():
@@ -156,7 +152,7 @@ def unique_child_path(parent: Path, slug: str) -> Path:
 
 
 def sanitize_filename(value: str) -> str:
-    """Drop path components and keep only a conservative filename alphabet."""
+    """Strip directory components and replace unsafe characters so user-supplied filenames can't escape the project dir."""
 
     name = Path(value or "").name
     safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
@@ -165,7 +161,7 @@ def sanitize_filename(value: str) -> str:
 
 
 def normalize_backend(backend: str | None) -> str:
-    """Normalize the backend label used throughout the fine-tuning workspace."""
+    """Validate and lowercase the backend string so every caller gets a consistent canonical value."""
 
     normalized = (backend or DEFAULT_FINE_TUNING_BACKEND).strip().lower()
     if normalized not in SUPPORTED_FINE_TUNING_BACKENDS:
@@ -173,11 +169,11 @@ def normalize_backend(backend: str | None) -> str:
     return normalized
 
 
-# Friendly display names for projects and runs live in a sidecar display.json
-# next to the (regenerated-on-prepare) metadata.json. Keeping it separate means
-# prepare_project can wipe metadata.json without losing the user's chosen label.
+# Display names live in display.json next to metadata.json. prepare_project
+# regenerates metadata.json every run, so any name stored there gets wiped.
+# Keeping it in a separate sidecar means renames survive re-prepares.
 def _read_display_sidecar(path: Path) -> dict[str, object]:
-    """Return parsed display.json, or {} if missing/corrupt."""
+    """Load display.json from disk, returning {} if the file doesn't exist or is corrupted."""
 
     if not path.is_file():
         return {}
@@ -188,7 +184,7 @@ def _read_display_sidecar(path: Path) -> dict[str, object]:
 
 
 def _write_display_sidecar(path: Path, *, updates: dict[str, object]) -> dict[str, object]:
-    """Merge ``updates`` into the display.json at ``path`` and return the result."""
+    """Merge new display fields into the existing display.json so we don't clobber unrelated display keys."""
 
     payload = _read_display_sidecar(path)
     payload.update(updates)
@@ -204,7 +200,7 @@ def project_display_path(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> Path:
-    """Return the path to the display sidecar for a project."""
+    """Resolve where a project's display.json lives — centralised so nothing hard-codes the path."""
 
     return project_dir(project_name, backend=backend, root=root) / "display.json"
 
@@ -215,7 +211,7 @@ def read_project_display(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> dict[str, object]:
-    """Read the display sidecar for a project (e.g. its renamed display label)."""
+    """Load a project's display metadata (e.g. the user-chosen display name) from its sidecar."""
 
     return _read_display_sidecar(project_display_path(project_name, backend=backend, root=root))
 
@@ -227,7 +223,7 @@ def set_project_display_name(
     display_name: str,
     root: Path = PROJECT_ROOT,
 ) -> dict[str, object]:
-    """Rename a project for display purposes (the slug/dir stays put)."""
+    """Rename a project's display label without touching the on-disk slug or any training artifacts."""
 
     cleaned = (display_name or "").strip()
     if not cleaned:
@@ -239,13 +235,13 @@ def set_project_display_name(
 
 
 def read_run_display(run_dir: Path) -> dict[str, object]:
-    """Read the display sidecar for a single training run."""
+    """Load a run's display metadata (e.g. its friendly name) from its per-run display.json sidecar."""
 
     return _read_display_sidecar(run_dir / "display.json")
 
 
 def set_run_display_name(run_dir: Path, *, display_name: str) -> dict[str, object]:
-    """Rename a single run for display purposes (the run dir stays put)."""
+    """Set a friendly label on a single training run without moving or renaming the run directory."""
 
     cleaned = (display_name or "").strip()
     if not cleaned:
@@ -261,7 +257,7 @@ def project_dir(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> Path:
-    """Return the root directory reserved for a named fine-tuning project."""
+    """Compute the canonical on-disk location for a project — one source of truth for the path structure."""
 
     normalized_backend = normalize_backend(backend)
     return root / "fine_tuning" / "projects" / normalized_backend / slugify(project_name)
@@ -273,7 +269,7 @@ def project_paths(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> dict[str, Path]:
-    """Collect all stable project paths in one place to reduce path drift."""
+    """Return every well-known path for a project in one dict so no caller hard-codes the layout."""
 
     normalized_backend = normalize_backend(backend)
     base_dir = project_dir(project_name, backend=normalized_backend, root=root)

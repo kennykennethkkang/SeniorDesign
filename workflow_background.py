@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Shared helpers for detached workflow runs launched from the local dashboard."""
+"""Shared helpers for detached workflow runs launched from the local dashboard.
+
+These utilities decouple long-running cluster jobs from the dashboard's HTTP
+request cycle — once an sbatch job is handed off to SLURM, everything here is
+about polling its state and surfacing that state to the frontend.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +20,13 @@ from typing import Mapping, Sequence
 
 
 def utc_now_iso() -> str:
-    """Return a stable UTC timestamp for metadata files."""
+    """Produce a microsecond-free UTC ISO timestamp so metadata files stay diff-friendly."""
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def process_is_running(pid: int) -> bool:
-    """Check whether a local process still exists."""
+    """Send signal 0 to check process liveness — no actual signal is delivered, just the existence check."""
 
     if pid <= 0:
         return False
@@ -33,7 +38,7 @@ def process_is_running(pid: int) -> bool:
 
 
 def slurm_job_state(job_id: str, *, include_accounting: bool = True) -> str:
-    """Return the current Slurm state for a submitted job when available."""
+    """Get the current SLURM state for a job, falling back to sacct when it's already left squeue."""
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
     if not normalized_job_id:
@@ -60,7 +65,7 @@ def slurm_job_state(job_id: str, *, include_accounting: bool = True) -> str:
 
 
 def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:
-    """Return final Slurm accounting details for a job when sacct is available."""
+    """Pull terminal job stats from sacct for jobs that have already finished and left the live queue."""
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
     if not normalized_job_id or not shutil.which("sacct"):
@@ -123,7 +128,12 @@ def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:
 
 
 def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
-    """Return queue position details for one Slurm job when `squeue` is available."""
+    """Return queue-position and resource details for a SLURM job, including partition-aware position.
+
+    We show partition-specific position because "30 jobs ahead globally" is
+    misleading when most of them are on a different partition — the gpu queue
+    might only have 2 jobs ahead of ours.
+    """
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
     if not normalized_job_id:
@@ -247,7 +257,7 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
 
 
 def run_status(run_dir: Path) -> str:
-    """Derive a readable run state from the standard metadata files."""
+    """Derive a human-readable run state from whichever metadata file is available (exit_code > slurm > metadata)."""
 
     exit_code_path = run_dir / "exit_code.txt"
     metadata_path = run_dir / "metadata.json"

@@ -1467,16 +1467,7 @@ class DiarizationMixin:
         elif status == "succeeded" and no_speech > 0:
             status = "completed_with_warnings"
         slurm_job_id = str(metadata.get("slurm_job_id") or "").strip()
-        import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
-        slurm_queue = (
-            self.cached_value(
-                f"slurm_queue::{slurm_job_id}",
-                ttl_seconds=2.0,
-                builder=lambda: _wd.slurm_queue_snapshot(slurm_job_id),
-            )
-            if slurm_job_id and status in {"submitted", "running"}
-            else {}
-        )
+        slurm_queue = self.cached_slurm_queue(slurm_job_id, status)
 
         # Live "currently processing" inference for active runs only:
         # the first selected audio that has no completed status is treated as

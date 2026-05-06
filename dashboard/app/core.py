@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WSGI dispatch, request parsing, response building, and shared utilities."""
+"""WSGI application core: request dispatch, response helpers, and shared utilities across all mixins."""
 from __future__ import annotations
 
 
@@ -146,7 +146,7 @@ from dashboard.cli import build_parser
 
 
 class CoreMixin:
-    """WSGI dispatch, request parsing, response building, and shared utilities."""
+    """Central WSGI class: composes all mixins and owns the request dispatch table."""
 
     def __init__(self, root: Path = PROJECT_ROOT):
         self.root = root.resolve()
@@ -984,6 +984,22 @@ class CoreMixin:
         with self._dashboard_cache_lock:
             self._dashboard_cache[key] = (now + ttl_seconds, value)
         return value
+
+    def cached_slurm_queue(self, slurm_job_id: str, status: str) -> dict[str, object]:
+        """Return a cached squeue snapshot for active jobs; returns {} immediately for finished ones.
+
+        We only query squeue while the job is live — once it's terminal the queue
+        snapshot is no longer useful and the overhead of calling squeue is wasted.
+        """
+
+        if not slurm_job_id or status not in {"submitted", "running"}:
+            return {}
+        import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
+        return self.cached_value(
+            f"slurm_queue::{slurm_job_id}",
+            ttl_seconds=2.0,
+            builder=lambda: _wd.slurm_queue_snapshot(slurm_job_id),
+        )
 
     def active_tracking_summary(self) -> dict[str, object]:
         """Summarize runs that should keep the dashboard refreshing."""

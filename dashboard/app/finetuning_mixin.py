@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tuning project preparation, launch, and metrics."""
+"""Fine-tuning mixin: project prep, training launch, rename, and DER/JER scoring endpoints for the dashboard."""
 from __future__ import annotations
 
 
@@ -149,7 +149,7 @@ from dashboard.cli import build_parser
 
 
 class FineTuningMixin:
-    """Fine-tuning project preparation, launch, and metrics."""
+    """Handles all fine-tuning HTTP routes: upload, prepare, launch, rename, and score."""
 
     def save_project_sample_from_paths(
         self,
@@ -161,7 +161,7 @@ class FineTuningMixin:
         transcript_path: Path | None = None,
         transcript_text: str = "",
     ):
-        """Copy a training sample from SSH workspace files into a backend project."""
+        """Copy a labeled audio+RTTM pair from the SSH workspace into the project's training data directory."""
 
         audio_stream = audio_path.open("rb")
         rttm_stream = rttm_path.open("rb")
@@ -186,7 +186,7 @@ class FineTuningMixin:
             audio_stream.close()
 
     def handle_finetune_upload(self, environ):
-        """Store one or more fine-tuning samples composed of audio plus RTTM supervision."""
+        """Accept one or more labeled audio+RTTM pairs from the browser or SSH workspace and add them to a project."""
 
         form = self.parse_form(environ)
         preferences = self.model_preferences()
@@ -502,12 +502,12 @@ class FineTuningMixin:
         )
 
     def handle_finetune_rename_project(self, environ):
-        """Set or clear the friendly display name for a fine-tuning project."""
+        """Update a project's display name without touching the on-disk slug or any existing run directories.
 
-        # We never rename the on-disk slug — that's the persistent ID for runs,
-        # label_status entries, and metadata files. The display label lives in
-        # a sidecar so prepare_project can keep regenerating metadata.json
-        # without nuking the user's chosen name.
+        The slug is the persistent ID — everything that references the project
+        (label_status, metadata, runs/) uses it. Only the human-readable label
+        in display.json changes here.
+        """
         form = self.parse_form(environ)
         project_slug = (form.getfirst("project_slug") or form.getfirst("project_name") or "").strip()
         backend_value = form.getfirst("backend") or form.getfirst("project_backend") or ""
@@ -535,15 +535,15 @@ class FineTuningMixin:
         )
 
     def handle_finetune_score_run(self, environ):
-        """Score a hypothesis RTTM against a reference RTTM and return metrics JSON.
+        """Score a model's RTTM output against hand-labeled reference RTTM and return DER + JER metrics as JSON.
 
-        Both paths are validated to live inside the project workspace before
-        we read them — handing arbitrary file paths to a public endpoint is a
-        classic path-traversal foot-gun, even on a single-user dashboard.
+        Path-traversal check is intentional — even on a single-user dashboard
+        an XSS/CSRF could forge a request pointing at /etc/passwd and we'd read
+        it back. Both paths must resolve inside self.root.
         """
 
-        # Lazy import — diarization_metrics is small but not free, and most
-        # dashboard requests don't need it.
+        # Lazy import — diarization_metrics only costs something on import, and
+        # most requests never need it.
         import diarization_metrics
 
         query = parse_qs((environ.get("QUERY_STRING") or ""), keep_blank_values=True)
@@ -581,7 +581,7 @@ class FineTuningMixin:
         return self.json_response("200 OK", metrics)
 
     def handle_finetune_rename_run(self, environ):
-        """Set or clear the friendly display name for a single training run."""
+        """Update the display label for one training run — lets us tell runs apart without renaming the directory."""
 
         form = self.parse_form(environ)
         run_dir_value = (form.getfirst("run_dir") or "").strip()
@@ -591,8 +591,8 @@ class FineTuningMixin:
         if not display_name:
             return self.redirect(environ, "/fine-tuning", message="Provide a new display name.", status="error")
         run_dir = self.resolve_local_path(run_dir_value)
-        # Sanity check: the run dir must live inside fine_tuning/projects/. We
-        # don't want a malicious form post writing display.json anywhere on disk.
+        # Sanity-check that the path lands inside fine_tuning/projects/ — a crafted
+        # form post could otherwise write display.json anywhere on the machine.
         runs_root = (self.root / "fine_tuning" / "projects").resolve()
         try:
             resolved = run_dir.resolve()

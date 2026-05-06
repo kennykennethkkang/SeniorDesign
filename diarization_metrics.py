@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """Diarization Error Rate + companion metrics for the senior-design dashboard.
 
-The point of this module is to grade a fine-tuned model's predictions against
-ground-truth labels — so we can answer "did the new training run actually do
-better?" without dragging in a pyannote install on the cluster.
+We need a way to grade our fine-tuned model's output against the labels we
+hand-annotated — ideally without pulling in a full pyannote environment on
+the cluster just to run one evaluation. So we rolled our own, keeping it
+pure-Python except for the optional scipy Hungarian-algorithm speedup.
 
-Everything here works on (start, end, speaker) intervals derived from RTTM
-files. Numbers it reports:
+Metrics reported:
+  - DER  (Diarization Error Rate) — the NIST-convention (miss + false_alarm +
+    confusion) / reference_speech. Lower is better.
+  - miss / false_alarm / confusion — DER broken into its three components so
+    we can tell *why* a run got worse (e.g. high false alarm = VAD too loose).
+  - JER  (Jaccard Error Rate) — per-speaker, averaged. Unlike DER, one
+    very-talkative speaker can't dominate the number, so it's a better
+    sanity-check on over-segmented recordings.
+  - speaker_count_diff — |hyp_speakers − ref_speakers|; useful early signal
+    for over- or under-clustering.
 
-  - DER (Diarization Error Rate): the canonical (miss + false_alarm + confusion)
-    divided by total reference speech time. Lower is better.
-  - miss / false_alarm / confusion: the three components of DER, broken out so
-    we can tell *why* a run did worse — e.g. a high false-alarm rate usually
-    means the VAD threshold is too permissive.
-  - JER (Jaccard Error Rate): per-speaker, averaged. Less sensitive to one
-    very-talkative speaker dominating the metric, which DER is prone to.
-  - speaker_count_diff: |hyp_speakers - ref_speakers|. Useful for spotting
-    over-segmentation early.
-
-For optimal speaker mapping we try scipy's linear_sum_assignment when it's
-available; if scipy isn't installed we fall back to greedy assignment, which
-is within a few percent of optimal on diarization-sized problems.
+Speaker assignment uses scipy's linear_sum_assignment when available (optimal
+Hungarian); otherwise we fall back to greedy max-overlap, which is within a
+few percent of optimal for the small speaker counts we see.
 """
 from __future__ import annotations
 
@@ -34,7 +33,7 @@ from typing import Iterable, Sequence
 
 @dataclass(frozen=True)
 class Interval:
-    """One stretch of speech for one speaker."""
+    """Holds a single speaker-speech region from an RTTM file."""
 
     start: float
     end: float
@@ -46,12 +45,10 @@ class Interval:
 
 
 def parse_rttm_intervals(rttm_path: Path | str) -> list[Interval]:
-    """Read an RTTM file into a list of Interval(start, end, speaker).
+    """Parse an RTTM file into Interval objects so the rest of the module can work with typed data.
 
-    The RTTM line format is space-separated: SPEAKER <uri> <ch> <start>
-    <duration> <NA> <NA> <speaker> <conf> <NA>. We only need start, duration,
-    and speaker columns; everything else is just kept in the file as a NeMo /
-    pyannote contract.
+    RTTM is a NIST format: SPEAKER <uri> <ch> <start> <duration> ... <speaker> ...
+    We only care about columns 3, 4, and 7 (start, duration, speaker label).
     """
 
     path = Path(rttm_path)
@@ -78,11 +75,10 @@ def parse_rttm_intervals(rttm_path: Path | str) -> list[Interval]:
 
 
 def merge_intervals(intervals: Iterable[Interval]) -> list[tuple[float, float]]:
-    """Merge a stream of intervals (any speakers) into non-overlapping ranges.
+    """Collapse overlapping intervals down to non-overlapping ranges.
 
-    Used to compute total speech time of a side regardless of which speaker is
-    talking — the denominator in DER is total *reference* speech time, with
-    overlap counted once.
+    The DER denominator is total reference speech time with overlap counted
+    once, so we need to flatten multi-speaker regions before summing.
     """
 
     sorted_intervals = sorted(intervals, key=lambda iv: iv.start)
@@ -97,29 +93,28 @@ def merge_intervals(intervals: Iterable[Interval]) -> list[tuple[float, float]]:
 
 
 def total_speech_time(intervals: Iterable[Interval]) -> float:
-    """Total speech time across all speakers, with overlap counted once."""
+    """Sum merged speech time — overlap regions are counted once, not once per speaker."""
 
     return sum(end - start for start, end in merge_intervals(intervals))
 
 
 def speakers_in(intervals: Iterable[Interval]) -> list[str]:
-    """Stable-sorted list of unique speaker labels."""
+    """Return a stable-sorted list of unique speaker labels so row/column order is deterministic."""
 
     return sorted({iv.speaker for iv in intervals})
 
 
 def _interval_overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
-    """Return how many seconds two intervals share."""
+    """Compute the overlap between two time ranges — used as the building block for the speaker-match matrix."""
 
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
 
 def overlap_matrix(reference: Sequence[Interval], hypothesis: Sequence[Interval]) -> dict[tuple[str, str], float]:
-    """Build the {(ref_speaker, hyp_speaker): overlap_seconds} cost matrix.
+    """Build a {(ref_speaker, hyp_speaker): seconds_of_overlap} table for speaker assignment.
 
-    O(n*m) is fine for diarization-sized problems (a couple thousand intervals
-    at most). If we ever needed more, the right move would be to sweep both
-    sides as sorted event streams.
+    O(n×m) is fine here — diarization files for our recordings top out at a
+    few thousand intervals total, so brute-force pairwise is fast enough.
     """
 
     matrix: dict[tuple[str, str], float] = {}
@@ -137,12 +132,12 @@ def best_speaker_mapping(
     reference: Sequence[Interval],
     hypothesis: Sequence[Interval],
 ) -> dict[str, str]:
-    """Return ref_speaker -> hyp_speaker assignment that maximizes shared time.
+    """Find the optimal ref→hyp speaker assignment so we don't penalize correct speech just because the labels differ.
 
-    Uses scipy.optimize.linear_sum_assignment if available (optimal Hungarian
-    in O((n*m)*sqrt(n+m))). Falls back to a greedy max-overlap pick when scipy
-    is not installed — the cluster doesn't always have it. Greedy is within a
-    few percent of optimal for diarization speaker counts (typically <8).
+    Without this, a perfect transcript where ref calls the teacher "SPK_0" and
+    the hypothesis calls them "SPK_1" would score 100 % confusion. We solve the
+    assignment problem using scipy's Hungarian algorithm when available, and fall
+    back to greedy otherwise — WAVE doesn't always have scipy installed.
     """
 
     ref_speakers = speakers_in(reference)
@@ -174,7 +169,7 @@ def _greedy_speaker_mapping(
     hyp_speakers: Sequence[str],
     matrix: dict[tuple[str, str], float],
 ) -> dict[str, str]:
-    """Greedy fallback: at each step take the largest unassigned overlap pair."""
+    """Greedy fallback for when scipy isn't around — grab the highest-overlap pair first, repeat."""
 
     edges = sorted(((overlap, ref, hyp) for (ref, hyp), overlap in matrix.items()), reverse=True)
     used_ref: set[str] = set()
@@ -193,29 +188,15 @@ def compute_der(
     reference: Sequence[Interval],
     hypothesis: Sequence[Interval],
 ) -> dict[str, float]:
-    """Return DER plus its three components for one (ref, hyp) RTTM pair.
+    """Compute person-time DER (miss + false_alarm + confusion) / reference_speech.
 
-    This is person-time DER (NIST convention) — when two speakers talk at once
-    in the reference, that 2-second slice contributes 2 person-seconds to the
-    denominator and to miss/false-alarm/confusion accounting. The simpler
-    binary-presence version under-counts errors in overlapping speech, which
-    senior-design audio (multiple kids in one clip) hits a lot.
-
-    Definitions:
-      - reference_speech    = sum over slices of (active reference speakers) *
-                              slice duration. The denominator.
-      - hypothesis_speech   = same, on the hypothesis side. Reported for
-                              context (e.g. spotting an over-talkative VAD).
-      - miss                = slices where reference has more speakers active
-                              than hypothesis can cover.
-      - false_alarm         = slices where hypothesis has more speakers active
-                              than reference, i.e. the model invents speech.
-      - confusion           = slices where speaker counts match but the mapped
-                              pair isn't simultaneously active.
-      - der                 = (miss + false_alarm + confusion) / reference_speech
-
-    No forgiveness collar by default. If we want one later, shrink reference
-    intervals before passing them in.
+    We use the NIST person-time convention: when two speakers overlap in the
+    reference, that 2-second window contributes 2 person-seconds to the
+    denominator. The simpler binary-presence version under-penalizes overlapping
+    regions, which matters a lot for classroom audio where multiple kids talk
+    at once. All three components are returned separately so we can tell which
+    one is driving a bad score (miss=VAD missed speech, false_alarm=hallucinated
+    speech, confusion=right timing but wrong speaker label).
     """
 
     if not reference and not hypothesis:
@@ -258,9 +239,8 @@ def compute_der(
         hyp_active = {iv.speaker for iv in hypothesis if iv.start <= left and right <= iv.end}
         n_r = len(ref_active)
         n_h = len(hyp_active)
-        # Count how many mapped (ref -> hyp) pairs have BOTH sides active in
-        # this slice. Those are "correct"; everything else on the smaller
-        # side becomes confusion.
+        # "Correct" = both sides of a matched pair are simultaneously active.
+        # Everything left on the smaller side is confusion (right timing, wrong speaker).
         n_correct = sum(
             1 for ref_speaker, hyp_speaker in mapping.items()
             if ref_speaker in ref_active and hyp_speaker in hyp_active
@@ -272,9 +252,8 @@ def compute_der(
         confusion += (min(n_r, n_h) - n_correct) * slice_duration
 
     if reference_speech <= 0:
-        # Reference intervals were all zero-length / overlapped to nothing.
-        # Fall through to the empty-reference branch's semantics so the rate
-        # isn't a divide-by-zero.
+        # Guard against divide-by-zero when reference intervals are all zero-length
+        # (shouldn't happen with valid RTTM, but we don't want to crash on bad input).
         return {
             "der": 0.0 if hypothesis_speech == 0 else float("inf"),
             "miss": miss,
@@ -298,13 +277,12 @@ def compute_jer(
     reference: Sequence[Interval],
     hypothesis: Sequence[Interval],
 ) -> dict[str, float]:
-    """Jaccard Error Rate: per-reference-speaker, averaged.
+    """Compute per-speaker Jaccard Error Rate and average it across reference speakers.
 
-    For each reference speaker s_r, the best hypothesis match is the one with
-    largest temporal overlap. The per-speaker error is 1 - |intersection| /
-    |union|, and JER is the mean of those errors. A speaker that the model
-    never produces shows up as JER 1.0 for that slot; that's intentional —
-    forgetting an entire speaker is a real, expensive error.
+    JER is useful alongside DER because DER gets dominated by whoever talks the
+    most — JER gives each speaker equal weight. For each reference speaker we
+    find the best-matching hypothesis speaker (most overlap) and compute
+    1 − intersection/union. A speaker the model never predicted = JER 1.0.
     """
 
     ref_speakers = speakers_in(reference)
@@ -346,7 +324,7 @@ def score_run(
     reference_rttm: Path | str,
     hypothesis_rttm: Path | str,
 ) -> dict[str, object]:
-    """Read two RTTMs and produce a presentation-ready metrics payload."""
+    """Top-level entry point: read two RTTM files and return a complete metrics dict for the dashboard."""
 
     reference = parse_rttm_intervals(reference_rttm)
     hypothesis = parse_rttm_intervals(hypothesis_rttm)
