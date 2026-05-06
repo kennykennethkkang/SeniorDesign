@@ -2650,12 +2650,9 @@
       return parsedRows.length ? parsedRows : [makeLabelEditorRow()];
     });
     const [transcriptText, setTranscriptText] = React.useState(row.transcriptText || "");
-    // Default ON when there's already transcript text saved (back-compat) OR
-    // when the label is brand-new — keeps a record of what was said. When OFF
-    // the transcript is dropped from the saved sample entirely.
+    // Default off unless the saved label explicitly kept dialogue.
     const [includeTranscript, setIncludeTranscript] = React.useState(() => {
-      if (row.includeTranscript === false) return false;
-      return true;
+      return row.includeTranscript === true;
     });
     const [issueQuestions, setIssueQuestions] = React.useState(row.issueQuestions || "");
     const [selectedModelKey, setSelectedModelKey] = React.useState("");

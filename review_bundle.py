@@ -740,9 +740,10 @@ def build_html(
     media_file_name = html.escape(media_selection_name or (media_path.name if media_path is not None else ""), quote=True)
     default_segments = html.escape("\n".join(label_segment_lines))
     default_dialogue = html.escape("\n".join(entry[4] for entry in label_entries))
-    include_transcript = not (label_record is not None and label_record.get("include_transcript") is False)
+    include_transcript = bool(label_record is not None and label_record.get("include_transcript") is True)
     include_transcript_value = "1" if include_transcript else "0"
     include_transcript_checked = " checked" if include_transcript else ""
+    label_table_class = "label-table" + ("" if include_transcript else " hide-dialogue")
     review_workspace_path = html.escape(str(output_html), quote=True)
     selected_backend = normalized_label_backend(label_record)
     project_name = html.escape(record_text(label_record, "project_name", DEFAULT_LABEL_PROJECT), quote=True)
@@ -1677,7 +1678,7 @@ def build_html(
             <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
           <div class="table-wrap review-table-wrap">
-            <table class="label-table">
+            <table class="{label_table_class}">
               <colgroup>
                 <col style="width: 56px">
                 <col style="width: 178px">
@@ -1825,6 +1826,8 @@ def build_html(
     let waveformPeaks = [];
     let waveformLoaded = false;
     let completeSubmitConfirmed = false;
+    let labelAutoSaveTimer = null;
+    let labelAutoSaveController = null;
 
     function appBasePath() {{
       const filesIndex = window.location.pathname.indexOf("/files/");
@@ -2478,6 +2481,7 @@ def build_html(
         "Set " + activeLabelTimeInputLabel(input) + " time to " + timestamp + " seconds.",
         row ? labelSummary(row) : ""
       );
+      scheduleLabelAutoSave();
     }}
 
     function updateLabelRowDataset(row) {{
@@ -2660,6 +2664,70 @@ def build_html(
       if (labelIncludeTranscript) labelIncludeTranscript.value = showLabelDialogue.checked ? "1" : "0";
     }}
 
+    function clearLabelAutoSave() {{
+      if (labelAutoSaveTimer) {{
+        window.clearTimeout(labelAutoSaveTimer);
+        labelAutoSaveTimer = null;
+      }}
+      if (labelAutoSaveController) {{
+        labelAutoSaveController.abort();
+        labelAutoSaveController = null;
+      }}
+    }}
+
+    function setAutoSaveStatus(message, isError = false) {{
+      if (!saveStatus) return;
+      saveStatus.className = isError ? "save-status error" : "save-status";
+      saveStatus.style.display = "block";
+      saveStatus.textContent = message;
+    }}
+
+    function runLabelAutoSave() {{
+      labelAutoSaveTimer = null;
+      if (!window.fetch || labelForm.dataset.submitting === "true") return;
+      syncLabelSegments(false);
+      syncLabelDialogueVisibility();
+      if (labelAutoSaveController) labelAutoSaveController.abort();
+      labelAutoSaveController = new AbortController();
+      const formData = new FormData(labelForm);
+      formData.set("label_segments", labelSegments.value);
+      if (labelIncludeTranscript) formData.set("label_include_transcript", labelIncludeTranscript.value);
+      formData.set("label_action", "draft");
+      formData.set("label_auto_save", "1");
+      setAutoSaveStatus("Auto-saving draft...");
+      window.fetch(labelForm.action, {{
+        method: "POST",
+        body: formData,
+        credentials: "same-origin",
+        redirect: "manual",
+        signal: labelAutoSaveController.signal,
+        headers: {{ Accept: "application/json,text/html,*/*" }},
+      }})
+        .then(function (response) {{
+          if (
+            response.type === "opaqueredirect" ||
+            response.status === 0 ||
+            (response.status >= 200 && response.status < 400)
+          ) {{
+            labelAutoSaveController = null;
+            setAutoSaveStatus("Auto-saved draft at " + new Date().toLocaleTimeString() + ".");
+            return;
+          }}
+          throw new Error("Label auto-save failed");
+        }})
+        .catch(function (error) {{
+          if (error && error.name === "AbortError") return;
+          labelAutoSaveController = null;
+          setAutoSaveStatus("Auto-save failed. Press Save Draft when you are ready.", true);
+        }});
+    }}
+
+    function scheduleLabelAutoSave() {{
+      if (!window.fetch || labelForm.dataset.submitting === "true") return;
+      if (labelAutoSaveTimer) window.clearTimeout(labelAutoSaveTimer);
+      labelAutoSaveTimer = window.setTimeout(runLabelAutoSave, 1500);
+    }}
+
     function playRange(start, end, selectedRow) {{
       if (!media) return;
       const safeStart = rowNumber(start);
@@ -2769,6 +2837,7 @@ def build_html(
       syncLabelSegments();
       applyLabelFilters();
       setPlaybackMessage("Added detected segment to labels.", labelSummary(target));
+      scheduleLabelAutoSave();
     }}
 
     cueTable.addEventListener("click", function (event) {{
@@ -2813,6 +2882,7 @@ def build_html(
       syncLabelSegments();
       applyLabelFilters();
       setCurrentRows();
+      scheduleLabelAutoSave();
     }}
 
     labelRows.addEventListener("click", function (event) {{
@@ -2841,11 +2911,13 @@ def build_html(
       syncLabelSegments();
       applyLabelFilters();
       setCurrentRows();
+      scheduleLabelAutoSave();
     }});
     labelRows.addEventListener("change", function () {{
       syncLabelSegments();
       applyLabelFilters();
       setCurrentRows();
+      scheduleLabelAutoSave();
     }});
 
     let dragRow = null;
@@ -2907,6 +2979,7 @@ def build_html(
       syncLabelSegments();
       applyLabelFilters();
       setSelectedLabelRow(dragRow);
+      scheduleLabelAutoSave();
     }});
 
     labelRows.addEventListener("dragend", function () {{
@@ -2923,6 +2996,7 @@ def build_html(
       row.scrollIntoView({{ block: "nearest" }});
       const startInput = row.querySelector(".label-start");
       if (startInput) startInput.focus();
+      scheduleLabelAutoSave();
     }}
 
     addLabelRow.addEventListener("click", appendBlankLabelRow);
@@ -2965,6 +3039,7 @@ def build_html(
 
     labelForm.addEventListener("submit", function (event) {{
       syncLabelSegments(true);
+      syncLabelDialogueVisibility();
       const submitter = event.submitter;
       if (submitter && submitter.value === "complete" && !completeSubmitConfirmed) {{
         event.preventDefault();
@@ -2976,6 +3051,7 @@ def build_html(
         return;
       }}
       event.preventDefault();
+      clearLabelAutoSave();
       const formData = new FormData(labelForm);
       if (submitter && submitter.name) {{
         formData.set(submitter.name, submitter.value || "");
@@ -3009,7 +3085,9 @@ def build_html(
     if (typeof FormDataEvent !== "undefined") {{
       labelForm.addEventListener("formdata", function (event) {{
         syncLabelSegments(false);
+        syncLabelDialogueVisibility();
         event.formData.set("label_segments", labelSegments.value);
+        if (labelIncludeTranscript) event.formData.set("label_include_transcript", labelIncludeTranscript.value);
       }});
     }}
 
@@ -3059,7 +3137,14 @@ def build_html(
     labelSearch.addEventListener("input", applyLabelFilters);
     labelSpeakerFilter.addEventListener("change", applyLabelFilters);
     labelIssueFilter.addEventListener("change", applyLabelFilters);
-    if (showLabelDialogue) showLabelDialogue.addEventListener("change", syncLabelDialogueVisibility);
+    labelForm.querySelectorAll("[name='label_backend'], [name='label_project_name']").forEach(function (field) {{
+      field.addEventListener("input", scheduleLabelAutoSave);
+      field.addEventListener("change", scheduleLabelAutoSave);
+    }});
+    if (showLabelDialogue) showLabelDialogue.addEventListener("change", function () {{
+      syncLabelDialogueVisibility();
+      scheduleLabelAutoSave();
+    }});
     syncLabelDialogueVisibility();
     rewind.addEventListener("click", function () {{
       if (!media) return;

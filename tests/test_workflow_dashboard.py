@@ -627,6 +627,59 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(project["slug"], "review-lab")
             self.assertEqual(project["sampleCount"], 1)
 
+    def test_review_page_keeps_dialogue_toggle_off_after_saved_draft(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            run_dir = root / "outputs" / "diarization_runs" / "20260414T190000_diarization_nemo_01-items"
+            run_dir.mkdir(parents=True)
+            (run_dir / "001_clip.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:00,500\nSpeaker 0: hello\n",
+                encoding="utf-8",
+            )
+            review_path = run_dir / "001_clip_review.html"
+            review_path.write_text("<html>review</html>\n", encoding="utf-8")
+            return_to = "/files/outputs/diarization_runs/20260414T190000_diarization_nemo_01-items/001_clip_review.html"
+
+            body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "review-lab"),
+                    ("label_segments", "0.00 0.50 Speaker_0"),
+                    ("label_transcript_text", "this should stay excluded"),
+                    ("label_include_transcript", "0"),
+                    ("label_action", "draft"),
+                    ("label_return_to", return_to),
+                    ("label_source", "review_page"),
+                    ("label_review_path", str(review_path)),
+                ]
+            ).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertTrue(headers["Location"].startswith(return_to))
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertFalse(record["include_transcript"])
+            self.assertEqual(record["transcript_text"], "")
+
+            status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path=return_to)
+            self.assertEqual(status, "200 OK")
+            html = body.decode("utf-8")
+            self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="0"', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox"> Save dialogue', html)
+            self.assertIn('<table class="label-table hide-dialogue">', html)
+
     def test_diarization_page_tracks_completed_and_retryable_audio(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

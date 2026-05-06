@@ -87,6 +87,11 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("setActiveLabelTimeFromPlayer", html)
             self.assertIn("Use Current Seconds", html)
             self.assertIn("formatSeconds", html)
+            self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="0"', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox"> Save dialogue', html)
+            self.assertIn('<table class="label-table hide-dialogue">', html)
+            self.assertIn("scheduleLabelAutoSave", html)
+            self.assertIn("label_auto_save", html)
             self.assertNotIn("Adjust selected label", html)
             self.assertNotIn("Set Start Here", html)
             self.assertIn("id=\"labelHealth\"", html)
@@ -106,6 +111,41 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("very_short_segment", rows[0]["flags"])
             self.assertIn("overlap_previous", rows[1]["flags"])
             self.assertIn("duplicate_adjacent_text", rows[1]["flags"])
+
+    def test_write_review_bundle_keeps_saved_dialogue_toggle_on(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = pathlib.Path(tmpdir)
+            srt_path = temp_path / "clip.srt"
+            media_path = temp_path / "clip.wav"
+            html_path = temp_path / "clip_review.html"
+
+            srt_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:00,500\n"
+                "Speaker 0: Saved line.\n",
+                encoding="utf-8",
+            )
+            media_path.write_text("media", encoding="utf-8")
+
+            review_outputs.write_review_bundle(
+                srt_path=srt_path,
+                media_path=media_path,
+                output_html=html_path,
+                training_label_records={
+                    "clip.wav": {
+                        "include_transcript": True,
+                        "label_segments": "0.000 0.500 SPEAKER_00",
+                        "transcript_text": "Saved line.",
+                    }
+                },
+                quiet=True,
+            )
+
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn('id="labelIncludeTranscript" name="label_include_transcript" value="1"', html)
+            self.assertIn('id="showLabelDialogue" type="checkbox" checked> Save dialogue', html)
+            self.assertIn('<table class="label-table">', html)
+            self.assertNotIn('<table class="label-table hide-dialogue">', html)
 
     def test_write_review_bundle_can_auto_match_media_by_stem(self):
         with tempfile.TemporaryDirectory() as tmpdir:
