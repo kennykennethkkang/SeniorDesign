@@ -238,6 +238,76 @@ class TrainingLabelsMixin:
             return ["nemo", "pyannote"]
         return [normalize_backend(normalized)]
 
+    def training_label_target_key(self, backend: str, project_name: str) -> str:
+        """Return the backend/project key used by the completion popup and status records."""
+
+        return f"{normalize_backend(backend)}/{slugify(project_name or DEFAULT_TRAINING_LABEL_PROJECT)}"
+
+    def parse_training_label_target_value(self, raw_value: object) -> dict[str, str] | None:
+        """Parse one backend/project form value into a normalized target mapping."""
+
+        value = str(raw_value or "").strip()
+        if not value or "/" not in value:
+            return None
+        raw_backend, raw_project_name = value.split("/", 1)
+        project_name = slugify(raw_project_name)
+        if not project_name:
+            return None
+        backend = normalize_backend(raw_backend)
+        return {
+            "backend": backend,
+            "project_name": project_name,
+            "key": self.training_label_target_key(backend, project_name),
+        }
+
+    def training_label_targets_from_values(self, values: list[object]) -> tuple[list[dict[str, str]], list[str]]:
+        """Normalize repeated backend/project values from a submitted form."""
+
+        targets: list[dict[str, str]] = []
+        questions: list[str] = []
+        seen: set[str] = set()
+        for raw_value in values:
+            try:
+                target = self.parse_training_label_target_value(raw_value)
+            except ValueError as exc:
+                questions.append(str(exc))
+                continue
+            if not target or target["key"] in seen:
+                continue
+            targets.append(target)
+            seen.add(target["key"])
+        return targets, questions
+
+    def training_label_targets_from_form(
+        self,
+        form: cgi.FieldStorage,
+        *,
+        fallback_backends: list[str],
+        fallback_project_name: str,
+    ) -> tuple[list[dict[str, str]], list[str], bool]:
+        """Return explicit popup targets, or the legacy backend/project target list."""
+
+        explicit_targets, questions = self.training_label_targets_from_values(form.getlist("label_training_targets"))
+        if explicit_targets:
+            return explicit_targets, questions, True
+        if not fallback_project_name:
+            return [], questions, False
+        targets = []
+        seen: set[str] = set()
+        for backend in fallback_backends:
+            project_key = self.training_label_target_key(backend, fallback_project_name)
+            if project_key in seen:
+                continue
+            targets.append(
+                {
+                    "backend": normalize_backend(backend),
+                    "project_name": fallback_project_name,
+                    "key": project_key,
+                }
+            )
+            seen.add(project_key)
+        return targets, questions, False
+
     def training_label_summary(
         self,
         audio_paths: list[Path],
@@ -555,9 +625,24 @@ class TrainingLabelsMixin:
         audio_path = self.audio_dir / audio_name
 
         raw_backend = form.getfirst("label_backend") or "both"
-        target_backends = self.training_label_target_backends(raw_backend)
-        backend = "both" if len(target_backends) > 1 else target_backends[0]
+        legacy_target_backends = self.training_label_target_backends(raw_backend)
         project_name = (form.getfirst("label_project_name") or DEFAULT_TRAINING_LABEL_PROJECT).strip()
+        training_targets, target_questions, explicit_training_targets = self.training_label_targets_from_form(
+            form,
+            fallback_backends=legacy_target_backends,
+            fallback_project_name=project_name,
+        )
+        if training_targets:
+            project_name = training_targets[0]["project_name"]
+        target_backends = self.ordered_unique([target["backend"] for target in training_targets]) or legacy_target_backends
+        backend = "both" if len(target_backends) > 1 else target_backends[0]
+        target_projects = [target["key"] for target in training_targets]
+        requested_auto_targets, auto_target_questions = self.training_label_targets_from_values(
+            form.getlist("label_auto_train_targets")
+        )
+        requested_auto_target_keys = {target["key"] for target in requested_auto_targets}
+        explicit_auto_train_targets = bool(requested_auto_target_keys)
+        skip_auto_train = bool(form.getfirst("label_auto_train_skip"))
         raw_segments = (form.getfirst("label_segments") or "").strip()
         # Dialogue toggle: when off, drop the transcript before it gets stored in
         # the training sample. Diarization training never reads it, but it would
@@ -582,6 +667,7 @@ class TrainingLabelsMixin:
         base_record = {
             "backend": backend,
             "target_backends": target_backends,
+            "target_projects": target_projects,
             "project_name": project_name,
             "label_segments": raw_segments,
             "transcript_text": transcript_text,
@@ -619,7 +705,22 @@ class TrainingLabelsMixin:
                 status="success",
             )
 
-        if not project_name:
+        if target_questions or auto_target_questions:
+            questions = [*target_questions, *auto_target_questions]
+            self.upsert_training_label_record(
+                audio_name,
+                {**base_record, "status": "needs_review", "system_questions": questions[:8]},
+            )
+            return self.redirect(
+                environ,
+                return_location,
+                message=self.notification_message(
+                    "The selected training target could not be used.",
+                    *questions[:8],
+                ),
+                status="error",
+            )
+        if not training_targets:
             self.upsert_training_label_record(
                 audio_name,
                 {
@@ -701,22 +802,21 @@ class TrainingLabelsMixin:
                 status="error",
             )
 
-        completed_samples = []
+        completed_targets = []
         try:
-            for target_backend in target_backends:
+            for target in training_targets:
                 with audio_path.open("rb") as audio_stream:
-                    completed_samples.append(
-                        save_project_sample_streams(
-                            project_name=project_name,
-                            backend=target_backend,
-                            audio_name=audio_name,
-                            audio_stream=audio_stream,
-                            rttm_name=f"{label_stem}.rttm",
-                            rttm_stream=io.BytesIO(rttm_text.encode("utf-8")),
-                            transcript_text=transcript_text,
-                            root=self.root,
-                        )
+                    sample = save_project_sample_streams(
+                        project_name=target["project_name"],
+                        backend=target["backend"],
+                        audio_name=audio_name,
+                        audio_stream=audio_stream,
+                        rttm_name=f"{label_stem}.rttm",
+                        rttm_stream=io.BytesIO(rttm_text.encode("utf-8")),
+                        transcript_text=transcript_text,
+                        root=self.root,
                     )
+                completed_targets.append({**target, "sample": sample})
         except Exception as exc:
             question = f"{exc} Should this item stay saved for later until the training sample can be written?"
             self.upsert_training_label_record(
@@ -733,61 +833,99 @@ class TrainingLabelsMixin:
                 status="error",
             )
 
-        primary_sample = completed_samples[0]
+        primary_sample = completed_targets[0]["sample"]
+        training_projects = [target["key"] for target in completed_targets]
+        training_usage = [
+            {
+                "backend": str(target["backend"]),
+                "project_name": str(target["project_name"]),
+                "project_key": str(target["key"]),
+                "sample_audio_path": self.describe_path(target["sample"].audio_path),
+                "sample_rttm_path": self.describe_path(target["sample"].rttm_path),
+                "sample_transcript_path": self.describe_path(target["sample"].transcript_path)
+                if target["sample"].transcript_path
+                else "",
+                "auto_train_requested": False,
+                "auto_train_status": "skipped",
+            }
+            for target in completed_targets
+        ]
+        usage_by_key = {str(item["project_key"]): item for item in training_usage}
         completed_record = {
             **base_record,
             "status": "completed",
             "label_segments": normalized_label_segments,
             "completed_at_utc": utc_now_iso(),
-            "training_project": (
-                f"{backend}/{project_name}"
-                if len(target_backends) == 1
-                else f"nemo+pyannote/{project_name}"
-            ),
-            "training_projects": [f"{target_backend}/{project_name}" for target_backend in target_backends],
+            "training_project": training_projects[0] if len(training_projects) == 1 else ", ".join(training_projects),
+            "training_projects": training_projects,
+            "training_usage": training_usage,
+            "queued_training_projects": [],
+            "explicit_training_targets": explicit_training_targets,
             "training_audio_path": self.describe_path(primary_sample.audio_path),
             "training_rttm_path": self.describe_path(primary_sample.rttm_path),
             "training_transcript_path": self.describe_path(primary_sample.transcript_path) if primary_sample.transcript_path else "",
             "speaker_count": primary_sample.num_speakers,
             "segment_count": len(segments),
         }
-        self.upsert_training_label_record(audio_name, completed_record)
 
-        # Auto-train hook — if any of the projects this sample was added to has
-        # the "auto-train when labels complete" toggle on, kick off a background
-        # prepare + sbatch. Skipped silently when the toggle is off; per-project
-        # serialization lives inside auto_train.queue_auto_train.
+        # Auto-train hook — explicit popup selections queue immediately. Legacy
+        # posts still honor the per-project auto-train toggle.
         from dashboard import auto_train as _auto_train
         auto_train_messages: list[str] = []
-        for target_backend in target_backends:
+        queued_training_projects: list[str] = []
+        if skip_auto_train:
+            auto_train_messages.append("Auto-train skipped for this completion.")
+        for target in completed_targets:
+            target_backend = str(target["backend"])
+            target_project_name = str(target["project_name"])
+            target_key = str(target["key"])
+            usage = usage_by_key.get(target_key)
+            if skip_auto_train:
+                continue
             try:
                 project_summary = ftm_read_project_display(
-                    project_name,
+                    target_project_name,
                     backend=target_backend,
                     root=self.root,
                 )
             except Exception:  # noqa: BLE001
                 project_summary = {}
-            if not project_summary.get("auto_train"):
+            should_queue = (
+                target_key in requested_auto_target_keys
+                if explicit_auto_train_targets
+                else bool(project_summary.get("auto_train"))
+            )
+            if not should_queue:
                 continue
             try:
-                prepare_options = self.auto_train_prepare_options(project_name, target_backend)
+                prepare_options = self.auto_train_prepare_options(target_project_name, target_backend)
                 extra_env = self.auto_train_extra_env(target_backend)
             except (ValueError, OSError) as exc:
+                if usage is not None:
+                    usage["auto_train_requested"] = True
+                    usage["auto_train_status"] = "error"
+                    usage["auto_train_error"] = str(exc)
                 auto_train_messages.append(
-                    f"Auto-train not queued for {target_backend}/{project_name}: {exc}"
+                    f"Auto-train not queued for {target_key}: {exc}"
                 )
                 continue
             queued = _auto_train.queue_auto_train(
-                project_name,
+                target_project_name,
                 backend=target_backend,
                 root=self.root,
                 prepare_options=prepare_options,
                 extra_env=extra_env,
             )
+            if usage is not None:
+                usage["auto_train_requested"] = True
+                usage["auto_train_status"] = "queued" if queued else "pending"
+            queued_training_projects.append(target_key)
             auto_train_messages.append(
-                f"Auto-train {'queued' if queued else 'pending'} for {target_backend}/{project_name}."
+                f"Auto-train {'queued' if queued else 'pending'} for {target_key}."
             )
+        completed_record["training_usage"] = training_usage
+        completed_record["queued_training_projects"] = queued_training_projects
+        self.upsert_training_label_record(audio_name, completed_record)
 
         if auto_save:
             return self.json_response(

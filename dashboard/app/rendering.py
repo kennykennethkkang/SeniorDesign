@@ -694,7 +694,26 @@ class RenderingMixin:
                 for item in (record.get("training_projects") or [])
                 if str(item).strip()
             ]
-            target_projects = [f"{target_backend}/{project_name}" for target_backend in target_backends] if project_name else []
+            recorded_target_projects = [
+                str(item)
+                for item in (record.get("target_projects") or [])
+                if str(item).strip()
+            ]
+            target_projects = (
+                recorded_target_projects
+                if recorded_target_projects
+                else [f"{target_backend}/{project_name}" for target_backend in target_backends] if project_name else []
+            )
+            queued_training_projects = [
+                str(item)
+                for item in (record.get("queued_training_projects") or [])
+                if str(item).strip()
+            ]
+            training_usage = [
+                item
+                for item in (record.get("training_usage") or [])
+                if isinstance(item, dict)
+            ]
             if status == "completed" and not completed_training_projects:
                 completed_training_projects = target_projects
             detail = "Ready to label for training."
@@ -704,6 +723,8 @@ class RenderingMixin:
                 detail = system_questions[0] if system_questions else (issue_questions or "Needs an answer before training.")
             elif status == "completed":
                 detail = f"Training sample available in {', '.join(completed_training_projects)}."
+                if queued_training_projects:
+                    detail += f" Auto-train requested for {', '.join(queued_training_projects)}."
             rows.append(
                 {
                     "index": index,
@@ -719,6 +740,8 @@ class RenderingMixin:
                     "projectName": project_name,
                     "targetProjects": target_projects,
                     "trainingProjects": completed_training_projects,
+                    "queuedTrainingProjects": queued_training_projects,
+                    "trainingUsage": training_usage,
                     "labelSegments": str(record.get("label_segments") or ""),
                     "transcriptText": str(record.get("transcript_text") or ""),
                     "issueQuestions": issue_questions,

@@ -1,9 +1,9 @@
 """Background auto-train runner — kicks off prepare + sbatch when labels complete.
 
-The dashboard's "Auto-train when labels complete" toggle lets us skip the
-manual prepare → launch click cycle. When a label is marked complete and the
-project's auto_train flag is on, the label-save handler hands the project off
-to this module, which:
+The label completion flow can hand selected projects to this runner from the
+review popup, and the older per-project auto-train toggle still uses the same
+path. Either way, this module skips the manual prepare -> launch click cycle
+and:
 
 1. Acquires a per-project lock so two concurrent label completions on the same
    project don't race to launch two simultaneous training runs (which would

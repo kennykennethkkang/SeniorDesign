@@ -15,6 +15,10 @@ from urllib.parse import quote
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_MEDIA_DIR = PROJECT_ROOT / "audio_in"
 DEFAULT_LABEL_PROJECT = "uploaded-site-training"
+TRAINING_BACKEND_LABELS = {
+    "nemo": "NeMo",
+    "pyannote": "pyannote",
+}
 MEDIA_EXTENSIONS = {
     ".wav",
     ".mp3",
@@ -30,6 +34,86 @@ MEDIA_EXTENSIONS = {
     ".mov",
 }
 SPEAKER_PATTERN = re.compile(r"^(Speaker\s+\d+):\s*(.*)$")
+
+
+def project_slug(value: object) -> str:
+    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in str(value or "").strip())
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-") or "project"
+
+
+def build_training_target_payload(
+    fine_tuning_projects: Sequence[Mapping[str, object]] | None,
+) -> list[dict[str, object]]:
+    """Serialize default and existing fine-tuning projects for the completion dialog."""
+
+    targets: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def add_target(
+        *,
+        backend: object,
+        project_name: object,
+        display_name: object = "",
+        sample_count: object = 0,
+        prepared: object = False,
+        auto_train: object = False,
+        latest_run_text: object = "",
+        kind: str = "existing",
+    ) -> None:
+        normalized_backend = str(backend or "").strip().lower()
+        if normalized_backend not in TRAINING_BACKEND_LABELS:
+            return
+        slug = project_slug(project_name)
+        key = f"{normalized_backend}/{slug}"
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append(
+            {
+                "key": key,
+                "backend": normalized_backend,
+                "projectName": slug,
+                "displayName": str(display_name or "").strip() or slug,
+                "backendLabel": TRAINING_BACKEND_LABELS[normalized_backend],
+                "sampleCount": int(sample_count or 0),
+                "prepared": bool(prepared),
+                "autoTrain": bool(auto_train),
+                "latestRunText": str(latest_run_text or ""),
+                "kind": kind,
+            }
+        )
+
+    for project in fine_tuning_projects or []:
+        latest_run = project.get("latest_run") if isinstance(project.get("latest_run"), Mapping) else {}
+        latest_run_text = ""
+        if latest_run:
+            latest_run_text = str(
+                latest_run.get("display_name")
+                or latest_run.get("version_name")
+                or Path(str(latest_run.get("run_dir", ""))).name
+            )
+        add_target(
+            backend=project.get("backend"),
+            project_name=project.get("slug"),
+            display_name=project.get("display_name"),
+            sample_count=project.get("sample_count"),
+            prepared=project.get("prepared"),
+            auto_train=project.get("auto_train"),
+            latest_run_text=latest_run_text,
+            kind="existing",
+        )
+
+    for backend in ("nemo", "pyannote"):
+        add_target(
+            backend=backend,
+            project_name=DEFAULT_LABEL_PROJECT,
+            display_name=f"Default {TRAINING_BACKEND_LABELS[backend]} project",
+            kind="default",
+        )
+
+    return targets
 
 
 @dataclass(frozen=True)
@@ -563,6 +647,7 @@ def build_html(
     media_selection_name: str = "",
     label_record: Mapping[str, object] | None = None,
     model_comparisons: Sequence[Mapping[str, object]] | None = None,
+    fine_tuning_projects: Sequence[Mapping[str, object]] | None = None,
 ) -> str:
     media_href = media_href_for_review(media_path, output_html) if media_path is not None else ""
     media_name = media_path.name if media_path is not None else "No matching media found"
@@ -691,6 +776,12 @@ def build_html(
         model_comparisons=model_comparisons,
     )
     model_payload_json = json.dumps(model_payload).replace("</", "<\\/")
+    training_target_payload_json = json.dumps(
+        {
+            "defaultProjectName": DEFAULT_LABEL_PROJECT,
+            "targets": build_training_target_payload(fine_tuning_projects),
+        }
+    ).replace("</", "<\\/")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1181,6 +1272,53 @@ def build_html(
       gap: 12px;
       margin-bottom: 12px;
     }}
+    .training-target-dialog {{
+      width: min(760px, calc(100vw - 28px));
+      max-height: min(720px, calc(100vh - 28px));
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-solid);
+      color: var(--ink);
+      box-shadow: var(--shadow);
+    }}
+    .training-target-dialog::backdrop {{
+      background: rgba(15, 23, 42, 0.46);
+    }}
+    .training-target-card {{
+      display: grid;
+      gap: 14px;
+      padding: 18px;
+    }}
+    .training-target-options {{
+      display: grid;
+      gap: 8px;
+      max-height: min(430px, 56vh);
+      overflow: auto;
+      padding-right: 2px;
+    }}
+    .training-target-option {{
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--soft);
+    }}
+    .training-target-option strong {{
+      display: block;
+      margin-bottom: 2px;
+    }}
+    .training-target-option small {{
+      display: block;
+      color: var(--muted);
+      font-weight: 700;
+    }}
+    .dialog-actions {{
+      justify-content: flex-end;
+    }}
     label span {{
       display: block;
       margin: 0 0 6px;
@@ -1516,6 +1654,7 @@ def build_html(
           <input type="hidden" id="labelIncludeTranscript" name="label_include_transcript" value="{include_transcript_value}">
           <textarea id="labelSegments" name="label_segments" hidden>{default_segments}</textarea>
           <textarea id="labelTranscript" name="label_transcript_text" hidden>{default_dialogue}</textarea>
+          <div id="trainingTargetFields" hidden></div>
           <div class="field-grid">
             <label><span>Training backend</span><select name="label_backend"><option value="both"{selected_attr("both", selected_backend)}>NeMo + pyannote</option><option value="pyannote"{selected_attr("pyannote", selected_backend)}>pyannote only</option><option value="nemo"{selected_attr("nemo", selected_backend)}>NeMo only</option></select></label>
             <label><span>Project</span><input name="label_project_name" type="text" value="{project_name}"></label>
@@ -1565,6 +1704,19 @@ def build_html(
             <button class="primary" type="submit" name="label_action" value="complete">Complete For Training</button>
           </div>
         </form>
+        <dialog id="trainingTargetDialog" class="training-target-dialog" aria-labelledby="trainingTargetTitle">
+          <div class="training-target-card">
+            <div class="panel-head">
+              <h3 id="trainingTargetTitle">Select Training Targets</h3>
+              <button type="button" id="closeTrainingTargetDialog" class="secondary">Cancel</button>
+            </div>
+            <div id="trainingTargetOptions" class="training-target-options"></div>
+            <div class="controls dialog-actions">
+              <button type="button" id="skipTrainingQueue" class="secondary">Complete Without Queue</button>
+              <button type="button" id="confirmTrainingTargets" class="primary">Queue Selected</button>
+            </div>
+          </div>
+        </dialog>
       </section>
 
       <section class="panel">
@@ -1614,6 +1766,7 @@ def build_html(
     </section>
   </main>
   <script id="modelComparisonData" type="application/json">{model_payload_json}</script>
+  <script id="trainingTargetData" type="application/json">{training_target_payload_json}</script>
   <script>
     const THEME_STORAGE_KEY = "ml-speech-diarization-theme";
     const media = document.getElementById("media");
@@ -1645,6 +1798,13 @@ def build_html(
     const showLabelDialogue = document.getElementById("showLabelDialogue");
     const addLabelRow = document.getElementById("addLabelRow");
     const addLabelRowTop = document.getElementById("addLabelRowTop");
+    const trainingTargetDataElement = document.getElementById("trainingTargetData");
+    const trainingTargetFields = document.getElementById("trainingTargetFields");
+    const trainingTargetDialog = document.getElementById("trainingTargetDialog");
+    const trainingTargetOptions = document.getElementById("trainingTargetOptions");
+    const closeTrainingTargetDialog = document.getElementById("closeTrainingTargetDialog");
+    const confirmTrainingTargets = document.getElementById("confirmTrainingTargets");
+    const skipTrainingQueue = document.getElementById("skipTrainingQueue");
     const saveStatus = document.getElementById("saveStatus");
     const labelReturnTo = document.getElementById("labelReturnTo");
     const trainingLabelsLink = document.getElementById("trainingLabelsLink");
@@ -1661,6 +1821,7 @@ def build_html(
     let activePlaybackRange = null;
     let waveformPeaks = [];
     let waveformLoaded = false;
+    let completeSubmitConfirmed = false;
 
     function appBasePath() {{
       const filesIndex = window.location.pathname.indexOf("/files/");
@@ -1689,6 +1850,179 @@ def build_html(
       backButton.addEventListener("click", function () {{
         window.location.href = base + "/training-labels";
       }});
+    }}
+
+    function parseTrainingTargetData() {{
+      if (!trainingTargetDataElement) return {{ defaultProjectName: "uploaded-site-training", targets: [] }};
+      try {{
+        const payload = JSON.parse(trainingTargetDataElement.textContent || "{{}}");
+        return {{
+          defaultProjectName: payload.defaultProjectName || "uploaded-site-training",
+          targets: Array.isArray(payload.targets) ? payload.targets : [],
+        }};
+      }} catch (_error) {{
+        return {{ defaultProjectName: "uploaded-site-training", targets: [] }};
+      }}
+    }}
+
+    const trainingTargetData = parseTrainingTargetData();
+
+    function trainingProjectSlug(value) {{
+      let cleaned = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      while (cleaned.indexOf("--") >= 0) cleaned = cleaned.replace(/--/g, "-");
+      cleaned = cleaned.replace(/^-+|-+$/g, "");
+      return cleaned || "project";
+    }}
+
+    function trainingBackendLabel(value) {{
+      return value === "nemo" ? "NeMo" : "pyannote";
+    }}
+
+    function selectedTrainingBackends() {{
+      const select = labelForm.querySelector("[name='label_backend']");
+      const value = select ? String(select.value || "both").toLowerCase() : "both";
+      if (value === "both" || value === "all" || value.indexOf("+") >= 0) return ["nemo", "pyannote"];
+      return value === "nemo" ? ["nemo"] : ["pyannote"];
+    }}
+
+    function currentTrainingTargets() {{
+      const projectInput = labelForm.querySelector("[name='label_project_name']");
+      const projectName = trainingProjectSlug(projectInput ? projectInput.value : trainingTargetData.defaultProjectName);
+      return selectedTrainingBackends().map(function (backend) {{
+        const key = backend + "/" + projectName;
+        return {{
+          key: key,
+          backend: backend,
+          projectName: projectName,
+          displayName: projectName,
+          backendLabel: trainingBackendLabel(backend),
+          sampleCount: 0,
+          prepared: false,
+          autoTrain: false,
+          latestRunText: "",
+          kind: "current",
+          checked: true,
+        }};
+      }});
+    }}
+
+    function addTrainingTargetChoice(choices, target, checked) {{
+      if (!target || !target.key) return;
+      const key = String(target.key);
+      if (choices.has(key)) {{
+        if (checked) choices.get(key).checked = true;
+        return;
+      }}
+      choices.set(key, {{
+        key: key,
+        backend: target.backend || key.split("/")[0],
+        projectName: target.projectName || key.split("/").slice(1).join("/"),
+        displayName: target.displayName || target.projectName || key,
+        backendLabel: target.backendLabel || trainingBackendLabel(target.backend),
+        sampleCount: Number(target.sampleCount || 0),
+        prepared: Boolean(target.prepared),
+        autoTrain: Boolean(target.autoTrain),
+        latestRunText: target.latestRunText || "",
+        kind: target.kind || "existing",
+        checked: Boolean(checked),
+      }});
+    }}
+
+    function trainingTargetChoices() {{
+      const choices = new Map();
+      currentTrainingTargets().forEach(function (target) {{ addTrainingTargetChoice(choices, target, true); }});
+      (trainingTargetData.targets || []).forEach(function (target) {{ addTrainingTargetChoice(choices, target, false); }});
+      return Array.from(choices.values());
+    }}
+
+    function renderTrainingTargetChoices() {{
+      if (!trainingTargetOptions) return;
+      trainingTargetOptions.innerHTML = "";
+      trainingTargetChoices().forEach(function (target) {{
+        const label = document.createElement("label");
+        label.className = "training-target-option";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = target.key;
+        checkbox.checked = Boolean(target.checked);
+        checkbox.dataset.targetKey = target.key;
+        label.appendChild(checkbox);
+
+        const body = document.createElement("span");
+        const title = document.createElement("strong");
+        title.textContent = target.backendLabel + " / " + (target.displayName || target.projectName);
+        body.appendChild(title);
+
+        const meta = document.createElement("small");
+        const details = [];
+        if (target.kind === "default") details.push("default setup");
+        if (target.prepared) details.push("prepared");
+        if (target.autoTrain) details.push("auto-train saved");
+        details.push(String(target.sampleCount || 0) + " sample(s)");
+        if (target.latestRunText) details.push("latest: " + target.latestRunText);
+        meta.textContent = details.join(" | ");
+        body.appendChild(meta);
+        label.appendChild(body);
+        trainingTargetOptions.appendChild(label);
+      }});
+    }}
+
+    function selectedDialogTargets() {{
+      if (!trainingTargetOptions) return [];
+      return Array.from(trainingTargetOptions.querySelectorAll("input[data-target-key]:checked")).map(function (input) {{
+        return input.value;
+      }});
+    }}
+
+    function setTrainingTargetHiddenInputs(targets, queueSelected) {{
+      if (!trainingTargetFields) return;
+      trainingTargetFields.innerHTML = "";
+      const values = targets && targets.length ? targets : currentTrainingTargets().map(function (target) {{ return target.key; }});
+      function appendHidden(name, value) {{
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value;
+        trainingTargetFields.appendChild(input);
+      }}
+      values.forEach(function (value) {{
+        appendHidden("label_training_targets", value);
+      }});
+      if (queueSelected) {{
+        values.forEach(function (value) {{
+          appendHidden("label_auto_train_targets", value);
+        }});
+      }} else {{
+        appendHidden("label_auto_train_skip", "1");
+      }}
+    }}
+
+    function submitCompletedTrainingLabel() {{
+      completeSubmitConfirmed = true;
+      const completeButton = labelForm.querySelector("button[name='label_action'][value='complete']");
+      if (labelForm.requestSubmit && completeButton) {{
+        labelForm.requestSubmit(completeButton);
+      }} else {{
+        if (trainingTargetFields) {{
+          const actionInput = document.createElement("input");
+          actionInput.type = "hidden";
+          actionInput.name = "label_action";
+          actionInput.value = "complete";
+          trainingTargetFields.appendChild(actionInput);
+        }}
+        labelForm.submit();
+      }}
+    }}
+
+    function openTrainingTargetDialog() {{
+      renderTrainingTargetChoices();
+      if (trainingTargetDialog && typeof trainingTargetDialog.showModal === "function") {{
+        trainingTargetDialog.showModal();
+        return;
+      }}
+      setTrainingTargetHiddenInputs(currentTrainingTargets().map(function (target) {{ return target.key; }}), true);
+      submitCompletedTrainingLabel();
     }}
 
     function setTheme(theme, persist) {{
@@ -2563,13 +2897,45 @@ def build_html(
       }});
     }}
 
+    if (closeTrainingTargetDialog && trainingTargetDialog) {{
+      closeTrainingTargetDialog.addEventListener("click", function () {{
+        trainingTargetDialog.close();
+      }});
+    }}
+    if (confirmTrainingTargets) {{
+      confirmTrainingTargets.addEventListener("click", function () {{
+        const targets = selectedDialogTargets();
+        if (!targets.length) {{
+          window.alert("Select at least one target, or complete without queue.");
+          return;
+        }}
+        setTrainingTargetHiddenInputs(targets, true);
+        if (trainingTargetDialog) trainingTargetDialog.close();
+        submitCompletedTrainingLabel();
+      }});
+    }}
+    if (skipTrainingQueue) {{
+      skipTrainingQueue.addEventListener("click", function () {{
+        const targets = selectedDialogTargets();
+        setTrainingTargetHiddenInputs(targets, false);
+        if (trainingTargetDialog) trainingTargetDialog.close();
+        submitCompletedTrainingLabel();
+      }});
+    }}
+
     labelForm.addEventListener("submit", function (event) {{
       syncLabelSegments(true);
+      const submitter = event.submitter;
+      if (submitter && submitter.value === "complete" && !completeSubmitConfirmed) {{
+        event.preventDefault();
+        openTrainingTargetDialog();
+        return;
+      }}
+      completeSubmitConfirmed = false;
       if (!window.fetch || labelForm.dataset.submitting === "true") {{
         return;
       }}
       event.preventDefault();
-      const submitter = event.submitter;
       const formData = new FormData(labelForm);
       if (submitter && submitter.name) {{
         formData.set(submitter.name, submitter.value || "");
@@ -2676,6 +3042,7 @@ def write_review_bundle(
     audio_dir: Path = DEFAULT_MEDIA_DIR,
     training_label_records: Mapping[str, Mapping[str, object]] | None = None,
     model_comparisons: Sequence[Mapping[str, object]] | None = None,
+    fine_tuning_projects: Sequence[Mapping[str, object]] | None = None,
     quiet: bool = False,
 ) -> tuple[Path, Path]:
     srt_path = srt_path.expanduser().resolve()
@@ -2726,6 +3093,7 @@ def write_review_bundle(
             media_selection_name=media_selection_name,
             label_record=label_record,
             model_comparisons=model_comparisons,
+            fine_tuning_projects=fine_tuning_projects,
         ),
         encoding="utf-8",
     )

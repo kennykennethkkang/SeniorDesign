@@ -49,6 +49,16 @@ class ReviewOutputsTests(unittest.TestCase):
                 media_path=media_path,
                 output_html=html_path,
                 report_tsv=report_path,
+                fine_tuning_projects=[
+                    {
+                        "backend": "pyannote",
+                        "slug": "speaker-lab",
+                        "display_name": "Speaker Lab",
+                        "sample_count": 3,
+                        "prepared": True,
+                        "auto_train": True,
+                    }
+                ],
                 quiet=True,
             )
 
@@ -80,6 +90,10 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("review-grid", html)
             self.assertIn("label_action", html)
             self.assertIn("class=\"play-cue\"", html)
+            self.assertIn("id=\"trainingTargetDialog\"", html)
+            self.assertIn("id=\"trainingTargetData\"", html)
+            self.assertIn("\"key\": \"pyannote/speaker-lab\"", html)
+            self.assertIn("Queue Selected", html)
 
             with report_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))

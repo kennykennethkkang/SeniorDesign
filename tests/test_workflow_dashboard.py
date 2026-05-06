@@ -2052,6 +2052,137 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(captured["prepare_options"]["max_epochs"], 7)
             self.assertEqual(captured["prepare_options"]["slurm_memory"], "24G")
 
+    def test_completed_training_label_queues_selected_training_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            existing_project = root / "fine_tuning" / "projects" / "pyannote" / "existing-lab" / "artifacts"
+            existing_project.mkdir(parents=True)
+            (existing_project / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "pyannote_pretrained_model": "local/checkpoints/existing-v1",
+                        "pyannote_duration": 11.0,
+                        "devices": 1,
+                        "max_epochs": 9,
+                        "slurm_memory": "28G",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            queue_calls = []
+            from dashboard import auto_train as auto_train_module
+
+            def fake_queue_auto_train(project_name, *, backend, root, prepare_options=None, extra_env=None):
+                queue_calls.append(
+                    {
+                        "project_name": project_name,
+                        "backend": backend,
+                        "prepare_options": dict(prepare_options or {}),
+                    }
+                )
+                return True
+
+            original = auto_train_module.queue_auto_train
+            auto_train_module.queue_auto_train = fake_queue_auto_train
+            try:
+                body = urlencode(
+                    [
+                        ("audio_file", "001_clip.wav"),
+                        ("label_backend", "pyannote"),
+                        ("label_project_name", "existing-lab"),
+                        ("label_training_targets", "pyannote/existing-lab"),
+                        ("label_training_targets", "nemo/new-default-lab"),
+                        ("label_auto_train_targets", "pyannote/existing-lab"),
+                        ("label_auto_train_targets", "nemo/new-default-lab"),
+                        ("label_segments", "0.00 0.50 SPEAKER_00"),
+                        ("label_action", "complete"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/training-labels/save",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                auto_train_module.queue_auto_train = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertEqual(
+                [(call["backend"], call["project_name"]) for call in queue_calls],
+                [("pyannote", "existing-lab"), ("nemo", "new-default-lab")],
+            )
+            self.assertEqual(queue_calls[0]["prepare_options"]["pyannote_pretrained_model"], "local/checkpoints/existing-v1")
+            self.assertEqual(queue_calls[0]["prepare_options"]["max_epochs"], 9)
+            self.assertEqual(queue_calls[0]["prepare_options"]["slurm_memory"], "28G")
+            self.assertTrue((root / "fine_tuning" / "projects" / "pyannote" / "existing-lab" / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((root / "fine_tuning" / "projects" / "nemo" / "new-default-lab" / "audio" / "001_clip.wav").is_file())
+
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["training_projects"], ["pyannote/existing-lab", "nemo/new-default-lab"])
+            self.assertEqual(record["queued_training_projects"], ["pyannote/existing-lab", "nemo/new-default-lab"])
+            self.assertEqual(
+                [(item["project_key"], item["auto_train_status"]) for item in record["training_usage"]],
+                [("pyannote/existing-lab", "queued"), ("nemo/new-default-lab", "queued")],
+            )
+
+    def test_completed_training_label_can_skip_auto_train_queue(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab"
+            project_dir.mkdir(parents=True)
+            (project_dir / "display.json").write_text(json.dumps({"auto_train": True}), encoding="utf-8")
+
+            from dashboard import auto_train as auto_train_module
+
+            def fail_queue_auto_train(*_args, **_kwargs):
+                raise AssertionError("skip should not queue auto-training")
+
+            original = auto_train_module.queue_auto_train
+            auto_train_module.queue_auto_train = fail_queue_auto_train
+            try:
+                body = urlencode(
+                    [
+                        ("audio_file", "001_clip.wav"),
+                        ("label_backend", "pyannote"),
+                        ("label_project_name", "speaker-lab"),
+                        ("label_training_targets", "pyannote/speaker-lab"),
+                        ("label_auto_train_skip", "1"),
+                        ("label_segments", "0.00 0.50 SPEAKER_00"),
+                        ("label_action", "complete"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/training-labels/save",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                auto_train_module.queue_auto_train = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["training_projects"], ["pyannote/speaker-lab"])
+            self.assertEqual(record["queued_training_projects"], [])
+            self.assertEqual(record["training_usage"][0]["auto_train_status"], "skipped")
+
     def test_completed_training_label_writes_training_ready_rttm_tokens(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

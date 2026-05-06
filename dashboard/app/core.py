@@ -644,6 +644,7 @@ class CoreMixin:
                 audio_dir=self.audio_dir,
                 training_label_records=self.load_training_label_records(),
                 model_comparisons=self.review_model_comparisons_for_srt(srt_path),
+                fine_tuning_projects=list_projects(root=self.root),
                 quiet=True,
             )
         except Exception:
