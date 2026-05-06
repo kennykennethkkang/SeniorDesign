@@ -2679,6 +2679,7 @@
     const formRef = React.useRef(null);
     const autoSaveAbortRef = React.useRef(null);
     const initialAutoSaveSkipRef = React.useRef(true);
+    const activeTimeFieldRef = React.useRef(null);
     const serializedSegments = serializeLabelSegmentRows(segmentRows);
     const validSegmentCount = segmentRows.filter(labelEditorRowIsValid).length;
     const incompleteSegmentCount = segmentRows.filter((segment) => labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment)).length;
@@ -2834,6 +2835,34 @@
       }
     }
 
+    function rememberActiveTimeField(rowId, field) {
+      activeTimeFieldRef.current = { rowId, field };
+    }
+
+    function fillActiveTimeField() {
+      const audio = audioRef.current;
+      const target = activeTimeFieldRef.current;
+      if (!audio || !Number.isFinite(audio.currentTime)) {
+        window.alert("The audio player does not have a current time yet.");
+        return;
+      }
+      if (!target?.rowId || !target?.field) {
+        window.alert("Click a Start or End time box first.");
+        return;
+      }
+      const timestamp = formatMmSs(audio.currentTime);
+      setSegmentRows((currentRows) =>
+        currentRows.map((segment) => (segment.id === target.rowId ? { ...segment, [target.field]: timestamp } : segment))
+      );
+      window.setTimeout(() => {
+        const input = formRef.current?.querySelector(`[data-label-row-id="${target.rowId}"] [data-label-field="${target.field}"]`);
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      }, 0);
+    }
+
     function handleSubmit(event) {
       const submitter = event.nativeEvent?.submitter;
       const stats = syncTrainingLabelEditorForm(event.currentTarget);
@@ -2902,7 +2931,12 @@
           "div",
           { className: "label-editor-head" },
           h("div", null, h("h3", { id: `${segmentsId}_heading` }, "Speaker-Time Labels"), h("p", { className: "row-note" }, `${validSegmentCount} valid row(s), ${incompleteSegmentCount} row(s) need fixes.`)),
-          h("button", { className: "secondary", type: "button", onClick: addSegmentRow }, "Add Label")
+          h(
+            "div",
+            { className: "label-editor-actions" },
+            h("button", { className: "secondary", type: "button", onClick: addSegmentRow }, "Add Label"),
+            h("button", { className: "secondary", type: "button", onClick: fillActiveTimeField, disabled: !row.audioHref }, "Use Player Time")
+          )
         ),
         h(
           "div",
@@ -2952,13 +2986,13 @@
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
+                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.start, "data-label-field": "start", onFocus: () => rememberActiveTimeField(segment.id, "start"), onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
                     segment.start !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.start)) : null
                   ),
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
+                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onFocus: () => rememberActiveTimeField(segment.id, "end"), onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
                     segment.end !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.end)) : null
                   ),
                   h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),

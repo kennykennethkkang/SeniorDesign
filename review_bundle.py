@@ -1672,6 +1672,7 @@ def build_html(
           </div>
           <div class="label-table-toolbar">
             <button type="button" id="addLabelRowTop" class="add-segment-btn">Add Label</button>
+            <button type="button" id="setLabelTimeFromPlayer" class="add-segment-btn">Use Player Time</button>
             <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox"{include_transcript_checked}> Save dialogue</label>
             <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
@@ -1798,6 +1799,7 @@ def build_html(
     const showLabelDialogue = document.getElementById("showLabelDialogue");
     const addLabelRow = document.getElementById("addLabelRow");
     const addLabelRowTop = document.getElementById("addLabelRowTop");
+    const setLabelTimeFromPlayer = document.getElementById("setLabelTimeFromPlayer");
     const trainingTargetDataElement = document.getElementById("trainingTargetData");
     const trainingTargetFields = document.getElementById("trainingTargetFields");
     const trainingTargetDialog = document.getElementById("trainingTargetDialog");
@@ -1818,6 +1820,7 @@ def build_html(
     let playRequestId = 0;
     let selectedCueRow = null;
     let selectedLabelRow = null;
+    let activeLabelTimeInput = null;
     let activePlaybackRange = null;
     let waveformPeaks = [];
     let waveformLoaded = false;
@@ -2436,6 +2439,46 @@ def build_html(
       }};
     }}
 
+    function rememberLabelTimeInput(input) {{
+      if (input && input.matches(".label-start, .label-end")) {{
+        activeLabelTimeInput = input;
+      }}
+    }}
+
+    function activeLabelTimeInputLabel(input) {{
+      if (!input) return "time";
+      return input.classList.contains("label-start") ? "start" : "end";
+    }}
+
+    function setActiveLabelTimeFromPlayer() {{
+      if (!media || !Number.isFinite(media.currentTime)) {{
+        window.alert("The audio player does not have a current time yet.");
+        return;
+      }}
+      const focusedInput = document.activeElement && document.activeElement.matches(".label-start, .label-end")
+        ? document.activeElement
+        : null;
+      const input = focusedInput || (activeLabelTimeInput && activeLabelTimeInput.isConnected ? activeLabelTimeInput : null);
+      if (!input) {{
+        window.alert("Click a Start or End time box first.");
+        return;
+      }}
+      const row = input.closest("[data-label-row]");
+      input.value = formatClock(media.currentTime);
+      if (row) {{
+        updateLabelRowDataset(row);
+        setSelectedLabelRow(row);
+      }}
+      syncLabelSegments();
+      applyLabelFilters();
+      input.focus();
+      input.select();
+      setPlaybackMessage(
+        "Set " + activeLabelTimeInputLabel(input) + " time to " + formatClock(media.currentTime) + ".",
+        row ? labelSummary(row) : ""
+      );
+    }}
+
     function updateLabelRowDataset(row) {{
       const bounds = labelRowBounds(row);
       const speakerInput = row.querySelector(".label-speaker");
@@ -2795,6 +2838,7 @@ def build_html(
 
     labelRows.addEventListener("focusin", function (event) {{
       const row = event.target.closest("[data-label-row]");
+      rememberLabelTimeInput(event.target);
       if (row) setSelectedLabelRow(row);
     }});
 
@@ -2888,6 +2932,7 @@ def build_html(
 
     addLabelRow.addEventListener("click", appendBlankLabelRow);
     if (addLabelRowTop) addLabelRowTop.addEventListener("click", appendBlankLabelRow);
+    if (setLabelTimeFromPlayer) setLabelTimeFromPlayer.addEventListener("click", setActiveLabelTimeFromPlayer);
 
     function setLabelFormBusy(isBusy) {{
       labelForm.dataset.submitting = isBusy ? "true" : "";
