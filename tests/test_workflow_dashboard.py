@@ -599,7 +599,10 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertTrue(headers["Location"].startswith(clean_return_to))
             self.assertNotIn("old", headers["Location"])
             label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
-            self.assertEqual(label_status["items"]["field_uploads/001_clip.wav"]["label_segments"], manual_segments)
+            self.assertEqual(
+                label_status["items"]["field_uploads/001_clip.wav"]["label_segments"],
+                "0.000 0.500 Speaker_0\n0.600 0.900 Speaker_1",
+            )
             project_dir = root / "fine_tuning" / "projects" / "pyannote" / "review-lab"
             self.assertTrue((project_dir / "audio" / "001_clip.wav").is_file())
             self.assertTrue((project_dir / "rttm" / "001_clip.rttm").is_file())
@@ -1962,6 +1965,92 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(payload.get("status"), "saved")
             label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
             self.assertEqual(label_status["items"]["001_clip.wav"]["status"], "draft")
+
+    def test_auto_train_uses_project_prepare_settings_and_hf_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            secrets_dir = root / ".local_dashboard"
+            secrets_dir.mkdir()
+            (secrets_dir / "secrets.env").write_text("HF_TOKEN=secret-token\n", encoding="utf-8")
+
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab"
+            (project_dir / "artifacts").mkdir(parents=True)
+            (project_dir / "display.json").write_text(
+                json.dumps({"auto_train": True}),
+                encoding="utf-8",
+            )
+            (project_dir / "artifacts" / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "pyannote_pretrained_model": "local/checkpoints/speaker-v1",
+                        "pyannote_duration": 12.5,
+                        "pyannote_max_speakers_per_chunk": 4,
+                        "pyannote_max_speakers_per_frame": 3,
+                        "devices": 1,
+                        "max_epochs": 7,
+                        "slurm_partition": "gpu",
+                        "slurm_time": "02:00:00",
+                        "slurm_memory": "24G",
+                        "slurm_cpus": 6,
+                        "slurm_gpus": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            captured = {}
+            from dashboard import auto_train as auto_train_module
+
+            def fake_queue_auto_train(project_name, *, backend, root, prepare_options=None, extra_env=None):
+                captured.update(
+                    {
+                        "project_name": project_name,
+                        "backend": backend,
+                        "root": root,
+                        "prepare_options": dict(prepare_options or {}),
+                        "extra_env": dict(extra_env or {}),
+                    }
+                )
+                return True
+
+            original = auto_train_module.queue_auto_train
+            auto_train_module.queue_auto_train = fake_queue_auto_train
+            try:
+                body = urlencode(
+                    [
+                        ("audio_file", "001_clip.wav"),
+                        ("label_backend", "pyannote"),
+                        ("label_project_name", "speaker-lab"),
+                        ("label_segments", "0:00.000 0:00.500 SPEAKER_00"),
+                        ("label_action", "complete"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/training-labels/save",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                auto_train_module.queue_auto_train = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertEqual(captured["project_name"], "speaker-lab")
+            self.assertEqual(captured["backend"], "pyannote")
+            self.assertEqual(captured["extra_env"]["HF_TOKEN"], "secret-token")
+            self.assertEqual(captured["extra_env"]["HUGGINGFACE_HUB_TOKEN"], "secret-token")
+            self.assertEqual(captured["prepare_options"]["pyannote_pretrained_model"], "local/checkpoints/speaker-v1")
+            self.assertEqual(captured["prepare_options"]["pyannote_duration"], 12.5)
+            self.assertEqual(captured["prepare_options"]["pyannote_max_speakers_per_chunk"], 4)
+            self.assertEqual(captured["prepare_options"]["pyannote_max_speakers_per_frame"], 3)
+            self.assertEqual(captured["prepare_options"]["max_epochs"], 7)
+            self.assertEqual(captured["prepare_options"]["slurm_memory"], "24G")
 
     def test_completed_training_label_writes_training_ready_rttm_tokens(self):
         with tempfile.TemporaryDirectory() as tmpdir:

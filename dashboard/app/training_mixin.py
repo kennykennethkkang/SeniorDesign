@@ -373,6 +373,159 @@ class TrainingLabelsMixin:
             )
         return "\n".join(lines) + "\n"
 
+    def fine_tuning_project_metadata(self, project_name: str, backend: str) -> dict[str, object]:
+        """Load the last prepared settings for a project, if it has been prepared before."""
+
+        metadata_path = (
+            self.root
+            / "fine_tuning"
+            / "projects"
+            / normalize_backend(backend)
+            / slugify(project_name)
+            / "artifacts"
+            / "metadata.json"
+        )
+        if not metadata_path.is_file():
+            return {}
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def auto_train_prepare_options(self, project_name: str, backend: str) -> dict[str, object]:
+        """Reuse project-specific prepare settings first, then dashboard fine-tuning defaults."""
+
+        normalized_backend = normalize_backend(backend)
+        metadata = self.fine_tuning_project_metadata(project_name, normalized_backend)
+        preferences = self.model_preferences()
+        nemo_defaults = dict(preferences.get("nemo_fine_tuning", {}))
+        pyannote_defaults = dict(preferences.get("pyannote_fine_tuning", {}))
+
+        def pick(metadata_key: str, preference_map: dict[str, object], preference_key: str, default: object) -> object:
+            value = metadata.get(metadata_key)
+            if value is not None and value != "":
+                return value
+            preference_value = preference_map.get(preference_key, default)
+            return default if preference_value is None or preference_value == "" else preference_value
+
+        if normalized_backend == "pyannote":
+            options: dict[str, object] = {
+                "devices": self.parse_int(
+                    str(pick("devices", pyannote_defaults, "devices", DEFAULT_DEVICES)),
+                    DEFAULT_DEVICES,
+                    "devices",
+                ),
+                "max_epochs": self.parse_int(
+                    str(pick("max_epochs", pyannote_defaults, "max_epochs", DEFAULT_MAX_EPOCHS)),
+                    DEFAULT_MAX_EPOCHS,
+                    "max_epochs",
+                ),
+                "pyannote_pretrained_model": str(
+                    pick(
+                        "pyannote_pretrained_model",
+                        pyannote_defaults,
+                        "pretrained_model",
+                        DEFAULT_PYANNOTE_PRETRAINED_MODEL,
+                    )
+                ),
+                "pyannote_duration": self.parse_float(
+                    str(pick("pyannote_duration", pyannote_defaults, "duration", DEFAULT_PYANNOTE_DURATION)),
+                    DEFAULT_PYANNOTE_DURATION,
+                    "pyannote_duration",
+                ),
+                "pyannote_max_speakers_per_chunk": self.parse_int(
+                    str(
+                        pick(
+                            "pyannote_max_speakers_per_chunk",
+                            pyannote_defaults,
+                            "max_speakers_per_chunk",
+                            DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_CHUNK,
+                        )
+                    ),
+                    DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_CHUNK,
+                    "pyannote_max_speakers_per_chunk",
+                ),
+                "pyannote_max_speakers_per_frame": self.parse_int(
+                    str(
+                        pick(
+                            "pyannote_max_speakers_per_frame",
+                            pyannote_defaults,
+                            "max_speakers_per_frame",
+                            DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME,
+                        )
+                    ),
+                    DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME,
+                    "pyannote_max_speakers_per_frame",
+                ),
+            }
+        else:
+            options = {
+                "train_ratio": self.parse_float(
+                    str(pick("train_ratio", nemo_defaults, "train_ratio", DEFAULT_TRAIN_RATIO)),
+                    DEFAULT_TRAIN_RATIO,
+                    "train_ratio",
+                ),
+                "base_window": self.parse_float(
+                    str(pick("base_window", nemo_defaults, "base_window", DEFAULT_BASE_WINDOW)),
+                    DEFAULT_BASE_WINDOW,
+                    "base_window",
+                ),
+                "base_shift": self.parse_float(
+                    str(pick("base_shift", nemo_defaults, "base_shift", DEFAULT_BASE_SHIFT)),
+                    DEFAULT_BASE_SHIFT,
+                    "base_shift",
+                ),
+                "step_count": self.parse_int(
+                    str(pick("step_count", nemo_defaults, "step_count", DEFAULT_STEP_COUNT)),
+                    DEFAULT_STEP_COUNT,
+                    "step_count",
+                ),
+                "config_name": str(pick("config_name", nemo_defaults, "config_name", DEFAULT_CONFIG_NAME)),
+                "speaker_model": str(pick("speaker_model", nemo_defaults, "speaker_model", DEFAULT_SPEAKER_MODEL)),
+                "devices": self.parse_int(
+                    str(pick("devices", nemo_defaults, "devices", DEFAULT_DEVICES)),
+                    DEFAULT_DEVICES,
+                    "devices",
+                ),
+                "max_epochs": self.parse_int(
+                    str(pick("max_epochs", nemo_defaults, "max_epochs", DEFAULT_MAX_EPOCHS)),
+                    DEFAULT_MAX_EPOCHS,
+                    "max_epochs",
+                ),
+            }
+            nemo_root = str(metadata.get("nemo_root") or "").strip()
+            if nemo_root:
+                options["nemo_root"] = Path(nemo_root)
+
+        options.update(
+            {
+                "slurm_partition": str(metadata.get("slurm_partition") or DEFAULT_SLURM_PARTITION),
+                "slurm_time": str(metadata.get("slurm_time") or DEFAULT_SLURM_TIME),
+                "slurm_memory": str(metadata.get("slurm_memory") or DEFAULT_SLURM_MEMORY),
+                "slurm_cpus": self.parse_int(str(metadata.get("slurm_cpus") or DEFAULT_SLURM_CPUS), DEFAULT_SLURM_CPUS, "slurm_cpus"),
+                "slurm_gpus": self.parse_int(str(metadata.get("slurm_gpus") or DEFAULT_SLURM_GPUS), DEFAULT_SLURM_GPUS, "slurm_gpus"),
+            }
+        )
+        return options
+
+    def auto_train_extra_env(self, backend: str) -> dict[str, str]:
+        """Return launch environment needed for automatic training."""
+
+        if normalize_backend(backend) != "pyannote":
+            return {}
+        hf_token = (
+            os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            or self.dashboard_secret("HF_TOKEN")
+            or self.dashboard_secret("HUGGINGFACE_TOKEN")
+            or self.dashboard_secret("HUGGINGFACE_HUB_TOKEN")
+        )
+        if not hf_token:
+            return {}
+        return {"HF_TOKEN": hf_token, "HUGGINGFACE_HUB_TOKEN": hf_token}
+
     def handle_training_label_save(self, environ):
         """Save draft labels or complete an uploaded audio item as training material."""
 
@@ -518,6 +671,12 @@ class TrainingLabelsMixin:
             )
 
         rttm_text = self.training_segments_to_rttm(audio_name=audio_name, segments=segments)
+        normalized_label_segments = "\n".join(
+            f"{float(segment['start']):.3f} "
+            f"{float(segment['start']) + float(segment['duration']):.3f} "
+            f"{segment['speaker']}"
+            for segment in segments
+        )
         self.training_label_work_dir.mkdir(parents=True, exist_ok=True)
         label_stem = self.diarization_output_base(audio_name)
         review_rttm_path = self.training_label_work_dir / f"{label_stem}.rttm"
@@ -578,6 +737,7 @@ class TrainingLabelsMixin:
         completed_record = {
             **base_record,
             "status": "completed",
+            "label_segments": normalized_label_segments,
             "completed_at_utc": utc_now_iso(),
             "training_project": (
                 f"{backend}/{project_name}"
@@ -610,10 +770,20 @@ class TrainingLabelsMixin:
                 project_summary = {}
             if not project_summary.get("auto_train"):
                 continue
+            try:
+                prepare_options = self.auto_train_prepare_options(project_name, target_backend)
+                extra_env = self.auto_train_extra_env(target_backend)
+            except (ValueError, OSError) as exc:
+                auto_train_messages.append(
+                    f"Auto-train not queued for {target_backend}/{project_name}: {exc}"
+                )
+                continue
             queued = _auto_train.queue_auto_train(
                 project_name,
                 backend=target_backend,
                 root=self.root,
+                prepare_options=prepare_options,
+                extra_env=extra_env,
             )
             auto_train_messages.append(
                 f"Auto-train {'queued' if queued else 'pending'} for {target_backend}/{project_name}."

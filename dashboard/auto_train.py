@@ -41,6 +41,18 @@ _LOCKS_GUARD = threading.Lock()
 # Polling cadence + ceiling. 30s feels fine for cluster jobs that take ~hour.
 _POLL_INTERVAL_SECONDS = 30.0
 _MAX_WAIT_SECONDS = 4 * 60 * 60  # four hours
+_ACTIVE_RUN_STATUSES = {
+    "configuring",
+    "completing",
+    "pending",
+    "requeued",
+    "resizing",
+    "running",
+    "signaling",
+    "staged_out",
+    "submitted",
+    "suspended",
+}
 
 
 def _project_lock(backend: str, slug: str) -> threading.Lock:
@@ -61,7 +73,7 @@ def _has_active_run(project_name: str, backend: str, root: Path) -> bool:
     runs = ftm.list_runs(project_name, backend=backend, root=root, limit=8)
     for run in runs:
         status = str(run.get("status") or "").strip().lower()
-        if status in {"submitted", "running"}:
+        if status in _ACTIVE_RUN_STATUSES:
             return True
     return False
 
@@ -98,6 +110,7 @@ def _prepare_and_launch(
     *,
     backend: str,
     root: Path,
+    prepare_options: Mapping[str, object] | None = None,
     extra_env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Run prepare_project + launch_training with defaults baked into the constants.
@@ -111,6 +124,7 @@ def _prepare_and_launch(
         project_name=project_name,
         backend=backend,
         root=root,
+        **dict(prepare_options or {}),
     )
     run = ftm.launch_training(
         project_name=project_name,
@@ -133,6 +147,7 @@ def _runner(
     *,
     backend: str,
     root: Path,
+    prepare_options: Mapping[str, object] | None,
     extra_env: Mapping[str, str] | None,
 ) -> None:
     """Long-running thread body. Holds the project lock for the whole flow."""
@@ -176,6 +191,7 @@ def _runner(
                 project_name,
                 backend=backend,
                 root=root,
+                prepare_options=prepare_options,
                 extra_env=extra_env,
             )
         except Exception as exc:  # noqa: BLE001 — log everything in the runner thread
@@ -207,6 +223,7 @@ def queue_auto_train(
     *,
     backend: str,
     root: Path,
+    prepare_options: Mapping[str, object] | None = None,
     extra_env: Mapping[str, str] | None = None,
 ) -> bool:
     """Spawn a daemon thread to auto-train a project; returns False if already queued.
@@ -232,6 +249,7 @@ def queue_auto_train(
             "project_name": project_name,
             "backend": backend,
             "root": root,
+            "prepare_options": prepare_options,
             "extra_env": extra_env,
         },
         name=f"auto-train-{backend}-{project_name}",

@@ -8,6 +8,7 @@ import wave
 from contextlib import redirect_stderr
 
 import fine_tuning_manager as fine_tuning
+from dashboard import auto_train
 
 
 def wav_bytes(duration_seconds: float = 2.0, sample_rate: int = 16000) -> bytes:
@@ -279,6 +280,34 @@ class FineTuningTests(unittest.TestCase):
             projects_off = fine_tuning.list_projects(root=root)
             named_off = next(p for p in projects_off if p["slug"] == "auto-train-demo")
             self.assertFalse(named_off["auto_train"])
+
+    def test_run_status_uses_slurm_accounting_terminal_states(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            run_dir = root / "fine_tuning" / "projects" / "nemo" / "demo" / "runs" / "run-01"
+            run_dir.mkdir(parents=True)
+            (run_dir / "metadata.json").write_text(json.dumps({"job_id": "12345"}), encoding="utf-8")
+
+            original = fine_tuning.slurm_job_state
+            try:
+                fine_tuning.slurm_job_state = lambda _job_id: "COMPLETED"
+                self.assertEqual(fine_tuning.run_status(run_dir), "succeeded")
+
+                fine_tuning.slurm_job_state = lambda _job_id: "FAILED"
+                self.assertEqual(fine_tuning.run_status(run_dir), "failed")
+
+                fine_tuning.slurm_job_state = lambda _job_id: "PENDING"
+                self.assertEqual(fine_tuning.run_status(run_dir), "submitted")
+            finally:
+                fine_tuning.slurm_job_state = original
+
+    def test_auto_train_treats_slurm_pending_as_active(self):
+        original = auto_train.ftm.list_runs
+        try:
+            auto_train.ftm.list_runs = lambda *_args, **_kwargs: [{"status": "pending"}]
+            self.assertTrue(auto_train._has_active_run("demo", "nemo", pathlib.Path(".")))
+        finally:
+            auto_train.ftm.list_runs = original
 
     def test_main_returns_clean_error_for_expected_runtime_failures(self):
         stderr = io.StringIO()

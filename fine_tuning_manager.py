@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from audio_numbering import AUDIO_EXTENSIONS
-from workflow_background import utc_now_iso
+from workflow_background import slurm_job_state, utc_now_iso
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_NAME = "msdd_5scl_15_05_50Povl_256x3x32x2.yaml"
@@ -1409,6 +1409,49 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
+SLURM_ACTIVE_STATES = {
+    "configuring",
+    "completing",
+    "pending",
+    "requeued",
+    "resizing",
+    "running",
+    "signaling",
+    "staged_out",
+    "suspended",
+}
+SLURM_FAILED_STATES = {
+    "boot_fail",
+    "cancelled",
+    "deadline",
+    "failed",
+    "node_fail",
+    "out_of_memory",
+    "preempted",
+    "revoked",
+    "special_exit",
+    "timeout",
+}
+
+
+def slurm_state_to_run_status(raw_state: str) -> str:
+    """Convert Slurm's state names into this module's run-status vocabulary."""
+
+    state = (raw_state or "").strip().lower().replace("-", "_")
+    state_key = state.split()[0] if state else ""
+    if not state_key:
+        return ""
+    if state_key in {"completed", "complete"}:
+        return "succeeded"
+    if state_key in SLURM_FAILED_STATES:
+        return "failed"
+    if state_key in {"pending", "requeued"}:
+        return "submitted"
+    if state_key in SLURM_ACTIVE_STATES:
+        return "running"
+    return state_key
+
+
 def run_status(run_dir: Path) -> str:
     """Resolve a human-readable run state from local logs or Slurm state."""
 
@@ -1425,17 +1468,9 @@ def run_status(run_dir: Path) -> str:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         job_id = str(metadata.get("job_id", "")).strip()
         if job_id:
-            squeue_bin = shutil.which("squeue")
-            if squeue_bin:
-                completed = subprocess.run(
-                    [squeue_bin, "-h", "-j", job_id, "-o", "%T"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                queue_state = completed.stdout.strip().lower()
-                if queue_state:
-                    return queue_state
+            queue_status = slurm_state_to_run_status(slurm_job_state(job_id))
+            if queue_status:
+                return queue_status
             return "submitted"
         if metadata.get("submission_mode") == "sbatch":
             return "submitted"

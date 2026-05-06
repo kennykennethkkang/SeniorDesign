@@ -344,6 +344,18 @@ def format_seconds_value(value: float) -> str:
     return f"{value:.3f}"
 
 
+def parse_time_value(value: str) -> float:
+    raw = value.strip()
+    if ":" not in raw:
+        return float(raw)
+    parts = [float(part.strip()) for part in raw.split(":")]
+    if len(parts) == 2:
+        return parts[0] * 60.0 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600.0 + parts[1] * 60.0 + parts[2]
+    raise ValueError(f"Unsupported timestamp: {value}")
+
+
 def record_text(
     label_record: Mapping[str, object] | None,
     key: str,
@@ -417,8 +429,8 @@ def parse_saved_label_segments(raw_segments: str) -> list[tuple[str, str, str]]:
             continue
         if len(parts) >= 3:
             try:
-                start = float(parts[0])
-                end = float(parts[1])
+                start = parse_time_value(parts[0])
+                end = parse_time_value(parts[1])
             except ValueError:
                 continue
             speaker = " ".join(parts[2:]).strip()
@@ -622,8 +634,8 @@ def build_html(
             f"<span class=\"row-number\">{html.escape(index)}</span>"
             "</td>"
             "<td><div class=\"time-edit\">"
-            f"<label><span>Start</span><input class=\"label-start\" type=\"number\" step=\"0.001\" min=\"0\" value=\"{html.escape(start, quote=True)}\"></label>"
-            f"<label><span>End</span><input class=\"label-end\" type=\"number\" step=\"0.001\" min=\"0\" value=\"{html.escape(end, quote=True)}\"></label>"
+            f"<label><span>Start</span><input class=\"label-start\" type=\"text\" inputmode=\"decimal\" value=\"{html.escape(start, quote=True)}\"></label>"
+            f"<label><span>End</span><input class=\"label-end\" type=\"text\" inputmode=\"decimal\" value=\"{html.escape(end, quote=True)}\"></label>"
             "</div></td>"
             f"<td><input class=\"label-speaker\" list=\"speakerOptions\" type=\"text\" value=\"{html.escape(speaker, quote=True)}\"></td>"
             f"<td class=\"label-dialogue-cell\"><input class=\"label-dialogue\" type=\"text\" value=\"{html.escape(note, quote=True)}\" placeholder=\"Optional dialogue\"></td>"
@@ -643,6 +655,9 @@ def build_html(
     media_file_name = html.escape(media_selection_name or (media_path.name if media_path is not None else ""), quote=True)
     default_segments = html.escape("\n".join(label_segment_lines))
     default_dialogue = html.escape("\n".join(entry[4] for entry in label_entries))
+    include_transcript = not (label_record is not None and label_record.get("include_transcript") is False)
+    include_transcript_value = "1" if include_transcript else "0"
+    include_transcript_checked = " checked" if include_transcript else ""
     review_workspace_path = html.escape(str(output_html), quote=True)
     selected_backend = normalized_label_backend(label_record)
     project_name = html.escape(record_text(label_record, "project_name", DEFAULT_LABEL_PROJECT), quote=True)
@@ -1498,6 +1513,7 @@ def build_html(
           <input type="hidden" id="labelReturnTo" name="label_return_to" value="">
           <input type="hidden" name="label_source" value="review_page">
           <input type="hidden" name="label_review_path" value="{review_workspace_path}">
+          <input type="hidden" id="labelIncludeTranscript" name="label_include_transcript" value="{include_transcript_value}">
           <textarea id="labelSegments" name="label_segments" hidden>{default_segments}</textarea>
           <textarea id="labelTranscript" name="label_transcript_text" hidden>{default_dialogue}</textarea>
           <div class="field-grid">
@@ -1517,7 +1533,7 @@ def build_html(
           </div>
           <div class="label-table-toolbar">
             <button type="button" id="addLabelRowTop" class="add-segment-btn">Add Label</button>
-            <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox" checked> Dialogue</label>
+            <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox"{include_transcript_checked}> Save dialogue</label>
             <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
           <div class="table-wrap review-table-wrap">
@@ -1621,6 +1637,7 @@ def build_html(
     const labelRows = document.getElementById("labelRows");
     const labelSegments = document.getElementById("labelSegments");
     const labelTranscript = document.getElementById("labelTranscript");
+    const labelIncludeTranscript = document.getElementById("labelIncludeTranscript");
     const labelHealth = document.getElementById("labelHealth");
     const labelSearch = document.getElementById("labelSearch");
     const labelSpeakerFilter = document.getElementById("labelSpeakerFilter");
@@ -1904,7 +1921,19 @@ def build_html(
     }}
 
     function rowNumber(value) {{
-      const parsed = Number(value);
+      const raw = String(value || "").trim();
+      if (!raw) return NaN;
+      if (raw.includes(":")) {{
+        const parts = raw.split(":").map(function (part) {{ return Number(part.trim()); }});
+        if (parts.length === 2 && parts.every(Number.isFinite)) {{
+          return parts[0] * 60 + parts[1];
+        }}
+        if (parts.length === 3 && parts.every(Number.isFinite)) {{
+          return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        }}
+        return NaN;
+      }}
+      const parsed = Number(raw);
       return Number.isFinite(parsed) ? parsed : NaN;
     }}
 
@@ -2081,7 +2110,7 @@ def build_html(
       row.dataset.end = Number.isFinite(bounds.end) ? bounds.end.toFixed(3) : "";
       row.dataset.speaker = speakerInput ? speakerInput.value.trim() : "";
       row.dataset.dialogue = dialogueInput ? dialogueInput.value.trim() : "";
-      const needsTimeFix = !Number.isFinite(bounds.start) || !Number.isFinite(bounds.end) || bounds.end <= bounds.start;
+      const needsTimeFix = !Number.isFinite(bounds.start) || !Number.isFinite(bounds.end) || bounds.start < 0 || bounds.end <= bounds.start;
       row.classList.toggle("needs-time-fix", needsTimeFix);
       row.classList.toggle("missing-speaker", !row.dataset.speaker);
     }}
@@ -2256,6 +2285,7 @@ def build_html(
       const table = labelRows ? labelRows.closest(".label-table") : null;
       if (!table || !showLabelDialogue) return;
       table.classList.toggle("hide-dialogue", !showLabelDialogue.checked);
+      if (labelIncludeTranscript) labelIncludeTranscript.value = showLabelDialogue.checked ? "1" : "0";
     }}
 
     function playRange(start, end, selectedRow) {{
@@ -2346,7 +2376,7 @@ def build_html(
       const row = document.createElement("tr");
       row.setAttribute("data-label-row", "");
       row.setAttribute("tabindex", "0");
-      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="number" step="0.001" min="0" value=""></label><label><span>End</span><input class="label-end" type="number" step="0.001" min="0" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
+      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="text" inputmode="decimal" value=""></label><label><span>End</span><input class="label-end" type="text" inputmode="decimal" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
       labelRows.appendChild(row);
       renumberLabelRows();
       return row;

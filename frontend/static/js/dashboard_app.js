@@ -750,12 +750,27 @@
   }
 
   function secondsForLabelInput(value) {
+    const parsed = parseLabelTimestampInput(value);
+    return Number.isFinite(parsed) ? parsed.toFixed(3) : "";
+  }
+
+  function parseLabelTimestampInput(value) {
     const rawValue = text(value).trim();
     if (!rawValue) {
-      return "";
+      return NaN;
+    }
+    if (rawValue.includes(":")) {
+      const parts = rawValue.split(":").map((part) => Number(part.trim()));
+      if (parts.length === 2 && parts.every(Number.isFinite)) {
+        return parts[0] * 60 + parts[1];
+      }
+      if (parts.length === 3 && parts.every(Number.isFinite)) {
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      }
+      return NaN;
     }
     const parsed = Number(rawValue);
-    return Number.isFinite(parsed) ? parsed.toFixed(3) : "";
+    return Number.isFinite(parsed) ? parsed : NaN;
   }
 
   function splitLabelSegmentLine(line) {
@@ -808,9 +823,9 @@
     if (!startValue || !endValue || !speaker) {
       return false;
     }
-    const start = Number(startValue);
-    const end = Number(endValue);
-    return Number.isFinite(start) && Number.isFinite(end) && end > start;
+    const start = parseLabelTimestampInput(startValue);
+    const end = parseLabelTimestampInput(endValue);
+    return Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start;
   }
 
   function serializeLabelSegmentRows(rows) {
@@ -937,10 +952,9 @@
     return Number.isFinite(parsed) ? `${formatNumber(parsed, digits)}%` : "n/a";
   }
 
-  // Render a seconds value as MM:SS.ms — handy hint next to the seconds-only
-  // input boxes so it's easy to sanity-check positions in long audio.
+  // Render a timestamp as MM:SS.ms so it is easy to sanity-check positions in long audio.
   function formatMmSs(value) {
-    const parsed = Number(value);
+    const parsed = parseLabelTimestampInput(value);
     if (!Number.isFinite(parsed) || parsed < 0) return "";
     const totalMs = Math.round(parsed * 1000);
     const minutes = Math.floor(totalMs / 60000);
@@ -2797,8 +2811,8 @@
         audio.removeEventListener("timeupdate", stopHandlerRef.current);
         stopHandlerRef.current = null;
       }
-      const start = Number(segment.start);
-      const end = Number(segment.end);
+      const start = parseLabelTimestampInput(segment.start);
+      const end = parseLabelTimestampInput(segment.end);
       try {
         audio.pause();
         audio.currentTime = Math.max(start, 0);
@@ -2938,13 +2952,13 @@
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
+                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
                     segment.start !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.start)) : null
                   ),
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
+                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
                     segment.end !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.end)) : null
                   ),
                   h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),
