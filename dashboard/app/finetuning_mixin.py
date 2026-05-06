@@ -66,6 +66,7 @@ from fine_tuning_manager import (
     run_status as fine_tuning_run_status,
     sanitize_filename,
     save_project_sample_streams,
+    set_project_auto_train,
     set_project_display_name,
     set_run_display_name,
     slugify,
@@ -579,6 +580,42 @@ class FineTuningMixin:
         except (ValueError, OSError) as exc:
             return self.json_response("500 Internal Server Error", {"error": str(exc)})
         return self.json_response("200 OK", metrics)
+
+    def handle_finetune_auto_train(self, environ):
+        """Toggle the per-project "auto-train when labels complete" flag.
+
+        The label-save handler reads this flag on every completion; it lives in
+        display.json so prepare_project regeneration can't clobber it.
+        """
+
+        form = self.parse_form(environ)
+        project_slug = (form.getfirst("project_slug") or form.getfirst("project_name") or "").strip()
+        backend_value = form.getfirst("backend") or form.getfirst("project_backend") or ""
+        # Checkbox semantics: presence == enabled, absence == disabled.
+        enabled = bool(form.getfirst("auto_train_enabled"))
+        if not project_slug:
+            return self.redirect(environ, "/fine-tuning", message="Pick a fine-tuning project to update.", status="error")
+        try:
+            backend = normalize_backend(backend_value)
+            set_project_auto_train(
+                project_slug,
+                backend=backend,
+                enabled=enabled,
+                root=self.root,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+        self.invalidate_dashboard_cache()
+        return self.redirect(
+            environ,
+            "/fine-tuning",
+            message=(
+                f"Auto-train ON for {project_slug} — completing a label will queue a training run."
+                if enabled
+                else f"Auto-train OFF for {project_slug}."
+            ),
+            status="success",
+        )
 
     def handle_finetune_rename_run(self, environ):
         """Update the display label for one training run — lets us tell runs apart without renaming the directory."""

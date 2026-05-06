@@ -1882,6 +1882,87 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(row["backendLabel"], "pyannote")
             self.assertEqual(row["trainingProjects"], ["pyannote/speaker-lab"])
 
+    def test_dialogue_toggle_off_drops_transcript_from_completed_sample(self):
+        # When the dialogue checkbox is OFF (form sends "0"), the transcript
+        # text must NOT be written into the project's text/ folder, and the
+        # label record should reflect include_transcript=False.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "speaker-lab"),
+                    ("label_segments", "0.00 0.50 SPEAKER_00"),
+                    ("label_transcript_text", "user typed this but toggled off"),
+                    ("label_include_transcript", "0"),
+                    ("label_action", "complete"),
+                ]
+            ).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab"
+            self.assertTrue((project_dir / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((project_dir / "rttm" / "001_clip.rttm").is_file())
+            # Toggle was OFF, so the transcript file must not exist.
+            self.assertFalse((project_dir / "text" / "001_clip.txt").is_file())
+
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["status"], "completed")
+            self.assertFalse(record.get("include_transcript"))
+            self.assertEqual(record.get("transcript_text", ""), "")
+
+    def test_auto_save_draft_returns_json_without_redirect(self):
+        # The auto-save path is invoked by the browser-side debounce; it must
+        # save the draft AND return a JSON status instead of a redirect, so the
+        # user stays on the page they're typing into.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "speaker-lab"),
+                    ("label_segments", "0.00 0.50 SPEAKER_00"),
+                    ("label_action", "draft"),
+                    ("label_auto_save", "1"),
+                ]
+            ).encode("utf-8")
+            status, headers, response_body = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "200 OK")
+            self.assertNotIn("Location", headers)
+            self.assertIn("application/json", headers.get("Content-Type", ""))
+            payload = json.loads(response_body.decode("utf-8"))
+            self.assertEqual(payload.get("status"), "saved")
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(label_status["items"]["001_clip.wav"]["status"], "draft")
+
     def test_completed_training_label_writes_training_ready_rttm_tokens(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

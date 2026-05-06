@@ -937,6 +937,20 @@
     return Number.isFinite(parsed) ? `${formatNumber(parsed, digits)}%` : "n/a";
   }
 
+  // Render a seconds value as MM:SS.ms — handy hint next to the seconds-only
+  // input boxes so it's easy to sanity-check positions in long audio.
+  function formatMmSs(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return "";
+    const totalMs = Math.round(parsed * 1000);
+    const minutes = Math.floor(totalMs / 60000);
+    const seconds = Math.floor((totalMs % 60000) / 1000);
+    const ms = totalMs % 1000;
+    const mm = String(minutes).padStart(2, "0");
+    const ss = String(seconds).padStart(2, "0");
+    return ms === 0 ? `${mm}:${ss}` : `${mm}:${ss}.${String(ms).padStart(3, "0")}`;
+  }
+
   function LinkList({ links, empty = "No artifact links yet." }) {
     return h(
       "div",
@@ -2635,11 +2649,22 @@
       return parsedRows.length ? parsedRows : [makeLabelEditorRow()];
     });
     const [transcriptText, setTranscriptText] = React.useState(row.transcriptText || "");
+    // Default ON when there's already transcript text saved (back-compat) OR
+    // when the label is brand-new — keeps a record of what was said. When OFF
+    // the transcript is dropped from the saved sample entirely.
+    const [includeTranscript, setIncludeTranscript] = React.useState(() => {
+      if (row.includeTranscript === false) return false;
+      return true;
+    });
     const [issueQuestions, setIssueQuestions] = React.useState(row.issueQuestions || "");
     const [selectedModelKey, setSelectedModelKey] = React.useState("");
+    const [autoSaveStatus, setAutoSaveStatus] = React.useState({ state: "idle", at: "" });
     const audioRef = React.useRef(null);
     const stopHandlerRef = React.useRef(null);
     const dragRowIdRef = React.useRef("");
+    const formRef = React.useRef(null);
+    const autoSaveAbortRef = React.useRef(null);
+    const initialAutoSaveSkipRef = React.useRef(true);
     const serializedSegments = serializeLabelSegmentRows(segmentRows);
     const validSegmentCount = segmentRows.filter(labelEditorRowIsValid).length;
     const incompleteSegmentCount = segmentRows.filter((segment) => labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment)).length;
@@ -2650,8 +2675,65 @@
         if (audioRef.current && stopHandlerRef.current) {
           audioRef.current.removeEventListener("timeupdate", stopHandlerRef.current);
         }
+        // Don't leave a half-finished auto-save in flight when the dialog unmounts —
+        // it would race against a real save submitted right after.
+        if (autoSaveAbortRef.current) {
+          autoSaveAbortRef.current.abort();
+        }
       };
     }, []);
+
+    // Debounced auto-save: any time labels, transcript, or questions change
+    // we re-save as a draft. Skip the first render (we just opened the dialog
+    // with existing data — no need to save it back). Don't auto-save when
+    // there's an in-flight request — the abort controller handles cancellation.
+    React.useEffect(() => {
+      if (initialAutoSaveSkipRef.current) {
+        initialAutoSaveSkipRef.current = false;
+        return;
+      }
+      const handle = window.setTimeout(() => {
+        runAutoSaveDraft();
+      }, 1500);
+      return () => window.clearTimeout(handle);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [serializedSegments, transcriptText, issueQuestions, includeTranscript]);
+
+    function runAutoSaveDraft() {
+      if (!routes.saveTrainingLabel || !formRef.current) return;
+      // Cancel any prior auto-save still in flight so we never save stale state.
+      if (autoSaveAbortRef.current) {
+        autoSaveAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      autoSaveAbortRef.current = controller;
+      const data = new FormData(formRef.current);
+      data.set("label_action", "draft");
+      // The "auto" flag lets the server skip the redirect chain and treat
+      // this as a background draft instead of a user-driven submission.
+      data.set("label_auto_save", "1");
+      setAutoSaveStatus({ state: "saving", at: "" });
+      fetch(routes.saveTrainingLabel, {
+        method: "POST",
+        body: data,
+        credentials: "same-origin",
+        signal: controller.signal,
+        redirect: "manual",
+      })
+        .then((response) => {
+          // redirect: "manual" turns 30x into an opaqueredirect with status 0.
+          if (response.type === "opaqueredirect" || (response.status >= 200 && response.status < 400) || response.status === 0) {
+            const stamp = new Date().toLocaleTimeString();
+            setAutoSaveStatus({ state: "saved", at: stamp });
+          } else {
+            setAutoSaveStatus({ state: "error", at: "" });
+          }
+        })
+        .catch((error) => {
+          if (error?.name === "AbortError") return;
+          setAutoSaveStatus({ state: "error", at: "" });
+        });
+    }
 
     function replaceSegmentRows(rawSegments) {
       const parsedRows = parseLabelSegmentRows(rawSegments);
@@ -2753,6 +2835,7 @@
         method: "post",
         action: routes.saveTrainingLabel,
         onSubmit: handleSubmit,
+        ref: formRef,
         "data-form-key": formKey,
         "data-pause-refresh": "true",
         "data-replace-submit": "true",
@@ -2852,8 +2935,18 @@
                       String(index + 1)
                     )
                   ),
-                  h("td", null, h("input", { "aria-label": `Start time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) })),
-                  h("td", null, h("input", { "aria-label": `End time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) })),
+                  h(
+                    "td",
+                    null,
+                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.start, "data-label-field": "start", onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
+                    segment.start !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.start)) : null
+                  ),
+                  h(
+                    "td",
+                    null,
+                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "number", min: "0", step: "0.001", value: segment.end, "data-label-field": "end", onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
+                    segment.end !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.end)) : null
+                  ),
                   h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),
                   h(
                     "td",
@@ -2877,7 +2970,27 @@
         "details",
         { className: "details-box label-optional-details", open: Boolean(transcriptText || issueQuestions) },
         h("summary", null, "Optional transcript and questions"),
-        h(Field, { id: transcriptId, label: "Transcript export" }, h("textarea", { id: transcriptId, name: "label_transcript_text", value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" })),
+        // Hidden input mirrors the toggle so the form ALWAYS submits a "1" or
+        // "0", letting the server distinguish "explicitly off" from "legacy
+        // form that doesn't have this toggle at all" (treated as on).
+        h("input", {
+          type: "hidden",
+          name: "label_include_transcript",
+          value: includeTranscript ? "1" : "0",
+        }),
+        h(
+          "label",
+          { className: "checkbox-row", title: "Diarization fine-tuning ignores transcripts. The toggle just controls whether the dialogue is saved alongside the sample for your records." },
+          h("input", {
+            type: "checkbox",
+            checked: includeTranscript,
+            onChange: (event) => setIncludeTranscript(event.target.checked),
+          }),
+          " Include dialogue with this sample (does not affect diarization training)"
+        ),
+        includeTranscript
+          ? h(Field, { id: transcriptId, label: "Transcript export", note: "Saved in the project's text/ folder. Marked as not aligned with speech-time labels." }, h("textarea", { id: transcriptId, name: "label_transcript_text", value: transcriptText, onChange: (event) => setTranscriptText(event.target.value), placeholder: "Transcript text or annotation notes" }))
+          : h("p", { className: "row-note" }, "Dialogue is excluded from this sample. Toggle on to save it for your records (training is unaffected either way)."),
         h(Field, { id: questionsId, label: "Questions or issues", note: "Anything here keeps the item out of completed training until it is answered." }, h("textarea", { id: questionsId, name: "label_issue_questions", value: issueQuestions, onChange: (event) => setIssueQuestions(event.target.value), placeholder: "What needs to be clarified before this can be used for training?" }))
       ),
       h(
@@ -2885,7 +2998,18 @@
         { className: "button-row" },
         h("button", { className: "secondary", type: "submit", name: "label_action", value: "draft" }, "Save For Later"),
         h("button", { type: "submit", name: "label_action", value: "complete", disabled: completeDisabled }, "Complete Label"),
-        row.reviewHref ? h("a", { className: "tab-link", href: row.reviewHref }, "Open Review Page") : null
+        row.reviewHref ? h("a", { className: "tab-link", href: row.reviewHref }, "Open Review Page") : null,
+        h(
+          "span",
+          { className: `auto-save-status ${autoSaveStatus.state}`, role: "status" },
+          autoSaveStatus.state === "saving"
+            ? "Auto-saving draft…"
+            : autoSaveStatus.state === "saved"
+              ? `Auto-saved at ${autoSaveStatus.at}`
+              : autoSaveStatus.state === "error"
+                ? "Auto-save failed (changes still in form)"
+                : "Auto-save ready"
+        )
       )
     );
   }
@@ -3142,6 +3266,42 @@
     );
   }
 
+  // Per-project "auto-train when labels complete" toggle. Posts a hidden form
+  // on toggle so the change persists in display.json and survives prepare cycles.
+  // The pending badge is shown when a queued auto-train is waiting for the
+  // currently-running training job to finish before it can take its turn.
+  function AutoTrainToggle({ project }) {
+    if (!project) return null;
+    const enabled = Boolean(project.autoTrain);
+    const pending = Boolean(project.autoTrainPending);
+    function handleChange(event) {
+      const next = Boolean(event.target.checked);
+      const fields = {
+        project_slug: project.slug,
+        backend: project.backend,
+      };
+      if (next) {
+        fields.auto_train_enabled = "1";
+      }
+      submitHiddenForm(routes.fineTuneAutoTrain, fields);
+    }
+    return h(
+      "div",
+      { className: "auto-train-row" },
+      h(
+        "label",
+        { className: "checkbox-row", title: "When ON, completing a label for this project automatically queues prepare + sbatch. Multiple completions while a run is active are coalesced — they all get folded into the next training run." },
+        h("input", { type: "checkbox", checked: enabled, onChange: handleChange }),
+        " Auto-train when labels complete"
+      ),
+      pending
+        ? h("p", { className: "row-note auto-train-pending" }, "Auto-train queued — waiting for the active run to finish before kicking off the next one.")
+        : enabled
+          ? h("p", { className: "row-note" }, "Mark a label complete and it will queue a training run automatically.")
+          : null
+    );
+  }
+
   function FineTuneProjectCard({ project }) {
     const metrics = project.metrics || {};
     const splitText =
@@ -3194,6 +3354,7 @@
           "Rename"
         )
       ),
+      h(AutoTrainToggle, { project }),
       h(
         "div",
         { className: "project-metrics" },

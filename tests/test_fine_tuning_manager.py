@@ -252,6 +252,34 @@ class FineTuningTests(unittest.TestCase):
             runs_again = fine_tuning.list_runs("site-training", backend="nemo", root=root)
             self.assertEqual(runs_again[0]["display_name"], "site-training trained version 1")
 
+    def test_set_project_auto_train_persists_and_surfaces_in_list(self):
+        # Auto-train is a sticky per-project flag stored in display.json so it
+        # survives prepare_project regeneration. list_projects must surface the
+        # current value so the dashboard checkbox reflects truth.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            project_path = root / "fine_tuning" / "projects" / "pyannote" / "auto-train-demo"
+            (project_path / "audio").mkdir(parents=True)
+            (project_path / "audio" / "001_clip.wav").write_bytes(wav_bytes())
+
+            fine_tuning.set_project_auto_train(
+                "auto-train-demo", backend="pyannote", enabled=True, root=root
+            )
+            sidecar = json.loads((project_path / "display.json").read_text(encoding="utf-8"))
+            self.assertTrue(sidecar.get("auto_train"))
+
+            projects = fine_tuning.list_projects(root=root)
+            named = next(p for p in projects if p["slug"] == "auto-train-demo")
+            self.assertTrue(named["auto_train"])
+            self.assertFalse(named["auto_train_pending"])
+
+            fine_tuning.set_project_auto_train(
+                "auto-train-demo", backend="pyannote", enabled=False, root=root
+            )
+            projects_off = fine_tuning.list_projects(root=root)
+            named_off = next(p for p in projects_off if p["slug"] == "auto-train-demo")
+            self.assertFalse(named_off["auto_train"])
+
     def test_main_returns_clean_error_for_expected_runtime_failures(self):
         stderr = io.StringIO()
 

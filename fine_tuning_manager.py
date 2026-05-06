@@ -234,6 +234,29 @@ def set_project_display_name(
     return _write_display_sidecar(target / "display.json", updates={"display_name": cleaned})
 
 
+def set_project_auto_train(
+    project_name: str,
+    *,
+    backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    enabled: bool,
+    root: Path = PROJECT_ROOT,
+) -> dict[str, object]:
+    """Toggle the per-project "auto-train when labels complete" flag in display.json.
+
+    Stored in the same sidecar as display_name so it survives prepare_project
+    regeneration. Reading and writing is intentionally cheap so the label-save
+    path can poll it on every completion without measurable overhead.
+    """
+
+    target = project_dir(project_name, backend=backend, root=root)
+    if not target.is_dir():
+        raise FileNotFoundError(f"Unknown fine-tuning project: {project_name}")
+    return _write_display_sidecar(
+        target / "display.json",
+        updates={"auto_train": bool(enabled)},
+    )
+
+
 def read_run_display(run_dir: Path) -> dict[str, object]:
     """Load a run's display metadata (e.g. its friendly name) from its per-run display.json sidecar."""
 
@@ -1567,6 +1590,8 @@ def list_projects(*, root: Path = PROJECT_ROOT) -> list[dict[str, object]]:
             "backend": backend,
             "slug": candidate.name,
             "display_name": display_name,
+            "auto_train": bool(display_payload.get("auto_train")),
+            "auto_train_pending": bool(display_payload.get("auto_train_pending")),
             "path": str(candidate),
             "sample_count": sample_count,
             "prepared": metadata_path.is_file(),

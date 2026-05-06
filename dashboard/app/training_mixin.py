@@ -62,6 +62,7 @@ from fine_tuning_manager import (
     parse_rttm,
     probe_media_duration,
     prepare_project,
+    read_project_display as ftm_read_project_display,
     run_status as fine_tuning_run_status,
     sanitize_filename,
     save_project_sample_streams,
@@ -405,11 +406,25 @@ class TrainingLabelsMixin:
         backend = "both" if len(target_backends) > 1 else target_backends[0]
         project_name = (form.getfirst("label_project_name") or DEFAULT_TRAINING_LABEL_PROJECT).strip()
         raw_segments = (form.getfirst("label_segments") or "").strip()
-        transcript_text = (form.getfirst("label_transcript_text") or "").strip()
+        # Dialogue toggle: when off, drop the transcript before it gets stored in
+        # the training sample. Diarization training never reads it, but it would
+        # otherwise be exported into the project's text/ folder for the user's
+        # records. Absent field (legacy callers / tests without the new UI) is
+        # treated as ON so existing behavior keeps working unchanged.
+        include_transcript_raw = form.getfirst("label_include_transcript")
+        if include_transcript_raw is None:
+            include_transcript = True
+        else:
+            include_transcript = str(include_transcript_raw).strip().lower() not in {"", "0", "false", "off", "no"}
+        raw_transcript_text = (form.getfirst("label_transcript_text") or "").strip()
+        transcript_text = raw_transcript_text if include_transcript else ""
         issue_questions = (form.getfirst("label_issue_questions") or "").strip()
         label_source = (form.getfirst("label_source") or "").strip()
         label_review_path = (form.getfirst("label_review_path") or "").strip()
         action = (form.getfirst("label_action") or "draft").strip().lower()
+        # Auto-save flag means the browser is debouncing a draft save in the
+        # background — skip the user-facing redirect/notification chain.
+        auto_save = bool(form.getfirst("label_auto_save"))
 
         base_record = {
             "backend": backend,
@@ -417,9 +432,15 @@ class TrainingLabelsMixin:
             "project_name": project_name,
             "label_segments": raw_segments,
             "transcript_text": transcript_text,
+            "include_transcript": include_transcript,
             "issue_questions": issue_questions,
             "system_questions": [],
         }
+        # We always tag transcripts as "not aligned" with the speech-time labels —
+        # we don't have time-stamped dialogue, so any saved transcript is just a
+        # bag of text alongside the RTTM, not a per-segment annotation.
+        if include_transcript and raw_transcript_text:
+            base_record["transcript_unmatched"] = True
         if label_source:
             base_record["source"] = label_source
         if label_review_path:
@@ -430,6 +451,10 @@ class TrainingLabelsMixin:
         if action != "complete":
             status = "needs_review" if issue_questions else "draft"
             self.upsert_training_label_record(audio_name, {**base_record, "status": status})
+            # Auto-save shouldn't navigate the user away — the browser is
+            # debouncing this in the background while they keep editing.
+            if auto_save:
+                return self.json_response("200 OK", {"status": "saved", "kind": status})
             return self.redirect(
                 environ,
                 return_location,
@@ -567,12 +592,49 @@ class TrainingLabelsMixin:
             "segment_count": len(segments),
         }
         self.upsert_training_label_record(audio_name, completed_record)
+
+        # Auto-train hook — if any of the projects this sample was added to has
+        # the "auto-train when labels complete" toggle on, kick off a background
+        # prepare + sbatch. Skipped silently when the toggle is off; per-project
+        # serialization lives inside auto_train.queue_auto_train.
+        from dashboard import auto_train as _auto_train
+        auto_train_messages: list[str] = []
+        for target_backend in target_backends:
+            try:
+                project_summary = ftm_read_project_display(
+                    project_name,
+                    backend=target_backend,
+                    root=self.root,
+                )
+            except Exception:  # noqa: BLE001
+                project_summary = {}
+            if not project_summary.get("auto_train"):
+                continue
+            queued = _auto_train.queue_auto_train(
+                project_name,
+                backend=target_backend,
+                root=self.root,
+            )
+            auto_train_messages.append(
+                f"Auto-train {'queued' if queued else 'pending'} for {target_backend}/{project_name}."
+            )
+
+        if auto_save:
+            return self.json_response(
+                "200 OK",
+                {
+                    "status": "completed",
+                    "auto_train": auto_train_messages,
+                },
+            )
+
         return self.redirect(
             environ,
             return_location,
             message=self.notification_message(
                 f"Marked '{audio_name}' complete and added it to {', '.join(completed_record['training_projects'])}.",
                 "The completed label is now part of the fine-tuning samples used by Prepare Artifacts.",
+                *auto_train_messages,
             ),
             status="success",
         )

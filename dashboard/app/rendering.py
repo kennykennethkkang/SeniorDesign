@@ -603,6 +603,8 @@ class RenderingMixin:
                     # to the slug so legacy projects without a rename still show
                     # something readable.
                     "displayName": str(project.get("display_name") or "").strip() or str(project.get("slug", "")),
+                    "autoTrain": bool(project.get("auto_train")),
+                    "autoTrainPending": bool(project.get("auto_train_pending")),
                     "sampleCount": sample_count,
                     "prepared": bool(project.get("prepared")),
                     "latestRunText": latest_run_text,
@@ -861,6 +863,7 @@ class RenderingMixin:
                 "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
                 "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),
                 "fineTuneScoreRun": self.frontend_route("/api/fine-tuning/score-run", script_name),
+                "fineTuneAutoTrain": self.frontend_route("/fine-tuning/auto-train", script_name),
             },
             "assets": {
                 "styles": self.frontend_asset("static/css/dashboard.css", script_name),

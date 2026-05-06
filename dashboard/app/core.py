@@ -300,6 +300,8 @@ class CoreMixin:
                 status, headers, body = self.handle_finetune_rename_project(environ)
             elif routed_method == "POST" and path == "/fine-tuning/rename-run":
                 status, headers, body = self.handle_finetune_rename_run(environ)
+            elif routed_method == "POST" and path == "/fine-tuning/auto-train":
+                status, headers, body = self.handle_finetune_auto_train(environ)
             else:
                 status, headers, body = self.text_response("404 Not Found", "Not found\n")
         except Exception as exc:  # pragma: no cover - safety net for interactive use
