@@ -952,19 +952,6 @@
     return Number.isFinite(parsed) ? `${formatNumber(parsed, digits)}%` : "n/a";
   }
 
-  // Render a timestamp as MM:SS.ms so it is easy to sanity-check positions in long audio.
-  function formatMmSs(value) {
-    const parsed = parseLabelTimestampInput(value);
-    if (!Number.isFinite(parsed) || parsed < 0) return "";
-    const totalMs = Math.round(parsed * 1000);
-    const minutes = Math.floor(totalMs / 60000);
-    const seconds = Math.floor((totalMs % 60000) / 1000);
-    const ms = totalMs % 1000;
-    const mm = String(minutes).padStart(2, "0");
-    const ss = String(seconds).padStart(2, "0");
-    return ms === 0 ? `${mm}:${ss}` : `${mm}:${ss}.${String(ms).padStart(3, "0")}`;
-  }
-
   function LinkList({ links, empty = "No artifact links yet." }) {
     return h(
       "div",
@@ -2850,7 +2837,7 @@
         window.alert("Click a Start or End time box first.");
         return;
       }
-      const timestamp = formatMmSs(audio.currentTime);
+      const timestamp = secondsForLabelInput(audio.currentTime);
       setSegmentRows((currentRows) =>
         currentRows.map((segment) => (segment.id === target.rowId ? { ...segment, [target.field]: timestamp } : segment))
       );
@@ -2935,7 +2922,7 @@
             "div",
             { className: "label-editor-actions" },
             h("button", { className: "secondary", type: "button", onClick: addSegmentRow }, "Add Label"),
-            h("button", { className: "secondary", type: "button", onClick: fillActiveTimeField, disabled: !row.audioHref }, "Use Player Time")
+            h("button", { className: "secondary", type: "button", onClick: fillActiveTimeField, disabled: !row.audioHref }, "Use Current Seconds")
           )
         ),
         h(
@@ -2986,14 +2973,12 @@
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.start, "data-label-field": "start", onFocus: () => rememberActiveTimeField(segment.id, "start"), onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) }),
-                    segment.start !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.start)) : null
+                    h("input", { "aria-label": `Start time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.start, "data-label-field": "start", onFocus: () => rememberActiveTimeField(segment.id, "start"), onChange: (event) => updateSegmentRow(segment.id, { start: event.target.value }) })
                   ),
                   h(
                     "td",
                     null,
-                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onFocus: () => rememberActiveTimeField(segment.id, "end"), onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) }),
-                    segment.end !== "" ? h("p", { className: "row-note label-mmss-hint" }, formatMmSs(segment.end)) : null
+                    h("input", { "aria-label": `End time for label ${index + 1}`, type: "text", inputMode: "decimal", value: segment.end, "data-label-field": "end", onFocus: () => rememberActiveTimeField(segment.id, "end"), onChange: (event) => updateSegmentRow(segment.id, { end: event.target.value }) })
                   ),
                   h("td", null, h("input", { "aria-label": `Speaker for label ${index + 1}`, type: "text", list: "training_label_speaker_names", value: segment.speaker, "data-label-field": "speaker", onChange: (event) => updateSegmentRow(segment.id, { speaker: event.target.value }), placeholder: `SPEAKER_${String(index).padStart(2, "0")}` })),
                   h(

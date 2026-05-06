@@ -1672,7 +1672,7 @@ def build_html(
           </div>
           <div class="label-table-toolbar">
             <button type="button" id="addLabelRowTop" class="add-segment-btn">Add Label</button>
-            <button type="button" id="setLabelTimeFromPlayer" class="add-segment-btn">Use Player Time</button>
+            <button type="button" id="setLabelTimeFromPlayer" class="add-segment-btn">Use Current Seconds</button>
             <label class="checkbox-row label-dialogue-toggle"><input id="showLabelDialogue" type="checkbox"{include_transcript_checked}> Save dialogue</label>
             <span class="add-segment-hint">Appends a blank label as the next number. Drag the handle to reorder.</span>
           </div>
@@ -2464,7 +2464,8 @@ def build_html(
         return;
       }}
       const row = input.closest("[data-label-row]");
-      input.value = formatClock(media.currentTime);
+      const timestamp = formatSeconds(media.currentTime);
+      input.value = timestamp;
       if (row) {{
         updateLabelRowDataset(row);
         setSelectedLabelRow(row);
@@ -2474,7 +2475,7 @@ def build_html(
       input.focus();
       input.select();
       setPlaybackMessage(
-        "Set " + activeLabelTimeInputLabel(input) + " time to " + formatClock(media.currentTime) + ".",
+        "Set " + activeLabelTimeInputLabel(input) + " time to " + timestamp + " seconds.",
         row ? labelSummary(row) : ""
       );
     }}
@@ -2568,14 +2569,8 @@ def build_html(
       return firstVisible || null;
     }}
 
-    function formatClock(seconds) {{
-      if (!Number.isFinite(seconds)) return "0:00.000";
-      const totalMillis = Math.max(Math.round(seconds * 1000), 0);
-      const millis = totalMillis % 1000;
-      const totalSeconds = Math.floor(totalMillis / 1000);
-      const sec = totalSeconds % 60;
-      const min = Math.floor(totalSeconds / 60);
-      return min + ":" + String(sec).padStart(2, "0") + "." + String(millis).padStart(3, "0");
+    function formatSeconds(seconds) {{
+      return Number.isFinite(seconds) ? Math.max(seconds, 0).toFixed(3) : "0.000";
     }}
 
     function activeRow(rows, time) {{
@@ -2602,7 +2597,7 @@ def build_html(
 
     function selectedRangeSummary(row, start, end) {{
       const speaker = row ? (row.dataset.speaker || "speaker") : "segment";
-      return speaker + " | " + formatClock(start) + " to " + formatClock(end);
+      return speaker + " | " + formatSeconds(start) + "s to " + formatSeconds(end) + "s";
     }}
 
     function setCurrentRows() {{
@@ -2620,7 +2615,7 @@ def build_html(
       }});
       nowPlaying.innerHTML = "";
       const mainLine = document.createElement("span");
-      mainLine.textContent = "Time " + formatClock(time) + " | " + cueSummary(currentCue);
+      mainLine.textContent = "Time " + formatSeconds(time) + " seconds | " + cueSummary(currentCue);
       const detailLine = document.createElement("small");
       detailLine.textContent = labelSummary(currentLabel);
       nowPlaying.appendChild(mainLine);
