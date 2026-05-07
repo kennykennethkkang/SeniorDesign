@@ -2661,10 +2661,11 @@
                 h(
                   "p",
                   { className: "row-note" },
-                  h("strong", null, "Select Folder"),
-                  " uses every clip in the folder. ",
+                  "Set a speaker name per folder. Use ",
+                  h("strong", null, "Select All"),
+                  " to grab every clip, or ",
                   h("strong", null, "Random Pick"),
-                  " keeps only the N you choose. The stitcher always randomizes the order at submission time."
+                  " to keep only N. Order is randomized at submit."
                 ),
                 h(
                   "div",
@@ -2688,8 +2689,8 @@
                       h(
                         "div",
                         { className: "button-row compact-toolbar" },
-                        h("button", { className: "secondary", type: "button", onClick: () => setFolderSelected(folder.key, true), disabled: stats.total > 0 && stats.selected === stats.total }, "Select Folder"),
-                        h("button", { className: "ghost", type: "button", onClick: () => setFolderSelected(folder.key, false), disabled: stats.selected === 0 }, "Deselect Folder")
+                        h("button", { className: "secondary", type: "button", onClick: () => setFolderSelected(folder.key, true), disabled: stats.total > 0 && stats.selected === stats.total }, "Select all"),
+                        h("button", { className: "ghost", type: "button", onClick: () => setFolderSelected(folder.key, false), disabled: stats.selected === 0 }, "Clear")
                       ),
                       h(
                         "div",
@@ -5761,7 +5762,7 @@
                     h(
                       "p",
                       { className: "row-note" },
-                      `${selectedAudio.size} of ${availableCount} scorable file${availableCount === 1 ? "" : "s"} selected · ${candidateEntries.length} file${candidateEntries.length === 1 ? "" : "s"} in scope · ${candidateEntries.length - availableCount} not yet in any selected run.`
+                      `${selectedAudio.size} selected · ${availableCount} scorable · ${candidateEntries.length - availableCount} not in any picked run`
                     )
                   ),
                   h(
@@ -5778,9 +5779,9 @@
                   ? h(
                       "p",
                       { className: "field-status der-no-runs-hint" },
-                      "None of these files appear in the selected run(s) yet. ",
-                      h("a", { href: "/diarization" }, "Run diarization on them"),
-                      " first, then come back and pick that run as a model."
+                      "None of these files have been scored by the selected run(s). ",
+                      h("a", { href: "/diarization" }, "Run diarization first"),
+                      ", then come back."
                     )
                   : null,
                 h(
@@ -5833,26 +5834,31 @@
                         const inReference = usingLabelsReference || (referenceRunFiles ? referenceRunFiles.has(entry.name) : false);
                         const available = entry.modelHits > 0 && (usingLabelsReference || inReference);
                         const checked = selectedAudio.has(entry.name);
-                        const detailParts = [];
-                        if (usingLabelsReference) {
-                          detailParts.push(labelFileNames.has(entry.name) ? "Has hand label" : "Missing hand label");
-                        } else {
-                          detailParts.push(inReference ? "In reference run" : "Missing in reference run");
-                        }
-                        if (entry.modelTotal > 0) {
-                          detailParts.push(`Hits ${entry.modelHits}/${entry.modelTotal} compared model${entry.modelTotal === 1 ? "" : "s"}`);
-                        } else {
-                          detailParts.push("No compared models picked");
+                        // One short status, color-coded. Goal: read the row in
+                        // a glance — green = scorable, amber = partial coverage
+                        // across compared models, red = blocked. The detailed
+                        // counts live in the panel header so we don't repeat
+                        // them on every row.
+                        let statusKind = "ok";
+                        let statusText = "Scorable";
+                        if (!available) {
+                          statusKind = "blocked";
+                          if (!inReference && !usingLabelsReference) statusText = "Not in reference";
+                          else if (usingLabelsReference && !labelFileNames.has(entry.name)) statusText = "No hand label";
+                          else statusText = "Not in any model";
+                        } else if (entry.modelTotal > 1 && entry.modelHits < entry.modelTotal) {
+                          statusKind = "partial";
+                          statusText = `${entry.modelHits}/${entry.modelTotal} models`;
                         }
                         return h(
                           "li",
-                          { key: entry.name, className: classNames("der-file-row", !available && "is-missing") },
+                          { key: entry.name, className: classNames("der-file-row", !available && "is-missing", `der-file-row--${statusKind}`) },
                           h(
                             "label",
                             { className: "checkbox-row" },
                             h("input", { type: "checkbox", checked, disabled: !available, onChange: () => toggleAudio(entry.name) }),
                             h("span", { className: "der-file-name" }, entry.fileName || entry.name),
-                            h("span", { className: "row-note" }, detailParts.join(" · "))
+                            h("span", { className: classNames("der-file-status", `der-file-status--${statusKind}`) }, statusText)
                           )
                         );
                       })

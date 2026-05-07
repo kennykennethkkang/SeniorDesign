@@ -4553,3 +4553,136 @@ pre {
     border-color: #999;
   }
 }
+
+/* ============================================================
+   Audio Stitching: "Speaker Labels By Folder" cards.
+   The 190px min-column was tight enough that the in-card button
+   row ("Select all" / "Clear" / number field / "Random Pick" /
+   "Random Half") would push past the right edge of the box. Bump
+   the min so cards always have room, and let the controls stack
+   instead of overflow when the viewport is genuinely tiny.
+   ============================================================ */
+.speaker-assignment-grid {
+  grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+}
+
+.folder-stitch-control {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.folder-stitch-control input[type="text"] {
+  width: 100%;
+  min-width: 0;
+}
+
+.folder-stitch-control .button-row,
+.folder-stitch-control .compact-toolbar {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 0;
+}
+
+.folder-stitch-control .button-row button,
+.folder-stitch-control .compact-toolbar button {
+  width: auto;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.folder-stitch-control .random-pick-control {
+  width: 100%;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.folder-stitch-control .field-status {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* ============================================================
+   Fine-Tuning DER calculator: file-picker rows.
+   The "Hits 2/3 compared models · In reference run" right-aligned
+   italic detail was loud and hard to scan. Replaced with a single
+   short status pill that color-codes scorability at a glance:
+     - green  = scorable in every selected model
+     - amber  = partial coverage across compared models
+     - grey   = blocked (no reference / no model has scored it)
+   ============================================================ */
+.der-file-row {
+  border-radius: 6px;
+  padding: 2px 6px;
+  transition: background 120ms ease;
+}
+
+.der-file-row:hover {
+  background: rgba(140, 28, 46, 0.04);
+}
+
+.der-file-row .checkbox-row {
+  margin: 2px 0;
+  align-items: center;
+}
+
+.der-file-row .checkbox-row .row-note {
+  display: none;
+}
+
+.der-file-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.der-file-status--ok {
+  background: rgba(31, 122, 58, 0.14);
+  color: var(--der-good-bg);
+}
+
+.der-file-status--partial {
+  background: rgba(182, 105, 18, 0.16);
+  color: var(--der-warn-bg);
+}
+
+.der-file-status--blocked {
+  background: rgba(102, 113, 124, 0.14);
+  color: var(--muted);
+}
+
+.der-file-row--blocked .der-file-name {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(102, 113, 124, 0.4);
+}
+
+.der-file-row.is-missing {
+  opacity: 1;
+}
+
+:root[data-theme="dark"] .der-file-row:hover {
+  background: rgba(255, 154, 172, 0.08);
+}
+
+:root[data-theme="dark"] .der-file-status--ok {
+  background: rgba(46, 162, 90, 0.22);
+  color: #6dd49b;
+}
+
+:root[data-theme="dark"] .der-file-status--partial {
+  background: rgba(217, 127, 23, 0.22);
+  color: #ffc080;
+}
+
+:root[data-theme="dark"] .der-file-status--blocked {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}

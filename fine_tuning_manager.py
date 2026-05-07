@@ -1280,7 +1280,7 @@ exec "$PYTHON_BIN" multiscale_diar_decoder.py \\
   model.validation_ds.emb_dir="$VAL_EMB_DIR" \\
   exp_manager.name="$EXP_NAME" \\
   exp_manager.exp_dir="$EXP_DIR" \\
-  exp_manager.checkpoint_callback_params.save_last=false
+  +exp_manager.checkpoint_callback_params.save_last=false
 """
     launch_script_path.parent.mkdir(parents=True, exist_ok=True)
     launch_script_path.write_text(script, encoding="utf-8")
