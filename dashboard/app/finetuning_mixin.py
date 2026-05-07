@@ -263,14 +263,66 @@ class FineTuningMixin:
         return self.redirect(environ, "/fine-tuning", message=message, status=status)
 
     def handle_finetune_upload(self, environ):
-        """Accept one or more labeled audio+RTTM pairs from the browser or SSH workspace and add them to a project."""
+        """Accept one or more labeled audio+RTTM pairs and add them to one OR MORE projects.
+
+        The form can submit ``training_targets`` repeatedly with values like
+        ``pyannote/existing-one`` to fan a single sample selection out to
+        several projects in one click. The legacy single ``project_name`` +
+        ``fine_tuning_backend`` fields still work and act as an "additional /
+        new project" target on top of any checklist picks.
+        """
 
         form = self.parse_form(environ)
         preferences = self.model_preferences()
-        project_name = (form.getfirst("project_name") or "").strip()
-        if not project_name:
-            return self.redirect(environ, "/fine-tuning", message="Provide a project name for fine-tuning uploads.", status="error")
-        backend = normalize_backend(form.getfirst("fine_tuning_backend") or str(preferences["fine_tuning_backend"]))
+        manual_project_name = (form.getfirst("project_name") or "").strip()
+        manual_backend_value = form.getfirst("fine_tuning_backend") or str(preferences["fine_tuning_backend"])
+
+        explicit_targets, target_errors = self.training_label_targets_from_values(form.getlist("training_targets"))
+        if target_errors:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message=self.notification_message("One of the selected fine-tuning projects is malformed.", *target_errors[:8]),
+                status="error",
+            )
+
+        # Build a deterministic, de-duplicated list of (backend, project)
+        # targets: checklist picks first, then the manual "new/additional"
+        # project last. ``backend=both`` fans out to nemo + pyannote.
+        upload_targets: list[tuple[str, str]] = []
+        seen_keys: set[str] = set()
+        for target in explicit_targets:
+            key = f"{target['backend']}/{target['project_name']}"
+            if key in seen_keys:
+                continue
+            upload_targets.append((target["backend"], target["project_name"]))
+            seen_keys.add(key)
+
+        if manual_project_name:
+            try:
+                manual_backends = self.training_label_target_backends(manual_backend_value)
+            except ValueError as exc:
+                return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+            for backend_value in manual_backends:
+                key = f"{backend_value}/{manual_project_name}"
+                if key in seen_keys:
+                    continue
+                upload_targets.append((backend_value, manual_project_name))
+                seen_keys.add(key)
+
+        if not upload_targets:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message="Pick at least one existing fine-tuning project, or fill in the additional project name field.",
+                status="error",
+            )
+
+        # Keep these populated for downstream messages and any single-project
+        # validation paths. The save loop below fans each pair out to every
+        # entry in ``upload_targets``.
+        project_name = upload_targets[0][1]
+        backend = upload_targets[0][0]
 
         server_audio_paths, server_audio_errors = self.selected_workspace_paths(
             form,
@@ -361,22 +413,28 @@ class FineTuningMixin:
                     transcript_path = transcript_by_stem.get(audio_stem)
                     if transcript_path is None and len(server_audio_paths) == 1 and len(server_transcript_paths) == 1:
                         transcript_path = server_transcript_paths[0]
-                    try:
-                        saved_samples.append(
-                            self.save_project_sample_from_paths(
-                                project_name=project_name,
-                                backend=backend,
-                                audio_path=audio_path,
-                                rttm_path=rttm_path,
-                                transcript_path=transcript_path,
-                                transcript_text=transcript_text,
+                    pair_succeeded = False
+                    for target_backend, target_project in upload_targets:
+                        try:
+                            saved_samples.append(
+                                self.save_project_sample_from_paths(
+                                    project_name=target_project,
+                                    backend=target_backend,
+                                    audio_path=audio_path,
+                                    rttm_path=rttm_path,
+                                    transcript_path=transcript_path,
+                                    transcript_text=transcript_text,
+                                )
                             )
-                        )
+                            pair_succeeded = True
+                        except Exception as exc:
+                            failed_samples.append(
+                                f"{self.describe_path(audio_path)} -> {target_backend}/{target_project}: {exc}"
+                            )
+                    if pair_succeeded:
                         used_rttm_stems.add(rttm_path.stem)
                         if transcript_path is not None:
                             used_transcript_stems.add(transcript_path.stem)
-                    except Exception as exc:
-                        failed_samples.append(f"{self.describe_path(audio_path)}: {exc}")
                 unused_rttm_stems = sorted(set(rttm_by_stem) - used_rttm_stems)
                 unused_transcript_stems = sorted(set(transcript_by_stem) - used_transcript_stems)
                 if unused_rttm_stems:
@@ -417,26 +475,42 @@ class FineTuningMixin:
                     transcript_item = transcript_by_stem.get(audio_stem)
                     if transcript_item is None and len(audio_items) == 1 and len(transcript_items) == 1:
                         transcript_item = transcript_items[0]
-                    try:
-                        saved_samples.append(
-                            save_project_sample_streams(
-                                project_name=project_name,
-                                backend=backend,
-                                audio_name=str(audio_item.filename),
-                                audio_stream=audio_item.file,
-                                rttm_name=str(rttm_item.filename),
-                                rttm_stream=rttm_item.file,
-                                transcript_name=str(getattr(transcript_item, "filename", "")) if transcript_item is not None else None,
-                                transcript_stream=transcript_item.file if transcript_item is not None else None,
-                                transcript_text=transcript_text,
-                                root=self.root,
+                    # Browser uploads stream straight from the cgi.FieldStorage
+                    # file handles, which can only be read once. To fan a
+                    # single uploaded pair out to multiple projects, snapshot
+                    # the audio + rttm bytes upfront and feed BytesIO copies
+                    # to each save call.
+                    audio_bytes = audio_item.file.read() if hasattr(audio_item.file, "read") else b""
+                    rttm_bytes = rttm_item.file.read() if hasattr(rttm_item.file, "read") else b""
+                    transcript_bytes = b""
+                    if transcript_item is not None and hasattr(transcript_item.file, "read"):
+                        transcript_bytes = transcript_item.file.read()
+                    pair_succeeded = False
+                    for target_backend, target_project in upload_targets:
+                        try:
+                            saved_samples.append(
+                                save_project_sample_streams(
+                                    project_name=target_project,
+                                    backend=target_backend,
+                                    audio_name=str(audio_item.filename),
+                                    audio_stream=io.BytesIO(audio_bytes),
+                                    rttm_name=str(rttm_item.filename),
+                                    rttm_stream=io.BytesIO(rttm_bytes),
+                                    transcript_name=str(getattr(transcript_item, "filename", "")) if transcript_item is not None else None,
+                                    transcript_stream=io.BytesIO(transcript_bytes) if transcript_item is not None else None,
+                                    transcript_text=transcript_text,
+                                    root=self.root,
+                                )
                             )
-                        )
+                            pair_succeeded = True
+                        except Exception as exc:
+                            failed_samples.append(
+                                f"{getattr(audio_item, 'filename', 'audio')} -> {target_backend}/{target_project}: {exc}"
+                            )
+                    if pair_succeeded:
                         used_rttm_stems.add(self.upload_stem(rttm_item))
                         if transcript_item is not None:
                             used_transcript_stems.add(self.upload_stem(transcript_item))
-                    except Exception as exc:
-                        failed_samples.append(f"{getattr(audio_item, 'filename', 'audio')}: {exc}")
 
                 unused_rttm_stems = sorted(set(rttm_by_stem) - used_rttm_stems)
                 unused_transcript_stems = sorted(set(transcript_by_stem) - used_transcript_stems)
@@ -458,9 +532,17 @@ class FineTuningMixin:
         if len(saved_samples) > 6:
             saved_names += f", and {len(saved_samples) - 6} more"
         status = "info" if failed_samples or notes else "success"
+        target_label = ", ".join(f"{b}/{p}" for b, p in upload_targets)
+        # Each input pair is saved once per target, so the count divides
+        # cleanly when every save succeeded.
+        per_target = len(saved_samples) // max(len(upload_targets), 1)
+        if len(upload_targets) > 1:
+            headline = f"Added {len(saved_samples)} sample-copies ({per_target} pair(s) x {len(upload_targets)} project(s)) to {target_label}."
+        else:
+            headline = f"Added {len(saved_samples)} training sample(s) to {target_label}."
         message = self.notification_message(
-            f"Added {len(saved_samples)} training sample(s) to {backend}/{project_name}.",
-            f"Saved sample(s): {saved_names}.",
+            headline,
+            f"Saved sample stem(s): {saved_names}.",
             *notes,
         )
         self.invalidate_dashboard_cache()

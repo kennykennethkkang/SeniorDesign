@@ -4623,17 +4623,112 @@
     const rttmFiles = sources.rttmFiles || [];
     const transcriptFiles = sources.transcriptFiles || [];
     const labelHref = navItems.find((item) => item.path === "/training-labels")?.href || "/training-labels";
+    // Build the existing-project picker the same way the stitching tab does:
+    // each row is a (backend, slug, displayName, sampleCount) tuple, keyed
+    // off ``<backend>/<slug>``. Multi-select fans the upload out to every
+    // checked target on submit.
+    const projectOptions = React.useMemo(
+      () => (ctx.projects || [])
+        .filter((project) => project && project.slug && project.backend)
+        .map((project) => ({
+          key: `${project.backend}/${project.slug}`,
+          backend: project.backend,
+          slug: project.slug,
+          label: `${backendDisplayName(project.backend)} / ${project.displayName || project.slug}`,
+          sampleCount: project.sampleCount || 0,
+        }))
+        .sort((a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase())),
+      [JSON.stringify((ctx.projects || []).map((p) => [p.backend, p.slug, p.displayName, p.sampleCount]))]
+    );
+    const [trainingTargets, setTrainingTargets] = React.useState(() => new Set());
+    const [includeManualTarget, setIncludeManualTarget] = React.useState(() => projectOptions.length === 0);
+    React.useEffect(() => {
+      const valid = new Set(projectOptions.map((p) => p.key));
+      setTrainingTargets((current) => new Set(Array.from(current).filter((k) => valid.has(k))));
+      if (projectOptions.length === 0) setIncludeManualTarget(true);
+    }, [projectOptions.map((p) => p.key).join("|")]);
+    const toggleTarget = (key, checked) =>
+      setTrainingTargets((current) => {
+        const next = new Set(current);
+        if (checked) next.add(key); else next.delete(key);
+        return next;
+      });
+    const totalTargets = trainingTargets.size + (includeManualTarget ? 1 : 0);
     return h(
       "section",
       { className: "subpanel", id: "fine-tune-upload" },
-      h("div", { className: "panel-head" }, h("div", null, h("h2", null, "1. Add Training Samples"), h("p", null, "Select SSH workspace audio and matching RTTM labels. Multiple audio files can be added in one submit."))),
+      h("div", { className: "panel-head" }, h("div", null, h("h2", null, "1. Add Training Samples"), h("p", null, "Select SSH workspace audio + matching RTTM labels and pick one or more fine-tune projects to receive them. Each sample is copied into every selected project."))),
       h(
         "form",
-        { method: "post", action: routes.fineTuneUpload, "data-loading-message": "Adding training sample batch..." },
-        h(Field, { id: "fine_tuning_backend", label: "Backend" }, h(SelectInput, { id: "fine_tuning_backend", defaultValue: preferences.fine_tuning_backend || "pyannote" }, h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "pyannote" }, "pyannote"))),
-        h(Field, { id: "project_name", label: "Project name" }, h("input", { id: "project_name", name: "project_name", list: "fine_tuning_project_names", placeholder: "callhome-msdd" })),
+        {
+          method: "post",
+          action: routes.fineTuneUpload,
+          "data-loading-message": "Adding training sample batch...",
+          onSubmit: (event) => {
+            const manualField = event.currentTarget.elements.namedItem("project_name");
+            const manualValue = manualField && "value" in manualField ? text(manualField.value).trim() : "";
+            if (trainingTargets.size === 0 && (!includeManualTarget || !manualValue)) {
+              event.preventDefault();
+              window.alert("Pick at least one existing fine-tune project, or fill in the additional project name.");
+            }
+          },
+        },
+        Array.from(trainingTargets).map((key) =>
+          h("input", { key: `tt-${key}`, type: "hidden", name: "training_targets", value: key, readOnly: true })
+        ),
+        h(
+          "details",
+          { className: "details-box compact-details", open: true },
+          h("summary", null, "Fine-Tune Targets"),
+          h(
+            "div",
+            null,
+            projectOptions.length
+              ? h(
+                  React.Fragment,
+                  null,
+                  h(
+                    "div",
+                    { className: "selection-toolbar compact-toolbar" },
+                    h("button", { className: "secondary", type: "button", onClick: () => setTrainingTargets(new Set(projectOptions.map((p) => p.key))) }, "Select all existing"),
+                    h("button", { className: "ghost", type: "button", disabled: trainingTargets.size === 0, onClick: () => setTrainingTargets(new Set()) }, "Clear existing"),
+                    h("span", { className: "field-status" }, `${totalTargets} target(s) selected`)
+                  ),
+                  h(
+                    "div",
+                    { className: "training-target-checklist" },
+                    projectOptions.map((project) =>
+                      h(
+                        "label",
+                        { key: project.key, className: "checkbox-row file-choice" },
+                        h("input", {
+                          type: "checkbox",
+                          checked: trainingTargets.has(project.key),
+                          onChange: (event) => toggleTarget(project.key, event.target.checked),
+                        }),
+                        h("span", null, h("strong", null, project.label), h("small", null, `${project.sampleCount} sample(s)`))
+                      )
+                    )
+                  )
+                )
+              : h("p", { className: "field-status" }, "No existing fine-tuning projects yet. Fill in the additional project name below to create one."),
+            h(
+              "label",
+              { className: "checkbox-row" },
+              h("input", { type: "checkbox", checked: includeManualTarget, onChange: (event) => setIncludeManualTarget(event.target.checked) }),
+              projectOptions.length ? " Also send to another or new project" : " Send to a new project"
+            ),
+            includeManualTarget
+              ? h(
+                  "div",
+                  { className: "inline" },
+                  h(Field, { id: "fine_tuning_backend", label: "Additional backend" }, h(SelectInput, { id: "fine_tuning_backend", name: "fine_tuning_backend", defaultValue: preferences.fine_tuning_backend || "pyannote" }, h(Option, { value: "pyannote" }, "pyannote"), h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "both" }, "NeMo + pyannote"))),
+                  h(Field, { id: "project_name", label: "Additional project name", note: "Existing slug or a brand-new project." }, h("input", { id: "project_name", name: "project_name", list: "fine_tuning_project_names", placeholder: "callhome-msdd" }))
+                )
+              : null
+          )
+        ),
         projectNames.length ? h("datalist", { id: "fine_tuning_project_names" }, projectNames.map((name) => h("option", { key: name, value: name }))) : null,
-        h("p", { className: "footer-note" }, "Use an existing project name to append samples."),
         h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
         h(Field, { id: "server_audio_paths", label: "SSH audio in audio_in/" }, h(WorkspaceFileChecklist, { group: "fine-tune-audio", name: "server_audio_paths", files: audioFiles, emptyText: "No audio files are present in audio_in/ yet." })),
         h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected."),

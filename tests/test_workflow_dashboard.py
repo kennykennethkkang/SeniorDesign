@@ -378,6 +378,60 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(state["context"]["stitching"]["rows"][0]["displayName"], "Adult Child Infant Set")
             self.assertEqual(state["context"]["stitching"]["rows"][0]["outputName"], "age-class-mix")
 
+    def test_finetune_upload_can_fan_out_to_multiple_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            wav = audio_set / "001_clip.wav"
+            rttm_dir = root / "fine_tuning" / "label_work"
+            rttm_dir.mkdir(parents=True)
+            rttm_file = rttm_dir / "001_clip.rttm"
+            wav.write_bytes(wav_bytes(2.0))
+            rttm_file.write_text(
+                "SPEAKER 001_clip 1 0.000 1.000 <NA> <NA> Speaker_1 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+            (root / "fine_tuning" / "projects" / "pyannote" / "alpha").mkdir(parents=True)
+            (root / "fine_tuning" / "projects" / "nemo" / "beta").mkdir(parents=True)
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            fields = [
+                # Existing-project checklist picks (different backends).
+                ("training_targets", "pyannote/alpha"),
+                ("training_targets", "nemo/beta"),
+                # And a manual additional NEW project named gamma on pyannote.
+                ("fine_tuning_backend", "pyannote"),
+                ("project_name", "gamma"),
+                ("server_audio_paths", "audio_in/clips/001_clip.wav"),
+                ("server_rttm_paths", "fine_tuning/label_work/001_clip.rttm"),
+            ]
+            post_status, headers, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/fine-tuning/upload-sample",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+            self.assertEqual(post_status, "303 See Other")
+            location = headers["Location"]
+            self.assertIn("/fine-tuning", location)
+            self.assertIn("status=success", location)
+
+            for backend, project in [("pyannote", "alpha"), ("nemo", "beta"), ("pyannote", "gamma")]:
+                project_dir = root / "fine_tuning" / "projects" / backend / project
+                self.assertEqual(
+                    len(list((project_dir / "audio").glob("*.wav"))),
+                    1,
+                    msg=f"audio missing in {backend}/{project}",
+                )
+                self.assertEqual(
+                    len(list((project_dir / "rttm").glob("*.rttm"))),
+                    1,
+                    msg=f"rttm missing in {backend}/{project}",
+                )
+
     def test_stitching_run_can_be_deleted_and_clears_training_copies(self):
         with tempfile.TemporaryDirectory() as tmpdir, stub_auto_train_queue():
             root = pathlib.Path(tmpdir)
