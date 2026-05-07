@@ -415,7 +415,15 @@
     if (explicit) {
       return explicit;
     }
-    const candidate = text(row?.name || row?.audioFile || row?.path || row?.fileName || "").replace(/\\/g, "/").trim();
+    // Pick the source with the most folder context. Workspace-file rows
+    // have ``name`` set to the basename only and ``path`` set to the full
+    // workspace-relative path — preferring the one that actually contains a
+    // slash keeps the folder filter meaningful for those pickers without
+    // breaking the table rows whose ``name`` is already a relative path.
+    const candidates = [row?.name, row?.audioFile, row?.path, row?.fileName]
+      .map((value) => text(value).replace(/\\/g, "/").trim())
+      .filter(Boolean);
+    const candidate = candidates.find((value) => value.includes("/")) || candidates[0] || "";
     if (!candidate.includes("/")) {
       return "Unsorted Root";
     }
@@ -425,6 +433,13 @@
     }
     if (parts[0] === "audio_in") {
       return parts.length > 2 ? parts[1] : "Unsorted Root";
+    }
+    // Group RTTM/audio/text files inside fine_tuning/projects/<backend>/<slug>/...
+    // by the project itself (``<backend>/<slug>``), which is the level the
+    // user actually thinks in. The old behavior dumped every project's
+    // files into a single ``fine_tuning/projects`` bucket.
+    if (parts[0] === "fine_tuning" && parts[1] === "projects" && parts.length > 4) {
+      return `${parts[2]}/${parts[3]}`;
     }
     if (parts[0] === "fine_tuning" && parts.length > 1) {
       return parts.slice(0, Math.min(2, parts.length - 1)).join("/") || "fine_tuning";
