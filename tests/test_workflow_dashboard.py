@@ -301,10 +301,10 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(len(list((project_dir / "audio").glob("*.wav"))), 1)
             self.assertEqual(len(list((project_dir / "rttm").glob("*.rttm"))), 1)
 
-            # Mirror should land in audio_in/stitched/<run-name>/ so the
-            # Media Library + the diarization tab + the stitching tab all
-            # surface the new audio without manual intervention.
-            mirror_dir = root / "audio_in" / "stitched" / run_dir.name
+            # Mirror should land in audio_in/audioStitching/<run-name>/ so
+            # the Media Library + the diarization tab + the stitching tab
+            # all surface the new audio without manual intervention.
+            mirror_dir = root / "audio_in" / "audioStitching" / run_dir.name
             self.assertTrue(mirror_dir.is_dir())
             self.assertTrue(any(mirror_dir.glob("*.wav")))
             self.assertTrue(any(mirror_dir.glob("*.rttm")))
@@ -313,7 +313,7 @@ class WorkflowWebTests(unittest.TestCase):
             # the stitched sample as already labeled.
             label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
             mirror_audio_key = next(
-                (key for key in label_status.get("items", {}) if key.startswith(f"stitched/{run_dir.name}/")),
+                (key for key in label_status.get("items", {}) if key.startswith(f"audioStitching/{run_dir.name}/")),
                 None,
             )
             self.assertIsNotNone(mirror_audio_key)

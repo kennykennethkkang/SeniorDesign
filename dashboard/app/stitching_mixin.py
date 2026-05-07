@@ -49,7 +49,11 @@ class StitchingMixin:
             return ""
         transcript_source = self.resolve_stitched_artifact(metadata.get("transcript_path"), run_dir, ".txt")
 
-        mirror_root = self.audio_dir / "stitched" / run_dir.name
+        # The user-visible folder under audio_in is "audioStitching" — same
+        # name on the dashboard's media library + diarization tabs so it's
+        # easy to find. Keep one sub-folder per run so multiple stitches
+        # don't collide on filenames.
+        mirror_root = self.audio_dir / "audioStitching" / run_dir.name
         mirror_root.mkdir(parents=True, exist_ok=True)
         wav_target = mirror_root / wav_source.name
         rttm_target = mirror_root / rttm_source.name
@@ -526,10 +530,14 @@ class StitchingMixin:
                     self.save_training_label_records(records)
             except Exception:  # noqa: BLE001
                 pass
-        mirror_dir = (self.audio_dir / "stitched" / run_dir.name).resolve() if (self.audio_dir / "stitched" / run_dir.name).exists() else None
-        if mirror_dir is not None:
+        # Clear both the new audioStitching/ mirror and the old stitched/
+        # mirror so deletes still work for runs created before the rename.
+        for mirror_parent in ("audioStitching", "stitched"):
+            mirror_dir = self.audio_dir / mirror_parent / run_dir.name
+            if not mirror_dir.exists():
+                continue
             try:
-                mirror_dir.relative_to(self.audio_dir.resolve())
+                mirror_dir.resolve().relative_to(self.audio_dir.resolve())
                 shutil.rmtree(mirror_dir)
             except (OSError, ValueError):
                 pass

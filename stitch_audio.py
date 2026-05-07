@@ -599,6 +599,17 @@ def run_stitch(
             seed=seed_value,
         )
     except Exception as exc:
+        # Failed mid-write usually means a half-baked WAV is sitting on disk.
+        # Removing it on failure stops a future retry from running into the
+        # same quota wall a second time, and keeps the run dir from looking
+        # like it succeeded just because a partial file is present.
+        for partial in (wav_path, rttm_path, srt_path, manifest_path, transcript_path,
+                        review_path, review_flags_path):
+            try:
+                if partial.is_file():
+                    partial.unlink()
+            except OSError:
+                pass
         metadata.update(
             {
                 "submission_status": "failed",
@@ -606,8 +617,17 @@ def run_stitch(
                 "error": str(exc),
             }
         )
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        exit_code_path.write_text("1\n", encoding="utf-8")
+        try:
+            metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError:
+            # Quota was so tight even the metadata write failed. Best effort
+            # is to leave the directory and let the dashboard surface the
+            # exit_code below.
+            pass
+        try:
+            exit_code_path.write_text("1\n", encoding="utf-8")
+        except OSError:
+            pass
         raise
 
 
