@@ -207,8 +207,173 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertNotIn("/outputs", [item["path"] for item in state["navItems"]])
             self.assertEqual(
                 [item["path"] for item in state["navItems"]],
-                ["/", "/uploads", "/youtube", "/diarization", "/training-labels", "/fine-tuning"],
+                ["/", "/uploads", "/stitching", "/youtube", "/diarization", "/training-labels", "/fine-tuning"],
             )
+
+    def test_stitching_tab_creates_rttm_and_training_sample(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_set / "001_child.wav").write_bytes(wav_bytes(1.0))
+            (audio_set / "002_adult.wav").write_bytes(wav_bytes(2.0))
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            status, _, body = run_wsgi(app, method="GET", path="/stitching")
+            self.assertEqual(status, "200 OK")
+            state = page_state(body)
+            self.assertEqual(state["currentPath"], "/stitching")
+            self.assertEqual(state["routes"]["stitchAudio"], "/actions/stitch-audio")
+            self.assertEqual(state["routes"]["renameStitching"], "/stitching/rename")
+            self.assertEqual(len(state["context"]["audioFiles"]), 2)
+
+            fields = [
+                ("stitch_name", "stitch-demo"),
+                ("stitch_seed", "fixed-seed"),
+                ("add_to_training", "1"),
+                ("fine_tuning_backend", "pyannote"),
+                ("project_name", "stitch-test"),
+                ("selected_audio", "clips/001_child.wav"),
+                ("speaker_labels", "Speaker_0"),
+                ("selected_audio", "clips/002_adult.wav"),
+                ("speaker_labels", "Speaker_1"),
+            ]
+            post_status, headers, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/actions/stitch-audio",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(post_status, "303 See Other")
+            self.assertIn("/stitching", headers["Location"])
+            run_dirs = sorted((root / "stitched").iterdir())
+            self.assertEqual(len(run_dirs), 1)
+            run_dir = run_dirs[0]
+            wav_path = next(run_dir.glob("*.wav"))
+            rttm_path = next(run_dir.glob("*.rttm"))
+            manifest_path = next(run_dir.glob("*_segments.tsv"))
+            review_path = next(run_dir.glob("*_review.html"))
+            self.assertTrue(wav_path.is_file())
+            self.assertTrue(rttm_path.is_file())
+            self.assertTrue(manifest_path.is_file())
+            self.assertTrue(review_path.is_file())
+
+            rttm_lines = rttm_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(rttm_lines), 2)
+            rows = []
+            for line in rttm_lines:
+                parts = line.split()
+                rows.append((float(parts[3]), float(parts[4]), parts[7]))
+            self.assertEqual(rows[0][0], 0.0)
+            self.assertAlmostEqual(rows[1][0], rows[0][0] + rows[0][1], places=3)
+            self.assertEqual({row[2] for row in rows}, {"Speaker_0", "Speaker_1"})
+
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "stitch-test"
+            self.assertEqual(len(list((project_dir / "audio").glob("*.wav"))), 1)
+            self.assertEqual(len(list((project_dir / "rttm").glob("*.rttm"))), 1)
+
+    def test_stitching_tab_can_rename_existing_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_set / "001_child.wav").write_bytes(wav_bytes(1.0))
+            (audio_set / "002_adult.wav").write_bytes(wav_bytes(1.0))
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            fields = [
+                ("stitch_name", "Age Class Mix"),
+                ("stitch_seed", "fixed-seed"),
+                ("selected_audio", "clips/001_child.wav"),
+                ("speaker_labels", "Speaker_1"),
+                ("selected_audio", "clips/002_adult.wav"),
+                ("speaker_labels", "Speaker_0"),
+            ]
+            post_status, _, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/actions/stitch-audio",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+            self.assertEqual(post_status, "303 See Other")
+            run_dir = next((root / "stitched").iterdir())
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["output_name"], "age-class-mix")
+            self.assertEqual(metadata["display_name"], "Age Class Mix")
+
+            rename_status, headers, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/stitching/rename",
+                body=urlencode(
+                    [
+                        ("run_dir", str(run_dir.relative_to(root))),
+                        ("display_name", "Adult Child Infant Set"),
+                    ]
+                ).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(rename_status, "303 See Other")
+            self.assertIn("/stitching", headers["Location"])
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["output_name"], "age-class-mix")
+            self.assertEqual(metadata["display_name"], "Adult Child Infant Set")
+            status, _, body = run_wsgi(app, method="GET", path="/stitching")
+            self.assertEqual(status, "200 OK")
+            state = page_state(body)
+            self.assertEqual(state["context"]["stitching"]["rows"][0]["displayName"], "Adult Child Infant Set")
+            self.assertEqual(state["context"]["stitching"]["rows"][0]["outputName"], "age-class-mix")
+
+    def test_stitching_tab_can_add_sample_to_multiple_training_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_set / "001_child.wav").write_bytes(wav_bytes(1.0))
+            (audio_set / "002_adult.wav").write_bytes(wav_bytes(1.5))
+            (root / "fine_tuning" / "projects" / "pyannote" / "existing-one").mkdir(parents=True)
+            (root / "fine_tuning" / "projects" / "nemo" / "existing-two").mkdir(parents=True)
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            fields = [
+                ("stitch_name", "multi-target-demo"),
+                ("stitch_seed", "fixed-seed"),
+                ("add_to_training", "1"),
+                ("training_targets", "pyannote/existing-one"),
+                ("training_targets", "nemo/existing-two"),
+                ("selected_audio", "clips/001_child.wav"),
+                ("speaker_labels", "Speaker_0"),
+                ("selected_audio", "clips/002_adult.wav"),
+                ("speaker_labels", "Speaker_1"),
+            ]
+            post_status, headers, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/actions/stitch-audio",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(post_status, "303 See Other")
+            self.assertIn("/stitching", headers["Location"])
+            run_dir = next((root / "stitched").iterdir())
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["training_targets"], ["pyannote/existing-one", "nemo/existing-two"])
+            self.assertEqual(
+                [item["project_key"] for item in metadata["training_usage"]],
+                ["pyannote/existing-one", "nemo/existing-two"],
+            )
+            for backend, project in [("pyannote", "existing-one"), ("nemo", "existing-two")]:
+                project_dir = root / "fine_tuning" / "projects" / backend / project
+                self.assertEqual(len(list((project_dir / "audio").glob("*.wav"))), 1)
+                self.assertEqual(len(list((project_dir / "rttm").glob("*.rttm"))), 1)
 
     def test_frontend_assets_are_served_from_organized_folders(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4127,7 +4292,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             state = page_state(body)
             self.assertEqual(state["routes"]["uploadAudio"], "/proxy/app/upload/audio")
-            self.assertEqual(state["assets"]["app"], "/proxy/app/assets/static/js/dashboard_app.js")
+            self.assertEqual(state["assets"]["app"].split("?", 1)[0], "/proxy/app/assets/static/js/dashboard_app.js")
 
             status, _, body = run_wsgi(
                 app,

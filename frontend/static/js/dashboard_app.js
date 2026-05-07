@@ -73,6 +73,12 @@
       summary: "Source audio, diarized outputs, reviews, flags, and logs.",
       intro: "Manage source audio and inspect the outputs each file has produced.",
     },
+    "/stitching": {
+      label: "Audio Stitching",
+      title: "Audio Stitching",
+      summary: "Randomized stitched WAVs, RTTM timing, speaker assignment, and training export.",
+      intro: "Build a randomized stitched training sample from selected clips and verify the generated timing artifacts.",
+    },
     "/training-labels": {
       label: "Training Labels",
       title: "Training Labels",
@@ -183,6 +189,19 @@
     if (!cleaned || cleaned === current) return;
     submitHiddenForm(routes.fineTuneRenameRun, {
       run_dir: run.runDir,
+      display_name: cleaned,
+    });
+  }
+
+  function promptRenameStitch(row) {
+    if (!row || !row.runDir) return;
+    const current = row.displayName || row.outputName || row.name || "stitched output";
+    const next = window.prompt(`Rename stitched output "${current}"`, current);
+    if (next === null) return;
+    const cleaned = String(next).trim();
+    if (!cleaned || cleaned === current) return;
+    submitHiddenForm(routes.renameStitching, {
+      run_dir: row.runDir,
       display_name: cleaned,
     });
   }
@@ -1916,7 +1935,7 @@
     const action = overviewPrimaryAction();
     const sections = [
       ["Bring Data In", "Upload audio or convert queued links into the shared library.", [["/uploads", "Media Library"], ["/youtube", "YouTube Audio Conversion"]]],
-      ["Run Core Processing", "Select audio, run diarization, then review generated files.", [["/diarization", "Diarization"], ["/uploads", "Diarized Files"]]],
+      ["Run Core Processing", "Select audio, stitch training clips, run diarization, then review generated files.", [["/stitching", "Audio Stitching"], ["/diarization", "Diarization"], ["/uploads", "Diarized Files"]]],
       ["Train And Inspect", "Create labels and prepare training artifacts.", [["/training-labels", "Training Labels"], ["/fine-tuning", "Fine-Tuning"]]],
     ];
     return h(
@@ -2040,6 +2059,383 @@
         h(DiarizedFilesTable, { rows: filteredHistory }),
         h(ReviewBundleForm, { historyRows: filteredHistory })
       )
+    );
+  }
+
+  function StitchedInspectionDialog({ row, id }) {
+    const segments = row?.segments || [];
+    const preferredLabels = ["Timing Review", "Segment Manifest", "RTTM", "Segment SRT", "Transcript Notes", "metadata.json", "stdout.log", "stderr.log"];
+    const trainingText = row.trainingUsage?.length
+      ? row.trainingUsage.map((item) => item.project_key || `${item.backend}/${item.project_name}`).filter(Boolean).join(", ")
+      : "Not added to training";
+    return h(
+      Dialog,
+      { id, title: row.displayName || row.outputName || row.name || "Stitched audio", detail: row.path || "stitched/" },
+      h(
+        "div",
+        { className: "summary-grid" },
+        h(SummaryCard, { title: "Status" }, h("p", null, h(StatusPill, { status: row.status || "unknown" })), row.error ? h("p", { className: "row-note" }, row.error) : null),
+        h(SummaryCard, { title: "Timing" }, h("p", null, h("strong", null, row.segmentCount || segments.length || 0), " segment(s)"), h("p", { className: "row-note" }, `${formatDuration(row.durationSeconds || 0)} total, seed ${row.seed || "auto"}`)),
+        h(SummaryCard, { title: "Training" }, h("p", null, trainingText), row.trainingTargets?.length ? h("p", { className: "row-note" }, `Requested: ${row.trainingTargets.join(", ")}`) : null)
+      ),
+      row.audioHref ? h("div", { className: "audio-review" }, h("audio", { controls: true, preload: "none", src: row.audioHref })) : null,
+      h("div", { className: "button-row" }, h("button", { className: "secondary", type: "button", onClick: () => promptRenameStitch(row) }, "Rename")),
+      h(
+        "details",
+        { className: "details-box", open: true },
+        h("summary", null, "Segment Timing"),
+        h(
+          "div",
+          null,
+          h(DataTable, {
+            className: "compact-table",
+            headers: ["#", "Start", "End", "Speaker", "Source"],
+            rows: segments,
+            emptyText: "No segment metadata is available yet.",
+            renderRow: (segment) =>
+              h(
+                "tr",
+                { key: `${segment.index}-${segment.audio_file}` },
+                h("td", null, segment.index),
+                h("td", null, formatNumber(segment.start || 0, 3)),
+                h("td", null, formatNumber(segment.end || 0, 3)),
+                h("td", null, segment.speaker || ""),
+                h("td", null, segment.audio_file || "")
+              ),
+          })
+        )
+      ),
+      h(
+        "details",
+        { className: "details-box", open: true },
+        h("summary", null, "Artifacts"),
+        h("div", null, h(ArtifactPreviewBrowser, { links: row.links || [], preferredLabels, emptyText: "No stitched artifacts are available yet." }))
+      )
+    );
+  }
+
+  function StitchedRunsTable({ rows }) {
+    return h(DataTable, {
+      className: "stitched-runs-table",
+      headers: ["Output", "Status", "Timing", "Training", "Files", "Inspect"],
+      rows: rows || [],
+      emptyText: h("div", { className: "empty-state" }, h("strong", null, "No stitched samples yet."), "Select audio files above to create the first stitched WAV and RTTM pair."),
+      renderRow: (row, index) => {
+        const dialogId = dialogIdFor("stitched-run", row.name, index);
+        const displayName = row.displayName || row.outputName || row.name;
+        const trainingTargets = row.trainingUsage?.length
+          ? row.trainingUsage.map((item) => item.project_key || `${item.backend}/${item.project_name}`).filter(Boolean)
+          : row.trainingTargets || [];
+        return h(
+          "tr",
+          { key: `${row.name}-${index}` },
+          h("td", null, h("strong", { className: "file-name" }, displayName), h("p", { className: "row-note" }, row.outputName && row.outputName !== displayName ? `Artifact name: ${row.outputName}` : row.path || ""), row.outputName && row.outputName !== displayName ? h("p", { className: "row-note" }, row.path || "") : null),
+          h("td", null, h(StatusPill, { status: row.status || "unknown" }), row.error ? h("p", { className: "row-note" }, row.error) : null),
+          h("td", null, `${row.segmentCount || 0} segment(s)`, h("p", { className: "row-note" }, `${formatDuration(row.durationSeconds || 0)} · seed ${row.seed || "auto"}`)),
+          h("td", null, trainingTargets.length ? trainingTargets.join(", ") : h("span", { className: "row-note" }, "Not added")),
+          h("td", null, h(LinkList, { links: row.links || [], empty: "No linked files yet" })),
+          h("td", null, h("div", { className: "row-actions" }, h("button", { className: "secondary", type: "button", "data-open-dialog": dialogId }, "Inspect"), h("button", { className: "ghost", type: "button", onClick: () => promptRenameStitch(row) }, "Rename")), h(StitchedInspectionDialog, { row, id: dialogId }))
+        );
+      },
+    });
+  }
+
+  function StitchingPage() {
+    const rows = ctx.audioFiles || [];
+    const stitching = ctx.stitching || {};
+    const stitchedRows = stitching.rows || [];
+    const summary = stitching.summary || {};
+    const [selected, setSelected] = React.useState(() => new Set());
+    const projectOptions = React.useMemo(
+      () =>
+        (ctx.projects || [])
+          .filter((project) => project && project.slug && project.backend)
+          .map((project) => ({
+            key: `${project.backend}/${project.slug}`,
+            backend: project.backend,
+            slug: project.slug,
+            label: `${backendDisplayName(project.backend)} / ${project.displayName || project.slug}`,
+            sampleCount: project.sampleCount || 0,
+          }))
+          .sort((left, right) => left.label.toLowerCase().localeCompare(right.label.toLowerCase())),
+      [JSON.stringify((ctx.projects || []).map((project) => [project.backend, project.slug, project.displayName, project.sampleCount]))]
+    );
+    const [addToTraining, setAddToTraining] = React.useState(true);
+    const [includeManualTarget, setIncludeManualTarget] = React.useState(() => projectOptions.length === 0);
+    const [trainingTargets, setTrainingTargets] = React.useState(() => new Set());
+
+    const folderChoices = Array.from(
+      rows.reduce((choices, row) => {
+        const key = text(row.folder || "Unsorted Root", "Unsorted Root");
+        const current = choices.get(key) || { key, label: key, count: 0 };
+        current.count += 1;
+        choices.set(key, current);
+        return choices;
+      }, new Map()).values()
+    ).sort((left, right) => left.label.toLowerCase().localeCompare(right.label.toLowerCase()));
+
+    const initialFolderSpeakers = React.useMemo(() => {
+      const mapping = {};
+      folderChoices.forEach((folder, index) => {
+        mapping[folder.key] = `Speaker_${index}`;
+      });
+      return mapping;
+    }, [folderChoices.map((folder) => folder.key).join("|")]);
+
+    const [folderSpeakers, setFolderSpeakers] = React.useState(initialFolderSpeakers);
+    const [speakerByFile, setSpeakerByFile] = React.useState({});
+
+    React.useEffect(() => {
+      setFolderSpeakers((current) => ({ ...initialFolderSpeakers, ...current }));
+    }, [initialFolderSpeakers]);
+
+    React.useEffect(() => {
+      const valid = new Set(rows.map((row) => row.name));
+      setSelected((current) => new Set(Array.from(current).filter((name) => valid.has(name))));
+      setSpeakerByFile((current) => {
+        const next = {};
+        Object.entries(current).forEach(([name, speaker]) => {
+          if (valid.has(name)) {
+            next[name] = speaker;
+          }
+        });
+        return next;
+      });
+    }, [rows]);
+
+    React.useEffect(() => {
+      const validTargets = new Set(projectOptions.map((project) => project.key));
+      setTrainingTargets((current) => new Set(Array.from(current).filter((target) => validTargets.has(target))));
+      if (projectOptions.length === 0) {
+        setIncludeManualTarget(true);
+      }
+    }, [projectOptions.map((project) => project.key).join("|")]);
+
+    const folderLabel = (row) => text(row.folder || "Unsorted Root", "Unsorted Root");
+    const speakerForRow = (row) => speakerByFile[row.name] || folderSpeakers[folderLabel(row)] || "Speaker_0";
+    const updateSpeakerForFile = (name, speaker) => {
+      setSpeakerByFile((current) => ({ ...current, [name]: speaker }));
+    };
+    const updateSpeakerForFolder = (folderKey, speaker) => {
+      setFolderSpeakers((current) => ({ ...current, [folderKey]: speaker }));
+      setSpeakerByFile((current) => {
+        const next = { ...current };
+        rows.filter((row) => folderLabel(row) === folderKey).forEach((row) => {
+          next[row.name] = speaker;
+        });
+        return next;
+      });
+    };
+    const toggleRow = (name, checked) => {
+      setSelected((current) => {
+        const next = new Set(current);
+        if (checked) {
+          next.add(name);
+        } else {
+          next.delete(name);
+        }
+        return next;
+      });
+    };
+    const selectAll = () => setSelected(new Set(rows.map((row) => row.name)));
+    const clearSelected = () => setSelected(new Set());
+    const selectedRows = rows.filter((row) => selected.has(row.name));
+    const projectNames = Array.from(new Set((ctx.projects || []).map((project) => project.slug).filter(Boolean))).sort();
+    const defaultProject = projectNames[0] || "stitched-site-training";
+    const folderStats = (folderKey) => {
+      const folderRows = rows.filter((row) => folderLabel(row) === folderKey);
+      const selectedCount = folderRows.filter((row) => selected.has(row.name)).length;
+      return { total: folderRows.length, selected: selectedCount };
+    };
+    const setFolderSelected = (folderKey, checked) => {
+      setSelected((current) => {
+        const next = new Set(current);
+        rows.filter((row) => folderLabel(row) === folderKey).forEach((row) => {
+          if (checked) {
+            next.add(row.name);
+          } else {
+            next.delete(row.name);
+          }
+        });
+        return next;
+      });
+    };
+    const toggleTrainingTarget = (target, checked) => {
+      setTrainingTargets((current) => {
+        const next = new Set(current);
+        if (checked) {
+          next.add(target);
+        } else {
+          next.delete(target);
+        }
+        return next;
+      });
+    };
+    const selectedTrainingTargetCount = addToTraining ? trainingTargets.size + (includeManualTarget ? 1 : 0) : 0;
+
+    return h(
+      React.Fragment,
+      null,
+      h(
+        "article",
+        { className: "panel stitching-builder-panel" },
+        h(ProcessSteps, { tone: "warm", steps: ["Assign speaker labels", "Randomize selected clips", "Inspect RTTM timing"] }),
+        projectNames.length ? h("datalist", { id: "stitching_project_names" }, projectNames.map((name) => h("option", { key: name, value: name }))) : null,
+        h(
+          "div",
+          { className: "summary-grid" },
+          h(SummaryCard, { title: "Audio Available" }, h("p", null, h("strong", null, rows.length), " file(s)")),
+          h(SummaryCard, { title: "Selected" }, h("p", null, h("strong", null, selected.size), " clip(s)"), h("p", { className: "row-note" }, "Each selected clip becomes one RTTM segment.")),
+          h(SummaryCard, { title: "Stitched Outputs" }, h("p", null, h("strong", null, summary.total || 0), " run(s)"), h("p", { className: "row-note" }, `${summary.training_added || 0} added to training`)),
+          h(SummaryCard, { title: "Latest Status" }, stitchedRows[0] ? h(React.Fragment, null, h("p", null, h(StatusPill, { status: stitchedRows[0].status || "unknown" })), h("p", { className: "row-note" }, stitchedRows[0].name)) : h("p", null, "No run yet."))
+        ),
+        h(
+          "form",
+          {
+            method: "post",
+            action: routes.stitchAudio,
+            "data-loading-message": "Creating stitched WAV and RTTM...",
+            onSubmit: (event) => {
+              if (selected.size < 2) {
+                event.preventDefault();
+                window.alert("Select at least two audio files to stitch.");
+                return;
+              }
+              const manualProjectField = event.currentTarget.elements.namedItem("project_name");
+              const manualProjectName = manualProjectField && "value" in manualProjectField ? text(manualProjectField.value).trim() : "";
+              if (addToTraining && trainingTargets.size === 0 && (!includeManualTarget || !manualProjectName)) {
+                event.preventDefault();
+                window.alert("Choose at least one existing fine-tuning project or enter an additional project name.");
+              }
+            },
+          },
+          selectedRows.flatMap((row) => [
+            h("input", { key: `${row.name}-audio`, type: "hidden", name: "selected_audio", value: row.name }),
+            h("input", { key: `${row.name}-speaker`, type: "hidden", name: "speaker_labels", value: speakerForRow(row) }),
+          ]),
+          addToTraining ? Array.from(trainingTargets).map((target) => h("input", { key: `training-${target}`, type: "hidden", name: "training_targets", value: target, readOnly: true })) : null,
+          h(
+            "div",
+            { className: "inline-3" },
+            h(Field, { id: "stitch_name", label: "Output name", note: "Files are written under stitched/<run>/." }, h(TextInput, { id: "stitch_name", name: "stitch_name", placeholder: "child-vs-adult-randomized" })),
+            h(Field, { id: "stitch_seed", label: "Random seed", note: "Leave blank for a new random order." }, h(TextInput, { id: "stitch_seed", name: "stitch_seed", placeholder: "optional" })),
+            h(
+              "div",
+              { className: "stitching-toggles" },
+              h("label", { className: "checkbox-row" }, h("input", { type: "checkbox", name: "add_to_training", checked: addToTraining, onChange: (event) => setAddToTraining(event.target.checked) }), " Add stitched pair to training"),
+              h("label", { className: "checkbox-row" }, h("input", { type: "checkbox", name: "stitch_use_slurm" }), " Use Slurm for this stitch")
+            )
+          ),
+          h(
+            "details",
+            { className: "details-box compact-details", open: true },
+            h("summary", null, "Fine-Tuning Targets"),
+            h(
+              "div",
+              null,
+              projectOptions.length
+                ? h(
+                    React.Fragment,
+                    null,
+                    h("div", { className: "selection-toolbar compact-toolbar" }, h("button", { className: "secondary", type: "button", disabled: !addToTraining, onClick: () => setTrainingTargets(new Set(projectOptions.map((project) => project.key))) }, "Select all existing"), h("button", { className: "ghost", type: "button", disabled: !addToTraining || trainingTargets.size === 0, onClick: () => setTrainingTargets(new Set()) }, "Clear existing"), h("span", { className: "field-status" }, `${selectedTrainingTargetCount} target(s) selected`)),
+                    h(
+                      "div",
+                      { className: "training-target-checklist" },
+                      projectOptions.map((project) =>
+                        h(
+                          "label",
+                          { key: project.key, className: "checkbox-row file-choice" },
+                          h("input", {
+                            type: "checkbox",
+                            checked: trainingTargets.has(project.key),
+                            disabled: !addToTraining,
+                            onChange: (event) => toggleTrainingTarget(project.key, event.target.checked),
+                          }),
+                          h("span", null, h("strong", null, project.label), h("small", null, `${project.sampleCount} sample(s)`))
+                        )
+                      )
+                    )
+                  )
+                : h("p", { className: "field-status" }, "No existing fine-tuning projects yet. Use the additional target below to create one when the stitched sample is saved."),
+              h(
+                "label",
+                { className: "checkbox-row" },
+                h("input", { type: "checkbox", checked: includeManualTarget, disabled: !addToTraining, onChange: (event) => setIncludeManualTarget(event.target.checked) }),
+                projectOptions.length ? " Also send to another or new project" : " Send to new project"
+              ),
+              includeManualTarget
+                ? h(
+                    "div",
+                    { className: "inline" },
+                    h(Field, { id: "stitch_backend", label: "Additional backend" }, h(SelectInput, { id: "stitch_backend", name: "fine_tuning_backend", defaultValue: "pyannote", extra: { disabled: !addToTraining } }, h(Option, { value: "pyannote" }, "pyannote"), h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "both" }, "NeMo + pyannote"))),
+                    h(Field, { id: "stitch_project_name", label: "Additional project name", note: "Can be an existing slug or a new project." }, h("input", { id: "stitch_project_name", name: "project_name", list: "stitching_project_names", defaultValue: projectOptions.length ? "" : defaultProject, placeholder: "stitched-site-training", disabled: !addToTraining }))
+                  )
+                : null
+            )
+          ),
+          folderChoices.length
+            ? h(
+                "details",
+                { className: "details-box compact-details", open: true },
+                h("summary", null, "Speaker Labels By Folder"),
+                h(
+                  "div",
+                  { className: "speaker-assignment-grid" },
+                  folderChoices.map((folder) => {
+                    const stats = folderStats(folder.key);
+                    return h(
+                      "div",
+                      { key: folder.key, className: "folder-stitch-control" },
+                      h(
+                        Field,
+                        { id: `folder_speaker_${dialogIdFor(folder.key)}`, label: `${folder.label} (${folder.count})` },
+                        h("input", {
+                          id: `folder_speaker_${dialogIdFor(folder.key)}`,
+                          type: "text",
+                          value: folderSpeakers[folder.key] || "Speaker_0",
+                          onChange: (event) => updateSpeakerForFolder(folder.key, event.target.value),
+                        })
+                      ),
+                      h("p", { className: "field-status" }, `${stats.selected} of ${stats.total} file(s) selected`),
+                      h(
+                        "div",
+                        { className: "button-row compact-toolbar" },
+                        h("button", { className: "secondary", type: "button", onClick: () => setFolderSelected(folder.key, true), disabled: stats.total > 0 && stats.selected === stats.total }, "Select Folder"),
+                        h("button", { className: "ghost", type: "button", onClick: () => setFolderSelected(folder.key, false), disabled: stats.selected === 0 }, "Deselect Folder")
+                      )
+                    );
+                  })
+                )
+              )
+            : null,
+          h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", onClick: selectAll }, "Select all"), h("button", { className: "ghost", type: "button", onClick: clearSelected }, "Clear"), h("span", { className: "field-status" }, `${selected.size} file(s) selected`)),
+          h(DataTable, {
+            className: "compact-table stitching-audio-table",
+            headers: ["Select", "#", "Folder", "Audio File", "Speaker In RTTM"],
+            rows,
+            emptyText: h("div", { className: "empty-state" }, h("strong", null, "No source audio files yet."), "Upload files in Media Library or convert YouTube links first."),
+            renderRow: (row, index) =>
+              h(
+                "tr",
+                { key: row.name, className: selected.has(row.name) ? "is-selected" : "" },
+                h("td", null, h("input", { type: "checkbox", checked: selected.has(row.name), "data-check-group": "stitch-audio", onChange: (event) => toggleRow(row.name, event.target.checked) })),
+                h("td", null, index + 1),
+                h("td", null, folderLabel(row)),
+                h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), h("p", { className: "row-note" }, row.name)),
+                h("td", null, h("input", { type: "text", value: speakerForRow(row), onChange: (event) => updateSpeakerForFile(row.name, event.target.value), "aria-label": `Speaker label for ${row.name}` }))
+              ),
+          }),
+          h("p", { className: "field-status" }, selected.size, " file(s) selected for stitching."),
+          h("div", { className: "button-row" }, h("button", { type: "submit", disabled: selected.size < 2 }, "Randomize And Stitch Selected"))
+        )
+      ),
+      h(
+        "article",
+        { className: "panel" },
+        h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Stitched Outputs"), h("p", null, "Open Inspect to verify segment start/end times against the stitched WAV and review page."))),
+        h(StitchedRunsTable, { rows: stitchedRows })
+      ),
+      h(ClusterQueuePanel, { title: "Cluster Queue" })
     );
   }
 
@@ -2798,7 +3194,6 @@
       return row.includeTranscript === true;
     });
     const [issueQuestions, setIssueQuestions] = React.useState(row.issueQuestions || "");
-    const [selectedModelKey, setSelectedModelKey] = React.useState("");
     const [autoSaveStatus, setAutoSaveStatus] = React.useState({ state: "idle", at: "" });
     const targetOptions = React.useMemo(() => fineTunedTrainingTargetOptions(ctx.projects || []), []);
     const initialTarget = React.useMemo(() => {
@@ -2815,8 +3210,6 @@
     const [newTargetName, setNewTargetName] = React.useState(row.projectName || ctx.trainingLabels?.defaultProjectName || "uploaded-site-training");
     const [queueTraining, setQueueTraining] = React.useState(true);
     const [trainingName, setTrainingName] = React.useState("");
-    const doneStorageKey = `trainingLabelDoneRows.v1.${row.name || row.fileName || "unknown"}`;
-    const [doneRows, setDoneRows] = React.useState(() => readDoneRows(doneStorageKey));
     const [audioStatus, setAudioStatus] = React.useState({ currentTime: 0, duration: 0, paused: true });
     const trainingNameId = `label_training_name_${suffix}`;
     const audioRef = React.useRef(null);
@@ -2855,10 +3248,6 @@
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
-
-    React.useEffect(() => {
-      writeDoneRows(doneStorageKey, doneRows);
-    }, [doneRows, doneStorageKey]);
 
     React.useEffect(() => {
       const audio = audioRef.current;
@@ -3052,54 +3441,6 @@
       }
     }
 
-    function readDoneRows(storageKey) {
-      try {
-        const raw = window.localStorage.getItem(storageKey);
-        if (!raw) return new Set();
-        const parsed = JSON.parse(raw);
-        return new Set(Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : []);
-      } catch (_error) {
-        return new Set();
-      }
-    }
-
-    function writeDoneRows(storageKey, rows) {
-      try {
-        window.localStorage.setItem(storageKey, JSON.stringify(Array.from(rows || [])));
-      } catch (_error) {}
-    }
-
-    function doneIdentityForSegment(segment) {
-      if (!segment) return "";
-      const start = secondsForLabelInput(segment.start) || text(segment.start).trim();
-      const end = secondsForLabelInput(segment.end) || text(segment.end).trim();
-      const speaker = text(segment.speaker).trim();
-      if (!start && !end && !speaker) return "";
-      return `${start}|${end}|${speaker}`;
-    }
-
-    function segmentIsDone(segment) {
-      const identity = doneIdentityForSegment(segment);
-      return Boolean(identity && doneRows.has(identity));
-    }
-
-    function toggleSegmentDone(segment) {
-      const identity = doneIdentityForSegment(segment);
-      if (!identity || !labelEditorRowIsValid(segment)) {
-        window.alert("Fill in a valid start, end, and speaker before marking the row done.");
-        return;
-      }
-      setDoneRows((current) => {
-        const next = new Set(current);
-        if (next.has(identity)) {
-          next.delete(identity);
-        } else {
-          next.add(identity);
-        }
-        return next;
-      });
-    }
-
     function clearSegmentStopHandler() {
       const audio = audioRef.current;
       if (audio && stopHandlerRef.current) {
@@ -3142,17 +3483,6 @@
         return;
       }
       syncAudioStatusNow();
-    }
-
-    function appendTranscriptToRows(value) {
-      const nextTranscript = transcriptText ? `${transcriptText}\n\n${value}` : value;
-      setTranscriptText(nextTranscript);
-      setSegmentRows((currentRows) => labelEditorRowsWithDialogue(currentRows, nextTranscript));
-    }
-
-    function replaceSegmentRows(rawSegments) {
-      const parsedRows = parseLabelSegmentRows(rawSegments);
-      setSegmentRows(parsedRows.length ? parsedRows : [makeLabelEditorRow()]);
     }
 
     function updateSegmentRow(rowId, updates) {
@@ -3321,14 +3651,9 @@
             h("h3", { className: "label-audio-title" }, "Audio file is not on disk."),
             h("p", { className: "row-note" }, "The WAV may have been moved or deleted. Re-upload it from the Media Library to label.")
           ),
-      h(LabelSourcePicker, {
-        row,
-        selectedModelKey,
-        onSelectedModelKeyChange: setSelectedModelKey,
-        onUseSegments: replaceSegmentRows,
-        onUseTranscript: appendTranscriptToRows,
-        pickerId: `label-dialog-${suffix}`,
-      }),
+      // Diarization-model presets used to live here (LabelSourcePicker). Pulled
+      // out so every new file starts with empty Start/End fields and the user
+      // commits to typing each timestamp, instead of accepting the model's word.
       h(
         "section",
         { className: "label-training-target" },
@@ -3425,14 +3750,13 @@
               "tbody",
               null,
               segmentRows.map((segment, index) => {
-                const isDone = segmentIsDone(segment);
                 return h(
                   "tr",
                   {
                     key: segment.id,
                     "data-label-editor-row": "true",
                     "data-label-row-id": segment.id,
-                    className: classNames(labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment) ? "needs-work" : "", isDone && "is-done"),
+                    className: classNames(labelEditorRowHasAnyValue(segment) && !labelEditorRowIsValid(segment) ? "needs-work" : ""),
                     onDragOver: (event) => event.preventDefault(),
                     onDrop: (event) => {
                       event.preventDefault();
@@ -3479,7 +3803,6 @@
                       "div",
                       { className: "label-editor-actions" },
                       h("button", { className: "secondary", type: "button", onClick: () => playSegmentRow(segment), disabled: !row.audioHref || !labelEditorRowIsValid(segment) }, "Listen"),
-                      h("button", { className: classNames("secondary label-done-button", isDone && "is-on"), type: "button", onClick: () => toggleSegmentDone(segment), "aria-pressed": isDone ? "true" : "false" }, isDone ? "Done" : "Mark Done"),
                       h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, -1), disabled: index === 0 }, "Up"),
                       h("button", { className: "ghost", type: "button", onClick: () => moveSegmentRow(segment.id, 1), disabled: index === segmentRows.length - 1 }, "Down"),
                       h("button", { className: "ghost danger", type: "button", onClick: () => deleteSegmentRow(segment.id) }, "Delete")
@@ -4318,6 +4641,750 @@
     );
   }
 
+  // Maps DER (already scaled to 0-100 percent) to a coarse quality bucket so
+  // the CSS can paint a green/yellow/red pill. Thresholds are by-eye, but they
+  // help spot outliers way faster than scanning a column of numbers.
+  function derQualityClass(percent) {
+    if (!Number.isFinite(percent)) return "";
+    if (percent <= 12) return "good";
+    if (percent <= 25) return "warn";
+    return "bad";
+  }
+
+  function describeRunOption(run) {
+    if (!run) return "";
+    const kindBadge = run.modelKind === "fine_tuned" ? " [fine-tuned]" : run.modelKind === "default" ? " [base]" : "";
+    return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} — ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
+  }
+
+  function DerCalculatorPanel() {
+    // Model: pick a reference (hand labels OR a diarization run), then pick
+    // one or more "hypothesis" runs to score against it. Same control flow
+    // covers single-model DER, side-by-side DER vs labels, and pairwise
+    // model-vs-model comparisons. Any saved diarization run — base or
+    // fine-tuned — can be the reference or a hypothesis.
+    const diarization = ctx.diarization || {};
+    const runs = Array.isArray(diarization.runsForCompare) ? diarization.runsForCompare : [];
+    const evaluable = Array.isArray(diarization.evaluableFiles) ? diarization.evaluableFiles : [];
+    const labelHref = navItems.find((item) => item.path === "/training-labels")?.href || "/training-labels";
+
+    const initialReferenceSource = evaluable.length > 0 ? "labels" : "run";
+    const [referenceSource, setReferenceSource] = React.useState(initialReferenceSource);
+    const [referenceRunPath, setReferenceRunPath] = React.useState(runs[0]?.path || "");
+    const [selectedModelPaths, setSelectedModelPaths] = React.useState(() => {
+      // Default selection: the first run (or two, when more than one is
+      // available) so the panel is usable in one click. We exclude whatever
+      // path is sitting in the reference dropdown.
+      const initial = new Set();
+      const refPath = runs[0]?.path || "";
+      runs.forEach((run, index) => {
+        if (run.path === refPath && initialReferenceSource === "run") return;
+        if (initial.size < 2) initial.add(run.path);
+      });
+      return initial;
+    });
+    const [selectedAudio, setSelectedAudio] = React.useState(() => new Set());
+    const [fileFilter, setFileFilter] = React.useState("");
+    const [status, setStatus] = React.useState({ state: "idle", error: "", payload: null });
+
+    const usingLabelsReference = referenceSource === "labels";
+    const referenceRun = !usingLabelsReference ? runs.find((row) => row.path === referenceRunPath) || null : null;
+
+    // Drop the chosen reference run from the model picker so the user can't
+    // accidentally compare a run to itself.
+    const eligibleModelRuns = runs.filter((run) => usingLabelsReference || run.path !== referenceRunPath);
+
+    React.useEffect(() => {
+      // When the reference run changes, scrub it from the selection set so
+      // the submit doesn't quietly drop it server-side.
+      setSelectedModelPaths((current) => {
+        if (usingLabelsReference) return current;
+        if (!current.has(referenceRunPath)) return current;
+        const next = new Set(current);
+        next.delete(referenceRunPath);
+        return next;
+      });
+    }, [usingLabelsReference, referenceRunPath]);
+
+    React.useEffect(() => {
+      // Switching to labels mode shouldn't keep stale model picks if labels
+      // can't reach those files; the file effect below will further trim.
+      if (referenceSource === "labels" && evaluable.length === 0) {
+        setReferenceSource("run");
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [evaluable.length]);
+
+    function describeRunInline(run) {
+      if (!run) return "";
+      const kindBadge = run.modelKind === "fine_tuned" ? " [fine-tuned]" : run.modelKind === "default" ? " [base]" : "";
+      return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} — ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
+    }
+
+    const selectedModelRuns = eligibleModelRuns.filter((run) => selectedModelPaths.has(run.path));
+    const referenceRunFiles = !usingLabelsReference && referenceRun ? new Set(referenceRun.audioFiles || []) : null;
+    const labelFileNames = new Set(evaluable.map((entry) => entry.name));
+
+    // Candidate files = all completed-label audios (labels mode) OR every
+    // audio that the reference run has an SRT for (model-as-reference mode).
+    // Each candidate is annotated with which selected models actually have
+    // an SRT so the file picker can grey out fully-unscoreable files.
+    const candidateEntries = (usingLabelsReference
+      ? evaluable.map((entry) => ({ name: entry.name, fileName: entry.fileName }))
+      : (referenceRun?.audioFiles || []).map((name) => ({
+          name,
+          fileName: name.includes("/") ? name.split("/").pop() : name,
+        }))
+    ).map((entry) => {
+      const presentInModels = selectedModelRuns.filter((run) => (run.audioFiles || []).includes(entry.name));
+      return {
+        ...entry,
+        modelHits: presentInModels.length,
+        modelTotal: selectedModelRuns.length,
+      };
+    });
+
+    const filterTokens = fileFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matchesFilter = (entry) => {
+      if (!filterTokens.length) return true;
+      const haystack = `${entry.name || ""} ${entry.fileName || ""}`.toLowerCase();
+      return filterTokens.every((token) => haystack.includes(token));
+    };
+
+    const visibleEntries = candidateEntries.filter(matchesFilter);
+    const availableCount = candidateEntries.filter((entry) => entry.modelHits > 0).length;
+
+    React.useEffect(() => {
+      // Clean up audio selections that no longer apply when the reference
+      // source / reference run / model picks change.
+      setSelectedAudio((current) => {
+        const allowed = new Set(candidateEntries.map((entry) => entry.name));
+        const next = new Set();
+        current.forEach((name) => {
+          if (allowed.has(name)) next.add(name);
+        });
+        return next;
+      });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [referenceSource, referenceRunPath, selectedModelPaths.size]);
+
+    function toggleModel(path) {
+      setSelectedModelPaths((current) => {
+        const next = new Set(current);
+        if (next.has(path)) {
+          next.delete(path);
+        } else {
+          next.add(path);
+        }
+        return next;
+      });
+    }
+
+    function selectAllModels() {
+      setSelectedModelPaths(new Set(eligibleModelRuns.map((run) => run.path)));
+    }
+
+    function clearAllModels() {
+      setSelectedModelPaths(new Set());
+    }
+
+    function toggleAudio(name) {
+      setSelectedAudio((current) => {
+        const next = new Set(current);
+        if (next.has(name)) {
+          next.delete(name);
+        } else {
+          next.add(name);
+        }
+        return next;
+      });
+    }
+
+    function selectAvailableAudio() {
+      setSelectedAudio((current) => {
+        const next = new Set(current);
+        visibleEntries.forEach((entry) => {
+          if (entry.modelHits > 0) next.add(entry.name);
+        });
+        return next;
+      });
+    }
+
+    function clearAudioSelection() {
+      setSelectedAudio(new Set());
+    }
+
+    function runScoring() {
+      if (!routes.fineTuneCompareRuns) {
+        setStatus({ state: "error", error: "Compare endpoint isn't configured for this build.", payload: null });
+        return;
+      }
+      if (!usingLabelsReference && !referenceRunPath) {
+        setStatus({ state: "error", error: "Pick a model run to use as the reference.", payload: null });
+        return;
+      }
+      if (selectedModelPaths.size === 0) {
+        setStatus({ state: "error", error: "Pick at least one model run to compare against the reference.", payload: null });
+        return;
+      }
+      if (selectedAudio.size === 0) {
+        setStatus({ state: "error", error: "Pick at least one audio file to score.", payload: null });
+        return;
+      }
+      const params = new URLSearchParams();
+      params.set("reference_source", referenceSource);
+      if (!usingLabelsReference) params.set("reference_run", referenceRunPath);
+      Array.from(selectedModelPaths).forEach((path) => params.append("model", path));
+      Array.from(selectedAudio).forEach((name) => params.append("audio", name));
+      setStatus({ state: "loading", error: "", payload: null });
+      window
+        .fetch(`${routes.fineTuneCompareRuns}?${params.toString()}`, {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        })
+        .then((response) => response.json().then((payload) => ({ ok: response.ok, payload })))
+        .then(({ ok, payload }) => {
+          if (!ok) {
+            const message = payload && payload.error ? payload.error : "Scoring request failed.";
+            setStatus({ state: "error", error: message, payload: null });
+            return;
+          }
+          setStatus({ state: "success", error: "", payload });
+        })
+        .catch((err) => {
+          setStatus({ state: "error", error: String((err && err.message) || err), payload: null });
+        });
+    }
+
+    function modelKindBadge(run) {
+      if (!run) return null;
+      if (run.modelKind === "fine_tuned") return h("span", { className: "der-kind-pill der-kind-tuned" }, "fine-tuned");
+      if (run.modelKind === "default") return h("span", { className: "der-kind-pill der-kind-base" }, "base");
+      return null;
+    }
+
+    function modelHeading(run) {
+      if (!run) return "Model";
+      return h(
+        React.Fragment,
+        null,
+        h("strong", null, run.modelLabel || run.backendLabel || run.backend),
+        modelKindBadge(run),
+        h("span", { className: "der-run-name" }, run.name)
+      );
+    }
+
+    function derPill(percent) {
+      const display = Number.isFinite(percent) ? `${formatNumber(percent, 2)}%` : "n/a";
+      return h("span", { className: classNames("der-pill", derQualityClass(percent)) }, display);
+    }
+
+    function metricsBlock(metrics) {
+      if (!metrics) return h("div", { className: "der-metric-block empty" }, "Not scored");
+      if (metrics.error) return h("div", { className: "der-metric-block error" }, metrics.error);
+      const derPercent = (metrics.der || 0) * 100;
+      const jerPercent = (metrics.jer || 0) * 100;
+      return h(
+        "div",
+        { className: "der-metric-block" },
+        h(
+          "div",
+          { className: "der-metric-headline" },
+          h("span", { className: "der-metric-label" }, "DER"),
+          derPill(derPercent)
+        ),
+        h(
+          "dl",
+          { className: "der-metric-grid" },
+          h("dt", null, "JER"),
+          h("dd", null, formatPercent(jerPercent, 2)),
+          h("dt", null, "Miss"),
+          h("dd", null, `${formatNumber(metrics.miss_seconds || 0, 2)} s`),
+          h("dt", null, "False alarm"),
+          h("dd", null, `${formatNumber(metrics.false_alarm_seconds || 0, 2)} s`),
+          h("dt", null, "Confusion"),
+          h("dd", null, `${formatNumber(metrics.confusion_seconds || 0, 2)} s`),
+          h("dt", null, "Speakers"),
+          h("dd", null, `ref ${metrics.reference_speaker_count} · hyp ${metrics.hypothesis_speaker_count} (Δ ${metrics.speaker_count_diff})`)
+        )
+      );
+    }
+
+    function summaryCard(modelEntry, avg, bestDer) {
+      const headerLabel = modelEntry.modelLabel || modelEntry.backendLabel || modelEntry.name;
+      if (!avg) {
+        return h(
+          "div",
+          { className: "der-summary-card empty", key: modelEntry.key },
+          h("p", { className: "der-summary-label hyp" }, "Compared model"),
+          h("p", { className: "der-summary-run" }, headerLabel),
+          h("p", { className: "row-note" }, modelEntry.name),
+          h("p", { className: "row-note" }, "No files scored.")
+        );
+      }
+      const der = avg.weighted_der === null || avg.weighted_der === undefined ? null : avg.weighted_der * 100;
+      const jer = avg.macro_jer * 100;
+      const delta = bestDer !== null && bestDer !== undefined && der !== null ? der - bestDer : null;
+      const isBest = der !== null && bestDer !== null && Math.abs(der - bestDer) < 0.001;
+      return h(
+        "div",
+        { className: classNames("der-summary-card", isBest && "is-best"), key: modelEntry.key },
+        h(
+          "p",
+          { className: "der-summary-label hyp" },
+          "Compared model",
+          isBest ? h("span", { className: "der-best-badge" }, "Best DER") : null
+        ),
+        h("p", { className: "der-summary-run" }, headerLabel),
+        h("p", { className: "row-note" }, modelEntry.name),
+        h("div", { className: "der-summary-headline" }, derPill(der)),
+        h(
+          "dl",
+          { className: "der-summary-grid" },
+          h("dt", null, "Macro JER"),
+          h("dd", null, formatPercent(jer, 2)),
+          h("dt", null, "Files scored / skipped"),
+          h("dd", null, `${avg.files_scored} / ${avg.files_skipped}`),
+          h("dt", null, "Reference speech"),
+          h("dd", null, formatDuration(avg.reference_speech_seconds || 0)),
+          h("dt", null, "Miss / FA / Conf"),
+          h("dd", null, `${formatNumber(avg.miss_seconds || 0, 2)} / ${formatNumber(avg.false_alarm_seconds || 0, 2)} / ${formatNumber(avg.confusion_seconds || 0, 2)} s`)
+        ),
+        delta !== null && !isBest
+          ? h(
+              "p",
+              { className: classNames("der-summary-delta", "bad") },
+              `${formatNumber(delta, 2)} pts behind best`
+            )
+          : null
+      );
+    }
+
+    function bestModelKey(metricsByKey, modelEntries) {
+      let bestKey = null;
+      let bestDer = Infinity;
+      modelEntries.forEach((entry) => {
+        const m = metricsByKey?.[entry.key];
+        if (!m || m.error) return;
+        if (m.der < bestDer) {
+          bestDer = m.der;
+          bestKey = entry.key;
+        }
+      });
+      return { bestKey, bestDer: bestKey ? bestDer : null };
+    }
+
+    const result = status.payload;
+    const filesRows = result?.files || [];
+    const averages = result?.averages || {};
+    const responseModels = result?.models || [];
+    const responseModelLookup = new Map(responseModels.map((entry) => [entry.key, entry]));
+    const responseModelMeta = responseModels.map((entry) => {
+      const run = runs.find((r) => r.path === entry.path) || null;
+      return {
+        ...entry,
+        modelLabel: run?.modelLabel || "",
+        modelKind: run?.modelKind || "",
+        backendLabel: run?.backendLabel || "",
+      };
+    });
+
+    // Build a "best weighted DER among the result's models" so summary cards
+    // can call out the leader and show the gap to it.
+    let bestOverallDer = null;
+    let bestOverallKey = null;
+    responseModels.forEach((entry) => {
+      const avg = averages[entry.key];
+      if (!avg || avg.weighted_der === null || avg.weighted_der === undefined) return;
+      const der = avg.weighted_der * 100;
+      if (bestOverallDer === null || der < bestOverallDer) {
+        bestOverallDer = der;
+        bestOverallKey = entry.key;
+      }
+    });
+
+    return h(
+      "article",
+      { className: "panel", id: "fine-tune-der" },
+      h(
+        "div",
+        { className: "panel-head" },
+        h(
+          "div",
+          null,
+          h("h2", null, "DER Calculator"),
+          h(
+            "p",
+            null,
+            "Pick a reference (hand-labeled RTTMs or another diarization run), then check off one or more model runs to compare against it. Any saved run is fair game — base NeMo, base pyannote, fine-tuned checkpoints, or a mix. Per-file and weighted-overall DER, JER, miss / false alarm / speaker confusion are reported for each model."
+          )
+        )
+      ),
+      runs.length === 0
+        ? h("p", { className: "row-note" }, "No diarization runs with SRT outputs are available yet. Run diarization first, then come back here.")
+        : h(
+              React.Fragment,
+              null,
+              // ---- REFERENCE section ----
+              h(
+                "section",
+                { className: "subpanel der-reference-section" },
+                h(
+                  "div",
+                  { className: "panel-head compact-head" },
+                  h(
+                    "div",
+                    null,
+                    h(
+                      "h3",
+                      null,
+                      h("span", { className: "der-role-pill ref" }, "REFERENCE"),
+                      " Ground truth to score against"
+                    ),
+                    h("p", { className: "row-note" }, "Lower DER vs. this reference = closer to the reference. With hand labels this is true diarization error; with another model as reference it's an agreement metric.")
+                  )
+                ),
+                h(
+                  "div",
+                  { className: "der-reference-options" },
+                  h(
+                    "label",
+                    { className: classNames("der-reference-option", usingLabelsReference && "is-selected", evaluable.length === 0 && "is-disabled") },
+                    h("input", {
+                      type: "radio",
+                      name: "der-reference",
+                      value: "labels",
+                      checked: usingLabelsReference,
+                      disabled: evaluable.length === 0,
+                      onChange: () => setReferenceSource("labels"),
+                    }),
+                    h("span", { className: "der-reference-title" }, "Hand-labeled RTTMs (true DER)"),
+                    h(
+                      "span",
+                      { className: "der-reference-detail" },
+                      evaluable.length > 0
+                        ? `${evaluable.length} file${evaluable.length === 1 ? "" : "s"} with completed labels available.`
+                        : h(
+                            React.Fragment,
+                            null,
+                            "No completed training labels yet. ",
+                            h("a", { href: labelHref }, "Open Training Labels"),
+                            " to finish at least one label."
+                          )
+                    )
+                  ),
+                  h(
+                    "label",
+                    { className: classNames("der-reference-option", !usingLabelsReference && "is-selected") },
+                    h("input", {
+                      type: "radio",
+                      name: "der-reference",
+                      value: "run",
+                      checked: !usingLabelsReference,
+                      onChange: () => setReferenceSource("run"),
+                    }),
+                    h("span", { className: "der-reference-title" }, "A diarization run (model-as-reference / agreement)"),
+                    h("span", { className: "der-reference-detail" }, "No labels needed. The chosen run's SRTs are treated as ground truth; results show how far the other models drift from it.")
+                  )
+                ),
+                !usingLabelsReference
+                  ? h(
+                      "div",
+                      { className: "der-reference-picker" },
+                      h(
+                        Field,
+                        { id: "der_reference_run", label: "Reference run", note: referenceRun ? `${referenceRun.modelLabel || referenceRun.backendLabel} · ${referenceRun.fileCount} file${referenceRun.fileCount === 1 ? "" : "s"} · last run ${referenceRun.lastRun || "unknown"}` : null },
+                        h(
+                          "select",
+                          { id: "der_reference_run", value: referenceRunPath, onChange: (event) => setReferenceRunPath(event.target.value) },
+                          runs.map((run) => h("option", { key: run.path, value: run.path }, describeRunOption(run)))
+                        )
+                      )
+                    )
+                  : null,
+                usingLabelsReference
+                  ? h(
+                      "p",
+                      { className: "der-reference-summary" },
+                      h("span", { className: "der-role-pill ref small" }, "REFERENCE"),
+                      ` Hand-labeled RTTMs · ${evaluable.length} file${evaluable.length === 1 ? "" : "s"} ready.`
+                    )
+                  : referenceRun
+                    ? h(
+                        "p",
+                        { className: "der-reference-summary" },
+                        h("span", { className: "der-role-pill ref small" }, "REFERENCE"),
+                        ` ${referenceRun.modelLabel || referenceRun.backendLabel} — `,
+                        h("span", { className: "mono" }, referenceRun.name)
+                      )
+                    : null
+              ),
+              // ---- COMPARED MODELS section ----
+              h(
+                "section",
+                { className: "subpanel der-models-section" },
+                h(
+                  "div",
+                  { className: "panel-head compact-head" },
+                  h(
+                    "div",
+                    null,
+                    h(
+                      "h3",
+                      null,
+                      h("span", { className: "der-role-pill hyp" }, "COMPARED"),
+                      ` Models to score against the reference (${selectedModelPaths.size} of ${eligibleModelRuns.length} selected)`
+                    ),
+                    h("p", { className: "row-note" }, "Pick one or more runs. Each gets its own column in the results. The reference run itself is hidden from this list so you can't accidentally compare it to itself.")
+                  ),
+                  h(
+                    "div",
+                    { className: "button-row" },
+                    h("button", { className: "secondary", type: "button", onClick: selectAllModels }, "Select All"),
+                    h("button", { className: "ghost", type: "button", onClick: clearAllModels }, "Clear")
+                  )
+                ),
+                h(
+                  "ul",
+                  { className: "der-model-list" },
+                  eligibleModelRuns.length === 0
+                    ? h("li", { className: "der-file-empty" }, "No other runs available. You need at least one diarization run that isn't the reference.")
+                    : eligibleModelRuns.map((run) => {
+                        const checked = selectedModelPaths.has(run.path);
+                        return h(
+                          "li",
+                          { key: run.path, className: classNames("der-model-row", checked && "is-checked") },
+                          h(
+                            "label",
+                            { className: "checkbox-row" },
+                            h("input", { type: "checkbox", checked, onChange: () => toggleModel(run.path) }),
+                            h(
+                              "span",
+                              { className: "der-model-info" },
+                              h(
+                                "span",
+                                { className: "der-model-title" },
+                                h("strong", null, run.modelLabel || run.backendLabel || run.backend),
+                                modelKindBadge(run)
+                              ),
+                              h("span", { className: "der-model-subtitle" }, `${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"} · last run ${run.lastRun || "unknown"}`)
+                            )
+                          )
+                        );
+                      })
+                )
+              ),
+              // ---- FILES section ----
+              h(
+                "section",
+                { className: "subpanel" },
+                h(
+                  "div",
+                  { className: "panel-head compact-head" },
+                  h(
+                    "div",
+                    null,
+                    h("h3", null, "Files"),
+                    h(
+                      "p",
+                      { className: "row-note" },
+                      `${selectedAudio.size} of ${availableCount} available file${availableCount === 1 ? "" : "s"} selected · ${candidateEntries.length} file${candidateEntries.length === 1 ? "" : "s"} in scope.`
+                    )
+                  ),
+                  h(
+                    "div",
+                    { className: "button-row" },
+                    h("button", { className: "secondary", type: "button", onClick: selectAvailableAudio }, "Select All Available"),
+                    h("button", { className: "ghost", type: "button", onClick: clearAudioSelection }, "Clear")
+                  )
+                ),
+                h(
+                  "div",
+                  { className: "der-file-filter" },
+                  h("input", {
+                    type: "search",
+                    placeholder: "Filter files…",
+                    value: fileFilter,
+                    onChange: (event) => setFileFilter(event.target.value),
+                    "aria-label": "Filter audio files",
+                  })
+                ),
+                h(
+                  "ul",
+                  { className: "der-file-list" },
+                  visibleEntries.length === 0
+                    ? h(
+                        "li",
+                        { className: "der-file-empty" },
+                        usingLabelsReference
+                          ? "No completed-label files match that filter."
+                          : "No files match — pick a reference run with files and at least one comparison model."
+                      )
+                    : visibleEntries.map((entry) => {
+                        const inReference = usingLabelsReference || (referenceRunFiles ? referenceRunFiles.has(entry.name) : false);
+                        const available = entry.modelHits > 0 && (usingLabelsReference || inReference);
+                        const checked = selectedAudio.has(entry.name);
+                        const detailParts = [];
+                        if (usingLabelsReference) {
+                          detailParts.push(labelFileNames.has(entry.name) ? "Has hand label" : "Missing hand label");
+                        } else {
+                          detailParts.push(inReference ? "In reference run" : "Missing in reference run");
+                        }
+                        if (entry.modelTotal > 0) {
+                          detailParts.push(`Hits ${entry.modelHits}/${entry.modelTotal} compared model${entry.modelTotal === 1 ? "" : "s"}`);
+                        } else {
+                          detailParts.push("No compared models picked");
+                        }
+                        return h(
+                          "li",
+                          { key: entry.name, className: classNames("der-file-row", !available && "is-missing") },
+                          h(
+                            "label",
+                            { className: "checkbox-row" },
+                            h("input", { type: "checkbox", checked, disabled: !available, onChange: () => toggleAudio(entry.name) }),
+                            h("span", { className: "der-file-name" }, entry.fileName || entry.name),
+                            h("span", { className: "row-note" }, detailParts.join(" · "))
+                          )
+                        );
+                      })
+                )
+              ),
+              // ---- ACTION row ----
+              h(
+                "div",
+                { className: "button-row" },
+                h(
+                  "button",
+                  { className: "primary", type: "button", onClick: runScoring, disabled: status.state === "loading" },
+                  status.state === "loading"
+                    ? "Scoring…"
+                    : selectedModelPaths.size === 1
+                      ? "Calculate DER"
+                      : `Compare ${selectedModelPaths.size} Models`
+                ),
+                status.state === "error" ? h("span", { className: "form-status error" }, status.error) : null,
+                status.state === "success" ? h("span", { className: "form-status success" }, `Scored ${filesRows.length} file(s).`) : null
+              ),
+              // ---- RESULTS ----
+              status.state === "success" && result
+                ? (() => {
+                    const isPairwiseResult = result.reference?.source === "run";
+                    return h(
+                      "section",
+                      { className: "subpanel der-results", style: { marginTop: "12px" } },
+                      h("h3", null, "Results"),
+                      // Reference banner — sits above the cards so the
+                      // "what we scored against" question always has a
+                      // one-line answer that's hard to miss.
+                      h(
+                        "div",
+                        { className: "der-reference-banner" },
+                        h("span", { className: "der-role-pill ref" }, "REFERENCE"),
+                        isPairwiseResult
+                          ? h(
+                              React.Fragment,
+                              null,
+                              h("strong", null, "Diarization run"),
+                              " — ",
+                              h("span", { className: "mono" }, result.reference?.run?.name || ""),
+                              h("p", { className: "row-note" }, "Numbers measure agreement against this run, not error against ground truth.")
+                            )
+                          : h(
+                              React.Fragment,
+                              null,
+                              h("strong", null, "Hand-labeled RTTMs"),
+                              h("p", { className: "row-note" }, "True DER against the labels you saved on the Training Labels page.")
+                            )
+                      ),
+                      h(
+                        "div",
+                        { className: "der-summary-grid-cards", style: { gridTemplateColumns: `repeat(auto-fit, minmax(220px, 1fr))` } },
+                        responseModelMeta.map((entry) => summaryCard(entry, averages[entry.key], bestOverallDer))
+                      ),
+                      h(
+                        "div",
+                        { className: "table-scroll" },
+                        h(
+                          "table",
+                          { className: "der-results-table" },
+                          h(
+                            "thead",
+                            null,
+                            h(
+                              "tr",
+                              null,
+                              h("th", null, "Audio"),
+                              responseModelMeta.map((entry) =>
+                                h(
+                                  "th",
+                                  { key: `head-${entry.key}` },
+                                  h(
+                                    "div",
+                                    { className: "der-column-head" },
+                                    h("span", { className: "der-role-pill hyp small" }, "HYP"),
+                                    modelHeading(entry)
+                                  )
+                                )
+                              ),
+                              responseModelMeta.length > 1 ? h("th", null, "Best DER") : null
+                            )
+                          ),
+                          h(
+                            "tbody",
+                            null,
+                            filesRows.map((row, index) => {
+                              if (row.error) {
+                                const colspan = 1 + responseModelMeta.length + (responseModelMeta.length > 1 ? 1 : 0);
+                                return h(
+                                  "tr",
+                                  { key: `${row.audio}-${index}`, className: "der-row error" },
+                                  h("td", null, h("strong", null, row.audio)),
+                                  h("td", { className: "score-error", colSpan: colspan - 1 }, row.error)
+                                );
+                              }
+                              const { bestKey } = bestModelKey(row.metrics, responseModelMeta);
+                              const refDescription = isPairwiseResult
+                                ? `Reference SRT: ${row.reference_rttm}`
+                                : `Reference RTTM: ${row.reference_rttm}`;
+                              const bestEntry = bestKey ? responseModelLookup.get(bestKey) : null;
+                              const bestLabel = bestEntry ? (bestEntry.name || bestEntry.key) : null;
+                              return h(
+                                "tr",
+                                { key: `${row.audio}-${index}`, className: "der-row" },
+                                h(
+                                  "td",
+                                  { className: "der-audio-cell" },
+                                  h("strong", null, row.audio),
+                                  h("p", { className: "row-note" }, refDescription)
+                                ),
+                                responseModelMeta.map((entry) =>
+                                  h(
+                                    "td",
+                                    { key: `cell-${entry.key}-${index}`, className: classNames(bestKey === entry.key && "is-best-cell") },
+                                    metricsBlock(row.metrics?.[entry.key])
+                                  )
+                                ),
+                                responseModelMeta.length > 1
+                                  ? h(
+                                      "td",
+                                      { className: "der-winner-cell" },
+                                      bestLabel
+                                        ? h("span", { className: "der-winner a", title: bestLabel }, bestLabel.length > 28 ? `${bestLabel.slice(0, 25)}…` : bestLabel)
+                                        : h("span", { className: "der-winner none" }, "—")
+                                    )
+                                  : null
+                              );
+                            })
+                          )
+                        )
+                      )
+                    );
+                  })()
+                : null
+            )
+    );
+  }
+
   function FineTuningPage() {
     const preferences = ctx.preferences || {};
     const projects = ctx.projects || [];
@@ -4344,6 +5411,7 @@
         h(FineTuneCreateProjectCard, { preferences }),
         h("div", { className: "three-grid" }, h(FineTuneUploadCard, { preferences, projectNames, trainingSources: ctx.trainingSources || {} }), h(FineTunePrepareCard, { preferences, sampleProjects }), h(FineTuneLaunchCard, { preferences, preparedProjects }))
       ),
+      h(DerCalculatorPanel),
       h(
         "article",
         { className: "panel", id: "fine-tune-projects" },
@@ -4370,6 +5438,8 @@
     switch (state.currentPath) {
       case "/uploads":
         return h(UploadsPage);
+      case "/stitching":
+        return h(StitchingPage);
       case "/training-labels":
         return h(TrainingLabelsPage);
       case "/youtube":

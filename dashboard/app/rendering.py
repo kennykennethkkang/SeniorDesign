@@ -220,6 +220,8 @@ class RenderingMixin:
             audio_files = list(context.get("audio_files", []))
             context["training_label_records"] = label_records
             context["training_label_summary"] = self.training_label_summary(audio_files, label_records)
+        if effective_path == "/stitching":
+            context["stitched_summary"] = self.stitched_summary()
         if effective_path == "/diarization":
             preferences = context.get("preferences") or self.model_preferences()
             model_options = self.diarization_model_options()
@@ -250,9 +252,24 @@ class RenderingMixin:
         return self.with_prefix(path, script_name)
 
     def frontend_asset(self, relative_path: str, script_name: str) -> str:
-        """Resolve a URL for a static asset under /assets/ so templates don't need to know the prefix."""
+        """Resolve a URL for a static asset under /assets/ so templates don't need to know the prefix.
 
-        return self.with_prefix("/assets/" + quote(relative_path, safe="/"), script_name)
+        Appends an mtime-based ``?v=...`` cache buster. Cache-Control: no-store
+        usually does the job, but every so often a browser holds onto a stale
+        bundle through a refresh or two. Fingerprinting the URL itself is the
+        belt-and-braces fix — when the file changes, the URL changes, and the
+        browser has no choice but to refetch.
+        """
+
+        url = self.with_prefix("/assets/" + quote(relative_path, safe="/"), script_name)
+        try:
+            asset_path = (self.frontend_dir / relative_path).resolve()
+            asset_path.relative_to(self.frontend_dir.resolve())
+            mtime = int(asset_path.stat().st_mtime)
+        except (OSError, ValueError):
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}v={mtime}"
 
     def frontend_file_record(self, path: Path, script_name: str) -> dict[str, str]:
         """Turn a workspace Path into the flat dict the React file-table components expect."""
@@ -511,6 +528,68 @@ class RenderingMixin:
                 }
             )
         return serialized_rows
+
+    def frontend_diarization_runs_for_compare(self) -> list[dict[str, object]]:
+        """Flatten the diarization-history lookup into one row per run for the DER calculator's dropdowns.
+
+        Surfaces base models AND fine-tuned checkpoints — every run that landed
+        an SRT on disk shows up so the user can pair any two together. We tag
+        each row with ``modelKind`` ("default" / "fine_tuned" / "unknown") so
+        the UI can show a badge without re-deriving it from the model key.
+        """
+
+        option_lookup = self.diarization_model_option_lookup()
+        runs: dict[str, dict[str, object]] = {}
+        lookup = self.diarization_model_history_lookup()
+        for audio_name, per_model in lookup.items():
+            if not isinstance(per_model, dict):
+                continue
+            for record in per_model.values():
+                if not isinstance(record, dict):
+                    continue
+                run_dir = record.get("run_dir")
+                srt_path = record.get("srt_path")
+                if not isinstance(run_dir, Path):
+                    continue
+                # An SRT-on-disk check keeps half-finished or failed runs from
+                # showing up in the dropdown; you can only score what actually
+                # made it to disk.
+                if not (isinstance(srt_path, Path) and srt_path.is_file()):
+                    continue
+                key = str(run_dir)
+                model_key = str(record.get("model_key") or record.get("backend") or "")
+                option = option_lookup.get(model_key) if model_key else None
+                model_kind = str(option.get("kind") if isinstance(option, dict) else "") or "unknown"
+                bucket = runs.setdefault(
+                    key,
+                    {
+                        "path": self.describe_path(run_dir),
+                        "name": run_dir.name,
+                        "backend": str(record.get("backend", "")),
+                        "backendLabel": str(record.get("backend_label") or self.diarization_backend_label(str(record.get("backend", "")))),
+                        "modelKey": model_key,
+                        "modelLabel": str(record.get("model_label") or record.get("backend_label") or ""),
+                        "modelKind": model_kind,
+                        "lastRun": str(record.get("last_run", "")),
+                        "audioFiles": set(),
+                        "_sortKey": float(record.get("sort_key") or 0.0),
+                    },
+                )
+                bucket["audioFiles"].add(audio_name)
+                bucket["_sortKey"] = max(float(bucket["_sortKey"]), float(record.get("sort_key") or 0.0))
+
+        serialized = []
+        for entry in runs.values():
+            audio_files = sorted(entry.pop("audioFiles"))
+            sort_key = entry.pop("_sortKey")
+            entry["audioFiles"] = audio_files
+            entry["fileCount"] = len(audio_files)
+            entry["_sortKey"] = sort_key
+            serialized.append(entry)
+        serialized.sort(key=lambda row: row["_sortKey"], reverse=True)
+        for entry in serialized:
+            entry.pop("_sortKey", None)
+        return serialized
 
     def frontend_diarization_model_options(
         self,
@@ -881,6 +960,7 @@ class RenderingMixin:
             ],
         }
         preferences = context.get("preferences") or self.model_preferences()
+        stitched_rows = self.stitched_run_rows(limit=30, script_name=script_name) if current_path == "/stitching" else []
         latest = {
             key: (
                 {
@@ -923,6 +1003,8 @@ class RenderingMixin:
                 "deleteYoutubeLink": self.frontend_route("/youtube-links/delete", script_name),
                 "convertYoutube": self.frontend_route("/actions/convert-youtube", script_name),
                 "resetYoutube": self.frontend_route("/actions/reset-youtube-workspace", script_name),
+                "stitchAudio": self.frontend_route("/actions/stitch-audio", script_name),
+                "renameStitching": self.frontend_route("/stitching/rename", script_name),
                 "review": self.frontend_route("/actions/review", script_name),
                 "runDiarization": self.frontend_route("/actions/run-diarization", script_name),
                 "tests": self.frontend_route("/actions/test", script_name),
@@ -939,6 +1021,7 @@ class RenderingMixin:
                 "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
                 "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),
                 "fineTuneScoreRun": self.frontend_route("/api/fine-tuning/score-run", script_name),
+                "fineTuneCompareRuns": self.frontend_route("/api/fine-tuning/compare-runs", script_name),
                 "fineTuneAutoTrain": self.frontend_route("/fine-tuning/auto-train", script_name),
             },
             "assets": {
@@ -994,6 +1077,10 @@ class RenderingMixin:
                     "summary": context.get("training_label_summary", self.training_label_summary([], {})),
                     "defaultProjectName": DEFAULT_TRAINING_LABEL_PROJECT,
                 },
+                "stitching": {
+                    "rows": stitched_rows,
+                    "summary": context.get("stitched_summary", self.stitched_summary()),
+                },
                 "youtube": {
                     "queueRows": context.get("youtube_queue_rows", []),
                     "queueSummary": context.get("youtube_queue_summary", {}),
@@ -1022,6 +1109,19 @@ class RenderingMixin:
                             for detail in context.get("diarization_active_runs", [])
                         )
                         if run is not None
+                    ],
+                    "runsForCompare": self.frontend_diarization_runs_for_compare() if current_path == "/fine-tuning" else [],
+                    "evaluableFiles": [
+                        {
+                            "name": row.get("name", ""),
+                            "fileName": row.get("fileName", ""),
+                            "referenceRttm": str(training_label_records.get(row.get("name", ""), {}).get("training_rttm_path") or ""),
+                        }
+                        for row in training_label_rows
+                        if current_path == "/fine-tuning"
+                        and isinstance(row, dict)
+                        and row.get("status") == "completed"
+                        and str(training_label_records.get(row.get("name", ""), {}).get("training_rttm_path") or "")
                     ],
                 },
             },

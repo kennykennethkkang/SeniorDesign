@@ -19,7 +19,7 @@ DEFAULT_LABEL_PROJECT = "uploaded-site-training"
 # that needs old bundles to be regenerated. The dashboard checks this against
 # a meta tag in existing HTMLs and rewrites stale ones the next time the row
 # is opened, so users picking up bug fixes don't have to manually rerun.
-REVIEW_BUNDLE_FORMAT_VERSION = 9
+REVIEW_BUNDLE_FORMAT_VERSION = 10
 TRAINING_BACKEND_LABELS = {
     "nemo": "NeMo",
     "pyannote": "pyannote",
@@ -724,7 +724,10 @@ def build_html(
             for index, (start, end, speaker) in enumerate(saved_segments, start=1)
         ]
     else:
-        label_entries = default_label_entries
+        # New files used to seed from the diarization model's cues, but I'm
+        # making the user type every Start/End by hand instead — that's the
+        # whole point of a manually verified training label.
+        label_entries = [("1", "", "", "", "")]
 
     label_rows_html: list[str] = []
     label_segment_lines: list[str] = []
@@ -750,9 +753,6 @@ def build_html(
             f"<td class=\"label-dialogue-cell\"><input class=\"label-dialogue\" type=\"text\" value=\"{html.escape(note, quote=True)}\" placeholder=\"Optional dialogue\"></td>"
             "<td class=\"action-cell\">"
             "<button class=\"play-label\" type=\"button\">Listen</button>"
-            "<button class=\"toggle-done-label\" type=\"button\" aria-pressed=\"false\""
-            " title=\"Click after I've labeled this row. Marks the row green.\""
-            ">Mark done</button>"
             "<button class=\"delete-label\" type=\"button\" aria-label=\"Delete this label\">Delete</button>"
             "</td>"
             "</tr>"
@@ -3494,7 +3494,7 @@ def build_html(
       const row = document.createElement("tr");
       row.setAttribute("data-label-row", "");
       row.setAttribute("tabindex", "0");
-      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="text" inputmode="decimal" value=""></label><label><span>End</span><input class="label-end" type="text" inputmode="decimal" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="toggle-done-label" type="button" aria-pressed="false" title="Click after I have labeled this row. Marks the row green.">Mark done</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
+      row.innerHTML = '<td class="row-index"><span class="drag-handle" draggable="true" role="button" tabindex="0" aria-label="Drag to reorder this label" title="Drag to reorder">⋮⋮</span><span class="row-number"></span></td><td><div class="time-edit"><label><span>Start</span><input class="label-start" type="text" inputmode="decimal" value=""></label><label><span>End</span><input class="label-end" type="text" inputmode="decimal" value=""></label></div></td><td><input class="label-speaker" list="speakerOptions" type="text" value=""></td><td class="label-dialogue-cell"><input class="label-dialogue" type="text" value="" placeholder="Optional dialogue"></td><td class="action-cell"><button class="play-label" type="button">Listen</button><button class="delete-label" type="button" aria-label="Delete this label">Delete</button></td>';
       labelRows.appendChild(row);
       renumberLabelRows();
       return row;

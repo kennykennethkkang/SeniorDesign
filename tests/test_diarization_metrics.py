@@ -160,5 +160,53 @@ class RttmParsingTests(unittest.TestCase):
             self.assertAlmostEqual(intervals[0].end, 3.0)
 
 
+class ScoreIntervalsTests(unittest.TestCase):
+    """The DER calculator panel feeds in already-parsed intervals (cues from
+    SRT files), so the path-free entry point needs to keep parity with score_run."""
+
+    def test_score_intervals_matches_score_run_on_identical_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            ref_path = root / "ref.rttm"
+            hyp_path = root / "hyp.rttm"
+            ref_segments = [(0.0, 4.0, "Alice"), (5.0, 3.0, "Bob")]
+            hyp_segments = [(0.0, 4.0, "S0"), (5.5, 2.5, "S1")]
+            write_rttm(ref_path, ref_segments)
+            write_rttm(hyp_path, hyp_segments)
+            ref_intervals = metrics.parse_rttm_intervals(ref_path)
+            hyp_intervals = metrics.parse_rttm_intervals(hyp_path)
+
+            inline = metrics.score_intervals(ref_intervals, hyp_intervals)
+            from_files = metrics.score_run(ref_path, hyp_path)
+
+            for key in (
+                "der",
+                "miss_seconds",
+                "false_alarm_seconds",
+                "confusion_seconds",
+                "reference_speech_seconds",
+                "hypothesis_speech_seconds",
+                "jer",
+                "reference_speaker_count",
+                "hypothesis_speaker_count",
+                "speaker_count_diff",
+            ):
+                self.assertAlmostEqual(inline[key], from_files[key], msg=f"key={key}")
+
+    def test_score_intervals_with_empty_hypothesis_is_pure_miss(self):
+        # If the model didn't say anything but the reference has speech, every
+        # reference second is missed and false-alarm is zero.
+        ref_intervals = [
+            metrics.Interval(start=0.0, end=2.0, speaker="A"),
+            metrics.Interval(start=3.0, end=5.0, speaker="B"),
+        ]
+        payload = metrics.score_intervals(ref_intervals, [])
+        self.assertAlmostEqual(payload["miss_seconds"], 4.0)
+        self.assertAlmostEqual(payload["false_alarm_seconds"], 0.0)
+        self.assertAlmostEqual(payload["confusion_seconds"], 0.0)
+        self.assertAlmostEqual(payload["der"], 1.0)
+        self.assertEqual(payload["hypothesis_speaker_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

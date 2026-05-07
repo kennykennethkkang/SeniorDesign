@@ -657,6 +657,278 @@ class FineTuningMixin:
             return self.json_response("500 Internal Server Error", {"error": str(exc)})
         return self.json_response("200 OK", metrics)
 
+    def handle_finetune_compare_runs(self, environ):
+        """Batch DER/JER scoring against a flexible reference + N hypothesis models.
+
+        Query params:
+
+        - ``reference_source`` — ``"labels"`` (default) to use saved training-label
+          RTTMs as the reference, or ``"run"`` to use another diarization run's
+          SRTs as the reference (no hand labels required for that mode).
+        - ``reference_run`` — required when ``reference_source=run``: path to the
+          run directory whose SRTs are treated as ground truth.
+        - ``model`` — repeatable. Each value is a run directory whose SRT for
+          each audio file is scored against the reference. One or more models
+          may be supplied; the table layout scales to N columns.
+        - ``audio`` — repeatable list of audio files to score.
+
+        Response shape:
+
+        ``{
+            "reference": { "source": "labels"|"run", "run": {...} },
+            "models":   [ {"key": "m0", "name": "...", "path": "..."}, ... ],
+            "files":    [ {"audio": "...", "reference_rttm": "...",
+                           "metrics": {"m0": {...}, "m1": {...}}}, ... ],
+            "averages": {"m0": {...}, "m1": {...}}
+        }``
+
+        Pairwise mode (any model = the chosen reference) is the same shape; the
+        UI is responsible for not asking the user to score a model against
+        itself.
+        """
+
+        import diarization_metrics
+
+        query = parse_qs((environ.get("QUERY_STRING") or ""), keep_blank_values=True)
+        reference_source = (query.get("reference_source") or ["labels"])[0].strip().lower() or "labels"
+        if reference_source not in {"labels", "run"}:
+            return self.json_response("400 Bad Request", {"error": f"Unknown reference_source {reference_source!r}. Expected 'labels' or 'run'."})
+        reference_run_value = (query.get("reference_run") or [""])[0].strip()
+        model_values = [value.strip() for value in (query.get("model") or []) if value.strip()]
+        audio_values = [name.strip() for name in (query.get("audio") or []) if name.strip()]
+
+        if not model_values:
+            return self.json_response("400 Bad Request", {"error": "Pick at least one model run to score."})
+        if not audio_values:
+            return self.json_response("400 Bad Request", {"error": "Pick at least one audio file to score."})
+        if reference_source == "run" and not reference_run_value:
+            return self.json_response("400 Bad Request", {"error": "reference_source='run' requires reference_run to point at a diarization run directory."})
+
+        try:
+            runs_root_resolved = self.diarization_runs_root.resolve()
+        except OSError:
+            return self.json_response("500 Internal Server Error", {"error": "Diarization runs directory is not available."})
+
+        def _resolve_run(value: str) -> Path | None:
+            if not value:
+                return None
+            candidate = self.resolve_local_path(value)
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(runs_root_resolved)
+            except (OSError, ValueError):
+                return None
+            return resolved if resolved.is_dir() else None
+
+        reference_run: Path | None = None
+        if reference_source == "run":
+            reference_run = _resolve_run(reference_run_value)
+            if reference_run is None:
+                return self.json_response("400 Bad Request", {"error": "reference_run must point inside outputs/diarization_runs/."})
+
+        # Resolve and de-dupe model paths in submission order. We tag each
+        # entry with a stable "m0", "m1", ... key so the response can carry a
+        # per-model metrics map without leaking long disk paths into JSON keys.
+        model_runs: list[dict[str, object]] = []
+        seen_paths: set[str] = set()
+        for raw_value in model_values:
+            run_dir = _resolve_run(raw_value)
+            if run_dir is None:
+                return self.json_response("400 Bad Request", {"error": f"Model run {raw_value!r} must point inside outputs/diarization_runs/."})
+            key_path = str(run_dir)
+            if key_path in seen_paths:
+                continue
+            seen_paths.add(key_path)
+            model_runs.append({"key": f"m{len(model_runs)}", "path": run_dir, "name": run_dir.name})
+
+        if not model_runs:
+            return self.json_response("400 Bad Request", {"error": "No valid model runs after de-duplication."})
+
+        # Translate SRT cue text speakers (e.g. "SPEAKER_00: hi") into Interval
+        # objects the metrics module understands. Cues with no parseable
+        # speaker fall back to a stable per-cue label so they still count
+        # toward miss/false-alarm even if the model emitted unlabeled regions.
+        def _cues_to_intervals(cues, *, stem: str) -> list:
+            intervals = []
+            for cue in cues:
+                duration_ms = cue.end_ms - cue.start_ms
+                if duration_ms <= 0:
+                    continue
+                speaker = cue.speaker or f"{stem}_cue_{cue.index:04d}"
+                intervals.append(
+                    diarization_metrics.Interval(
+                        start=cue.start_ms / 1000.0,
+                        end=cue.end_ms / 1000.0,
+                        speaker=speaker,
+                    )
+                )
+            return intervals
+
+        def _intervals_from_run(run_dir: Path, stem: str) -> tuple[list, str | None, Path | None]:
+            """Return (intervals, error_message, srt_path). Either intervals or error_message is set."""
+
+            srt_path = run_dir / f"{stem}.srt"
+            if not srt_path.is_file():
+                return [], f"No SRT for this audio in {run_dir.name}.", None
+            try:
+                cues = parse_srt(srt_path)
+            except (ValueError, OSError) as exc:
+                return [], f"Could not parse SRT: {exc}", srt_path
+            return _cues_to_intervals(cues, stem=stem), None, srt_path
+
+        def _zero_aggregate() -> dict[str, float]:
+            return {
+                "scored": 0.0,
+                "skipped": 0.0,
+                "der_numerator_seconds": 0.0,
+                "ref_seconds_total": 0.0,
+                "miss_total": 0.0,
+                "false_alarm_total": 0.0,
+                "confusion_total": 0.0,
+                "jer_total": 0.0,
+            }
+
+        def _accumulate(agg: dict[str, float], metrics: dict[str, object]) -> None:
+            agg["scored"] += 1
+            ref_seconds = float(metrics["reference_speech_seconds"])
+            agg["der_numerator_seconds"] += float(metrics["der"]) * ref_seconds
+            agg["ref_seconds_total"] += ref_seconds
+            agg["miss_total"] += float(metrics["miss_seconds"])
+            agg["false_alarm_total"] += float(metrics["false_alarm_seconds"])
+            agg["confusion_total"] += float(metrics["confusion_seconds"])
+            agg["jer_total"] += float(metrics["jer"])
+
+        def _finalize_average(agg: dict[str, float]) -> dict[str, object] | None:
+            scored = int(agg["scored"])
+            if scored == 0:
+                return None
+            return {
+                "files_scored": scored,
+                "files_skipped": int(agg["skipped"]),
+                "weighted_der": (agg["der_numerator_seconds"] / agg["ref_seconds_total"]) if agg["ref_seconds_total"] > 0 else None,
+                "macro_jer": agg["jer_total"] / scored,
+                "miss_seconds": agg["miss_total"],
+                "false_alarm_seconds": agg["false_alarm_total"],
+                "confusion_seconds": agg["confusion_total"],
+                "reference_speech_seconds": agg["ref_seconds_total"],
+            }
+
+        try:
+            workspace_root = self.root.resolve()
+        except OSError:
+            return self.json_response("500 Internal Server Error", {"error": "Workspace root is not available."})
+
+        label_records = self.load_training_label_records() if reference_source == "labels" else {}
+
+        aggregates: dict[str, dict[str, float]] = {entry["key"]: _zero_aggregate() for entry in model_runs}
+        file_results: list[dict[str, object]] = []
+
+        for audio_value in audio_values:
+            audio_basename = self.clean_audio_selection_value(audio_value)
+            if not audio_basename:
+                file_results.append({"audio": audio_value, "error": "Audio name is empty after cleanup."})
+                continue
+            stem = self.diarization_output_base(audio_basename)
+
+            # Resolve the reference for this audio file. Bail with a per-file
+            # error if labels are missing or the reference run has no SRT for
+            # this stem; that's friendlier than a 400 that nukes the whole
+            # batch.
+            reference_intervals: list
+            reference_description: str
+            if reference_source == "labels":
+                record = label_records.get(audio_basename) or label_records.get(Path(audio_basename).name) or {}
+                ref_path_str = str(record.get("training_rttm_path") or "")
+                if not ref_path_str:
+                    file_results.append({"audio": audio_basename, "error": "No completed training label / RTTM saved for this file."})
+                    continue
+                try:
+                    reference_path = self.resolve_local_path(ref_path_str).resolve()
+                    reference_path.relative_to(workspace_root)
+                except (OSError, ValueError):
+                    file_results.append({"audio": audio_basename, "error": "Reference RTTM is outside the workspace."})
+                    continue
+                if not reference_path.is_file():
+                    file_results.append({"audio": audio_basename, "error": "Reference RTTM is not on disk anymore."})
+                    continue
+                try:
+                    reference_intervals = diarization_metrics.parse_rttm_intervals(reference_path)
+                except (ValueError, OSError) as exc:
+                    file_results.append({"audio": audio_basename, "error": f"Could not parse reference RTTM: {exc}"})
+                    continue
+                reference_description = self.describe_path(reference_path)
+            else:
+                ref_intervals_or_empty, ref_error, ref_srt = _intervals_from_run(reference_run, stem)
+                if ref_error:
+                    file_results.append({"audio": audio_basename, "error": f"Reference run: {ref_error}"})
+                    continue
+                reference_intervals = ref_intervals_or_empty
+                reference_description = self.describe_path(ref_srt) if ref_srt else self.describe_path(reference_run)
+
+            per_model: dict[str, dict[str, object]] = {}
+            for entry in model_runs:
+                key = entry["key"]
+                run_dir = entry["path"]
+                # Pairwise edge case: if a hypothesis model points at the same
+                # run as the reference, scoring it would give DER 0 with
+                # nothing useful, so flag it instead of silently passing.
+                if reference_source == "run" and reference_run is not None and run_dir == reference_run:
+                    per_model[key] = {"error": "This model is the reference."}
+                    aggregates[key]["skipped"] += 1
+                    continue
+                hyp_intervals, hyp_error, srt_path = _intervals_from_run(run_dir, stem)
+                if hyp_error:
+                    per_model[key] = {"error": hyp_error}
+                    aggregates[key]["skipped"] += 1
+                    continue
+                try:
+                    metrics = diarization_metrics.score_intervals(reference_intervals, hyp_intervals)
+                except (ValueError, OSError) as exc:
+                    per_model[key] = {"error": f"Scoring failed: {exc}"}
+                    aggregates[key]["skipped"] += 1
+                    continue
+                per_model[key] = {
+                    "run_dir": self.describe_path(run_dir),
+                    "run_name": run_dir.name,
+                    "srt_path": self.describe_path(srt_path) if srt_path else "",
+                    **metrics,
+                }
+                _accumulate(aggregates[key], metrics)
+
+            file_results.append(
+                {
+                    "audio": audio_basename,
+                    "reference_rttm": reference_description,
+                    "metrics": per_model,
+                }
+            )
+
+        averages = {entry["key"]: _finalize_average(aggregates[entry["key"]]) for entry in model_runs}
+
+        return self.json_response(
+            "200 OK",
+            {
+                "reference": {
+                    "source": reference_source,
+                    "run": (
+                        {"path": self.describe_path(reference_run), "name": reference_run.name}
+                        if reference_run is not None
+                        else None
+                    ),
+                },
+                "models": [
+                    {
+                        "key": entry["key"],
+                        "name": entry["name"],
+                        "path": self.describe_path(entry["path"]),
+                    }
+                    for entry in model_runs
+                ],
+                "files": file_results,
+                "averages": averages,
+            },
+        )
+
     def handle_finetune_auto_train(self, environ):
         """Toggle the per-project "auto-train when labels complete" flag.
 
@@ -733,6 +1005,7 @@ class FineTuningMixin:
             builder=lambda: {
                 "rttm_files": self.newest_files(
                     search_roots=[
+                        self.stitched_dir,
                         self.training_label_work_dir,
                         self.root / "fine_tuning" / "projects",
                         self.outputs_root,
@@ -744,6 +1017,7 @@ class FineTuningMixin:
                 ),
                 "transcript_files": self.newest_files(
                     search_roots=[
+                        self.stitched_dir,
                         self.root / "fine_tuning" / "projects",
                         self.outputs_root,
                         self.root / "job_outputs",

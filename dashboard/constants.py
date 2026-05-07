@@ -20,6 +20,7 @@ FRONTEND_TEMPLATE = "html/dashboard/index.html"
 NAV_PATHS = [
     "/",
     "/uploads",
+    "/stitching",
     "/youtube",
     "/diarization",
     "/training-labels",
@@ -35,12 +36,12 @@ PAGE_ALIASES = {
     "/training-labeling": "/training-labels",
 }
 PAGE_PATHS = set(NAV_PATHS)
-AUDIO_INVENTORY_PAGES = {"/uploads", "/training-labels", "/diarization", "/fine-tuning"}
-PROJECT_SUMMARY_PAGES = {"/", "/training-labels", "/fine-tuning"}
-RECENT_OUTPUT_PAGES = {"/", "/diarization", "/youtube"}
+AUDIO_INVENTORY_PAGES = {"/uploads", "/stitching", "/training-labels", "/diarization", "/fine-tuning"}
+PROJECT_SUMMARY_PAGES = {"/", "/stitching", "/training-labels", "/fine-tuning"}
+RECENT_OUTPUT_PAGES = {"/", "/stitching", "/diarization", "/youtube"}
 RECENT_SRT_PAGES: set[str] = set()
 YOUTUBE_QUEUE_PAGES = {"/youtube"}
-MODEL_SELECTION_PAGES = {"/training-labels", "/diarization", "/fine-tuning"}
+MODEL_SELECTION_PAGES = {"/stitching", "/training-labels", "/diarization", "/fine-tuning"}
 TRAINING_LABEL_CONTEXT_PAGES = {"/training-labels", "/fine-tuning"}
 DEFAULT_TRAINING_LABEL_PROJECT = "uploaded-site-training"
 DIARIZATION_LABEL_PREVIEW_LIMIT = 2000
@@ -107,6 +108,7 @@ SECURITY_RESPONSE_HEADERS = (
 )
 DOWNLOADABLE_ROOT_NAMES = (
     "audio_in",
+    "stitched",
     "outputs",
     "fine_tuning",
     "job_outputs",

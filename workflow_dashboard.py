@@ -154,6 +154,7 @@ from dashboard.app.audio_mixin import AudioMixin
 from dashboard.app.youtube_mixin import YouTubeMixin
 from dashboard.app.diarization_mixin import DiarizationMixin
 from dashboard.app.training_mixin import TrainingLabelsMixin
+from dashboard.app.stitching_mixin import StitchingMixin
 from dashboard.app.finetuning_mixin import FineTuningMixin
 from dashboard.app.rendering import RenderingMixin
 
@@ -163,6 +164,7 @@ class WorkflowWebApp(
     YouTubeMixin,
     DiarizationMixin,
     TrainingLabelsMixin,
+    StitchingMixin,
     FineTuningMixin,
     RenderingMixin,
 ):

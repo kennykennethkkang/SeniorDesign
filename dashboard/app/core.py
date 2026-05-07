@@ -224,6 +224,14 @@ class CoreMixin:
         return self.outputs_root / YOUTUBE_RUNS_ROOT.name
 
     @property
+    def stitched_dir(self) -> Path:
+        return self.root / "stitched"
+
+    @property
+    def site_stitching_sbatch(self) -> Path:
+        return self.root / "scheduler" / "run_site_stitching.sbatch"
+
+    @property
     def youtube_history_index_path(self) -> Path:
         return self.outputs_root / YOUTUBE_HISTORY_INDEX.parent.name / YOUTUBE_HISTORY_INDEX.name
 
@@ -252,6 +260,8 @@ class CoreMixin:
                 status, headers, body = self.handle_file_search(environ)
             elif routed_method == "GET" and path == "/api/fine-tuning/score-run":
                 status, headers, body = self.handle_finetune_score_run(environ)
+            elif routed_method == "GET" and path == "/api/fine-tuning/compare-runs":
+                status, headers, body = self.handle_finetune_compare_runs(environ)
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):
@@ -284,6 +294,10 @@ class CoreMixin:
                 status, headers, body = self.handle_youtube_conversion(environ)
             elif routed_method == "POST" and path == "/actions/reset-youtube-workspace":
                 status, headers, body = self.handle_youtube_reset(environ)
+            elif routed_method == "POST" and path == "/actions/stitch-audio":
+                status, headers, body = self.handle_stitching_run(environ)
+            elif routed_method == "POST" and path == "/stitching/rename":
+                status, headers, body = self.handle_stitching_rename(environ)
             elif routed_method == "POST" and path == "/actions/review":
                 status, headers, body = self.handle_review(environ)
             elif routed_method == "POST" and path == "/actions/run-diarization":
@@ -1104,15 +1118,17 @@ class CoreMixin:
 
         diarization_runs = sorted(self.active_diarization_run_directories(), key=lambda path: str(path))
         youtube_runs = sorted(self.active_run_directories(self.youtube_runs_root), key=lambda path: str(path))
+        stitched_runs = sorted(self.active_stitched_run_directories(), key=lambda path: str(path))
         fine_tuning_runs = self.active_fine_tuning_runs()
-        should_refresh = bool(diarization_runs or youtube_runs or fine_tuning_runs)
+        should_refresh = bool(diarization_runs or youtube_runs or stitched_runs or fine_tuning_runs)
         return {
             "refreshIntervalMs": LIVE_TRACKING_INTERVAL_MS,
             "idleRefreshIntervalMs": IDLE_TRACKING_INTERVAL_MS,
             "activeDiarizationRuns": len(diarization_runs),
             "activeYoutubeRuns": len(youtube_runs),
+            "activeStitchingRuns": len(stitched_runs),
             "activeFineTuningRuns": len(fine_tuning_runs),
-            "activeRunCount": len(diarization_runs) + len(youtube_runs) + len(fine_tuning_runs),
+            "activeRunCount": len(diarization_runs) + len(youtube_runs) + len(stitched_runs) + len(fine_tuning_runs),
             "audioInputCount": self.audio_input_count(),
             "queuedLinks": self.queue_size(),
             "fineTuningProjects": self.project_count(),
@@ -1120,6 +1136,7 @@ class CoreMixin:
             "shouldRefresh": should_refresh,
             "diarizationRunNames": [path.name for path in diarization_runs[:5]],
             "youtubeRunNames": [path.name for path in youtube_runs[:5]],
+            "stitchedRunNames": [path.name for path in stitched_runs[:5]],
             "fineTuningRuns": fine_tuning_runs[:5],
         }
 

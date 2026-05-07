@@ -320,21 +320,19 @@ def compute_jer(
     return {"jer": average, "per_speaker": per_speaker}
 
 
-def score_run(
-    reference_rttm: Path | str,
-    hypothesis_rttm: Path | str,
+def score_intervals(
+    reference: Sequence[Interval],
+    hypothesis: Sequence[Interval],
 ) -> dict[str, object]:
-    """Top-level entry point: read two RTTM files and return a complete metrics dict for the dashboard."""
+    """Score two already-parsed interval sequences. Lets callers feed in
+    SRT-derived intervals (or in-memory test fixtures) without round-tripping
+    through a temp RTTM file."""
 
-    reference = parse_rttm_intervals(reference_rttm)
-    hypothesis = parse_rttm_intervals(hypothesis_rttm)
     der_metrics = compute_der(reference, hypothesis)
     jer_metrics = compute_jer(reference, hypothesis)
     ref_speakers = speakers_in(reference)
     hyp_speakers = speakers_in(hypothesis)
     return {
-        "reference_rttm": str(reference_rttm),
-        "hypothesis_rttm": str(hypothesis_rttm),
         "der": der_metrics["der"],
         "miss_seconds": der_metrics["miss"],
         "false_alarm_seconds": der_metrics["false_alarm"],
@@ -347,6 +345,20 @@ def score_run(
         "hypothesis_speaker_count": len(hyp_speakers),
         "speaker_count_diff": abs(len(ref_speakers) - len(hyp_speakers)),
     }
+
+
+def score_run(
+    reference_rttm: Path | str,
+    hypothesis_rttm: Path | str,
+) -> dict[str, object]:
+    """Top-level entry point: read two RTTM files and return a complete metrics dict for the dashboard."""
+
+    reference = parse_rttm_intervals(reference_rttm)
+    hypothesis = parse_rttm_intervals(hypothesis_rttm)
+    payload = score_intervals(reference, hypothesis)
+    payload["reference_rttm"] = str(reference_rttm)
+    payload["hypothesis_rttm"] = str(hypothesis_rttm)
+    return payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
