@@ -507,6 +507,8 @@ class RenderingMixin:
             serialized_rows.append(
                 {
                     "audioFile": audio_file,
+                    "fileName": Path(audio_file).name if audio_file else "",
+                    "folder": audio_file.split("/", 1)[0] if "/" in audio_file else "Unsorted Root",
                     "audioHref": audio_href,
                     "status": row.get("status", "unknown"),
                     "runName": row.get("run_name", ""),
@@ -1005,6 +1007,7 @@ class RenderingMixin:
                 "resetYoutube": self.frontend_route("/actions/reset-youtube-workspace", script_name),
                 "stitchAudio": self.frontend_route("/actions/stitch-audio", script_name),
                 "renameStitching": self.frontend_route("/stitching/rename", script_name),
+                "deleteStitching": self.frontend_route("/stitching/delete", script_name),
                 "review": self.frontend_route("/actions/review", script_name),
                 "runDiarization": self.frontend_route("/actions/run-diarization", script_name),
                 "tests": self.frontend_route("/actions/test", script_name),

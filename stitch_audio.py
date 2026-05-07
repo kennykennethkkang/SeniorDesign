@@ -225,7 +225,14 @@ def can_stitch_with_wave(paths: Sequence[Path]) -> bool:
     first = wave_params(paths[0])
     if first is None:
         return False
-    return all(wave_params(path) == first for path in paths[1:])
+    # Big stitch jobs benefit a lot from short-circuiting here — once any
+    # input doesn't match, we can stop opening files. Saves a full sweep of
+    # the 1.7k-file set in the common-case where someone mixes formats.
+    for path in paths[1:]:
+        params = wave_params(path)
+        if params is None or params != first:
+            return False
+    return True
 
 
 def stitch_with_wave(paths: Sequence[Path], output_path: Path) -> None:
@@ -235,6 +242,10 @@ def stitch_with_wave(paths: Sequence[Path], output_path: Path) -> None:
     if first_params is None:
         raise ValueError("Cannot stitch non-PCM WAV files with the wave module.")
     channels, sample_width, frame_rate, comp_type, comp_name = first_params
+    # 64 KiB per readframes call balances Python loop overhead against memory:
+    # large enough to amortize per-call cost, small enough to keep the
+    # working set tiny when stitching thousands of clips.
+    chunk_frames = max(1, (64 * 1024) // max(sample_width * channels, 1))
     with wave.open(str(output_path), "wb") as output:
         output.setnchannels(channels)
         output.setsampwidth(sample_width)
@@ -243,7 +254,7 @@ def stitch_with_wave(paths: Sequence[Path], output_path: Path) -> None:
         for path in paths:
             with wave.open(str(path), "rb") as source:
                 while True:
-                    frames = source.readframes(64 * 1024)
+                    frames = source.readframes(chunk_frames)
                     if not frames:
                         break
                     output.writeframes(frames)

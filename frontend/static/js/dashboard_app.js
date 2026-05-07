@@ -13,6 +13,8 @@
   const AUDIO_CACHE_STORE = "blobs";
   const AUDIO_CACHE_DB_VERSION = 1;
   const AUDIO_CACHE_ALL_CONCURRENCY = 2;
+  const DEFAULT_FILE_VIEW_LIMIT = 250;
+  const FILE_VIEW_LIMIT_OPTIONS = [100, 250, 500, 1000];
   const root = ReactDOM.createRoot(document.getElementById("dashboard-root"));
   let state = initialState;
   let ctx = state.context || {};
@@ -206,6 +208,20 @@
     });
   }
 
+  function confirmDeleteStitch(row) {
+    if (!row || !row.runDir || !routes.deleteStitching) return;
+    const label = row.displayName || row.outputName || row.name || "this stitched output";
+    const trainingNote = (row.trainingUsage || []).length
+      ? `\n\nThis will also remove the matching audio + RTTM copies from: ${(row.trainingUsage || [])
+          .map((entry) => entry.project_key || entry.project_name || "")
+          .filter(Boolean)
+          .join(", ")}.`
+      : "";
+    const confirmed = window.confirm(`Delete the stitched run "${label}"?${trainingNote}\n\nThe run folder under stitched/ will be removed and cannot be recovered.`);
+    if (!confirmed) return;
+    submitHiddenForm(routes.deleteStitching, { run_dir: row.runDir });
+  }
+
   function StatusPill({ status }) {
     const normalized = text(status || "unknown").toLowerCase().replace(/[_\s]+/g, "-");
     return h("span", { className: `status-pill ${normalized}` }, text(status || "unknown").replace(/_/g, " "));
@@ -389,6 +405,141 @@
           Option,
           { key: folder.value, value: folder.value },
           `${folder.name || folder.value} (${folder.fileCount || 0})`
+        )
+      )
+    );
+  }
+
+  function fileViewFolderLabel(row) {
+    const explicit = text(row?.folder || row?.audioFolder || row?.folderName || "").trim();
+    if (explicit) {
+      return explicit;
+    }
+    const candidate = text(row?.name || row?.audioFile || row?.path || row?.fileName || "").replace(/\\/g, "/").trim();
+    if (!candidate.includes("/")) {
+      return "Unsorted Root";
+    }
+    const parts = candidate.split("/").filter(Boolean);
+    if (!parts.length) {
+      return "Unsorted Root";
+    }
+    if (parts[0] === "audio_in") {
+      return parts.length > 2 ? parts[1] : "Unsorted Root";
+    }
+    if (parts[0] === "fine_tuning" && parts.length > 1) {
+      return parts.slice(0, Math.min(2, parts.length - 1)).join("/") || "fine_tuning";
+    }
+    if (parts[0] === "outputs" && parts.length > 1) {
+      return parts.slice(0, Math.min(4, parts.length - 1)).join("/") || "outputs";
+    }
+    return parts.length > 1 ? parts[0] : "Unsorted Root";
+  }
+
+  function fileViewDisplayName(row) {
+    return text(row?.fileName || row?.audioFile || row?.name || row?.path || "file");
+  }
+
+  function compareFileViewLabels(left, right) {
+    if (left === "Unsorted Root" && right !== "Unsorted Root") return -1;
+    if (right === "Unsorted Root" && left !== "Unsorted Root") return 1;
+    return text(left).toLowerCase().localeCompare(text(right).toLowerCase());
+  }
+
+  function sortFileRowsByFolder(rows, folderGetter = fileViewFolderLabel, nameGetter = fileViewDisplayName) {
+    return [...(rows || [])].sort((left, right) => {
+      const folderCompare = compareFileViewLabels(folderGetter(left), folderGetter(right));
+      if (folderCompare !== 0) {
+        return folderCompare;
+      }
+      return text(nameGetter(left)).toLowerCase().localeCompare(text(nameGetter(right)).toLowerCase());
+    });
+  }
+
+  function fileViewFolderChoices(rows, folderGetter = fileViewFolderLabel) {
+    return Array.from(
+      (rows || []).reduce((choices, row) => {
+        const key = folderGetter(row);
+        const current = choices.get(key) || { key, label: key, count: 0 };
+        current.count += 1;
+        choices.set(key, current);
+        return choices;
+      }, new Map()).values()
+    ).sort((left, right) => compareFileViewLabels(left.key, right.key));
+  }
+
+  function clampFileViewLimit(value, total = Number.MAX_SAFE_INTEGER) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return DEFAULT_FILE_VIEW_LIMIT;
+    }
+    const max = Math.max(1, Number(total) || 1);
+    return Math.min(Math.max(1, Math.floor(parsed)), max);
+  }
+
+  function FileViewLimitControl({ id, total, shown, limit, onLimitChange, noun = "file" }) {
+    const totalCount = Number(total || 0);
+    const shownCount = Number(shown || 0);
+    const canShowMore = shownCount < totalCount;
+    const displayedLimit = totalCount === 0 ? 0 : Math.min(limit, totalCount);
+    const options = FILE_VIEW_LIMIT_OPTIONS.filter((value, index, values) => value <= totalCount && values.indexOf(value) === index);
+    if (totalCount === 0) {
+      options.push(0);
+    } else if (!options.includes(displayedLimit)) {
+      options.push(displayedLimit);
+      options.sort((left, right) => left - right);
+    }
+    return h(
+      "div",
+      { className: "file-view-limit-control" },
+      h("span", { className: "file-view-count" }, `${shownCount} shown of ${totalCount} ${noun}${totalCount === 1 ? "" : "s"}`),
+      h(
+        "label",
+        { className: "compact-label", htmlFor: id },
+        "Rows",
+        h(
+          "select",
+          {
+            id,
+            className: "compact-control",
+            value: String(displayedLimit),
+            disabled: totalCount === 0,
+            onChange: (event) => onLimitChange(clampFileViewLimit(event.target.value, totalCount)),
+          },
+          options.map((value) => h("option", { key: value, value: String(value) }, value)),
+          totalCount > Math.max(...options, 0) ? h("option", { value: String(totalCount) }, "All") : null
+        )
+      ),
+      canShowMore
+        ? h(
+            "button",
+            {
+              type: "button",
+              className: "ghost btn-sm",
+              onClick: () => onLimitChange(Math.min(totalCount, limit + DEFAULT_FILE_VIEW_LIMIT)),
+            },
+            "Show More"
+          )
+        : null
+    );
+  }
+
+  function FolderFilterControl({ id, value, onChange, folders }) {
+    return h(
+      "label",
+      { className: "compact-label file-view-folder-filter", htmlFor: id },
+      "Folder",
+      h(
+        "select",
+        {
+          id,
+          className: "compact-control",
+          value,
+          disabled: !(folders || []).length,
+          onChange: (event) => onChange(event.target.value),
+        },
+        h("option", { value: "all" }, "All folders"),
+        (folders || []).map((folder) =>
+          h("option", { key: folder.key, value: folder.key }, `${folder.label} (${folder.count})`)
         )
       )
     );
@@ -1488,25 +1639,19 @@
     const moveTargets = folders.filter((folder) => folder.value && folder.value !== (defaults.rootAudioFolderValue || "__root__"));
     const [selected, setSelected] = React.useState(() => new Set());
     const [selectedFolderKeys, setSelectedFolderKeys] = React.useState(null);
-    const folderLabel = (row) => text(row.folder || "Unsorted Root", "Unsorted Root");
-    const folderChoices = Array.from(
-      rows.reduce((choices, row) => {
-        const key = folderLabel(row);
-        const current = choices.get(key) || { key, label: key, count: 0 };
-        current.count += 1;
-        choices.set(key, current);
-        return choices;
-      }, new Map()).values()
-    ).sort((left, right) => {
-      if (left.key === "Unsorted Root") return -1;
-      if (right.key === "Unsorted Root") return 1;
-      return left.label.toLowerCase().localeCompare(right.label.toLowerCase());
-    });
+    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    const folderLabel = fileViewFolderLabel;
+    const sortedRows = React.useMemo(
+      () => sortFileRowsByFolder(rows, folderLabel, (row) => row.fileName || row.name),
+      [rows]
+    );
+    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedRows, folderLabel), [sortedRows]);
     const folderKeys = folderChoices.map((folder) => folder.key);
     const visibleRows = selectedFolderKeys === null
-      ? rows
-      : rows.filter((row) => selectedFolderKeys.has(folderLabel(row)));
-    const selectedVisibleCount = visibleRows.filter((row) => selected.has(row.name)).length;
+      ? sortedRows
+      : sortedRows.filter((row) => selectedFolderKeys.has(folderLabel(row)));
+    const renderedRows = visibleRows.slice(0, Math.min(rowLimit, visibleRows.length));
+    const selectedVisibleCount = renderedRows.filter((row) => selected.has(row.name)).length;
     const allFoldersVisible = selectedFolderKeys === null || selectedFolderKeys.size === folderKeys.length;
 
     // Drop selections that no longer match a row (e.g., the inventory refreshed
@@ -1555,8 +1700,8 @@
       });
     };
 
-    const allChecked = visibleRows.length > 0 && visibleRows.every((row) => selected.has(row.name));
-    const someChecked = !allChecked && visibleRows.some((row) => selected.has(row.name));
+    const allChecked = renderedRows.length > 0 && renderedRows.every((row) => selected.has(row.name));
+    const someChecked = !allChecked && renderedRows.some((row) => selected.has(row.name));
     const headerRef = React.useRef(null);
     React.useEffect(() => {
       if (headerRef.current) {
@@ -1567,7 +1712,7 @@
     const toggleShownRows = (checked) => {
       setSelected((prev) => {
         const next = new Set(prev);
-        visibleRows.forEach((row) => {
+        renderedRows.forEach((row) => {
           if (checked) {
             next.add(row.name);
           } else {
@@ -1669,22 +1814,29 @@
         h(
           "div",
           { className: "audio-inventory-toolbar-left" },
-          h(
-            "span",
-            { className: "audio-inventory-summary" },
-            rows.length
-              ? `${visibleRows.length} shown of ${rows.length}; ${selectedVisibleCount} shown selected${selectedCount > selectedVisibleCount ? ` (${selectedCount} total)` : ""}`
-              : "No audio files yet"
-          )
-        ),
-        h(
-          "div",
-          { className: "audio-inventory-bulk-actions" },
-          h(
-            "button",
-            { type: "button", className: "secondary btn-sm", disabled: !visibleRows.length, onClick: () => toggleShownRows(true) },
-            "Select shown"
-          ),
+	          h(
+	            "span",
+	            { className: "audio-inventory-summary" },
+		            rows.length
+		              ? `${renderedRows.length} visible of ${visibleRows.length} matching; ${selectedVisibleCount} visible selected${selectedCount > selectedVisibleCount ? ` (${selectedCount} total)` : ""}`
+		              : "No audio files yet"
+		          ),
+		          h(FileViewLimitControl, {
+		            id: "audio_inventory_row_limit",
+		            total: visibleRows.length,
+		            shown: renderedRows.length,
+		            limit: rowLimit,
+		            onLimitChange: setRowLimit,
+		          })
+		      ),
+	        h(
+	          "div",
+	          { className: "audio-inventory-bulk-actions" },
+	          h(
+	            "button",
+	            { type: "button", className: "secondary btn-sm", disabled: !renderedRows.length, onClick: () => toggleShownRows(true) },
+	            "Select shown"
+	          ),
           h(
             "button",
             { type: "button", className: "secondary btn-sm", disabled: !selectedCount, onClick: () => setSelected(new Set()) },
@@ -1740,18 +1892,19 @@
           h("input", {
             ref: headerRef,
             type: "checkbox",
-            "aria-label": "Select all audio files",
-            checked: allChecked,
-            disabled: !visibleRows.length,
-            onChange: (event) => toggleShownRows(event.target.checked),
-          }),
+	            "aria-label": "Select all audio files",
+	            checked: allChecked,
+	            disabled: !renderedRows.length,
+	            onChange: (event) => toggleShownRows(event.target.checked),
+	          }),
           "#",
           "Folder",
           "Filename",
           "Type",
           "Actions",
         ],
-        rows: visibleRows,
+	        className: "audio-inventory-table dense-file-table file-view-table",
+	        rows: renderedRows,
         emptyText: rows.length
           ? h("div", { className: "empty-state" }, h("strong", null, "No files match the selected folder view."), "Choose another folder or use View all.")
           : h(
@@ -1778,7 +1931,7 @@
             ),
             h("td", null, index + 1),
             h("td", null, folderLabel(row)),
-            h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), row.path ? h("p", { className: "row-note" }, row.path) : null),
+	            h("td", { title: row.path || row.name }, h("strong", { className: "file-name" }, row.fileName || row.name)),
             h("td", null, row.type),
             h("td", null, h("div", { className: "row-actions" }, renderMoveControl(row), renderDeleteControl(row)))
           ),
@@ -1832,37 +1985,75 @@
   }
 
   function DiarizedFilesTable({ rows }) {
-    return h(DataTable, {
-      className: "diarized-files-table",
-      headers: ["Audio", "Status", "Model / Run", "Files", "Inspect"],
-      rows: rows || [],
-      emptyText: h(
-        "div",
-        { className: "empty-state" },
-        h("strong", null, "No diarized files yet."),
-        "Pick one or more audio files on the Diarization tab and submit a run — transcripts, SRT timing, and review pages will appear here when each file finishes."
-      ),
-      renderRow: (row, index) => {
-        const dialogId = dialogIdFor("media-artifact", row.audioFile, row.runName, index);
-        const created = createdArtifactLabels(row.links);
-        return h(
-          "tr",
-          { key: `${row.audioFile}-${row.runName}-${index}` },
-          h(
-            "td",
-            null,
-            h("strong", { className: "file-name" }, row.audioFile),
-            row.audioHref
-              ? h("div", { className: "audio-review compact-audio" }, h("audio", { controls: true, preload: "none", src: row.audioHref }))
-              : h("p", { className: "row-note" }, "Source audio not found")
-          ),
-          h("td", null, h(StatusPill, { status: row.status || "unknown" }), row.errorSummary ? h("p", { className: "row-note" }, row.errorSummary) : null),
-          h("td", null, h("span", { className: "run-name" }, row.runName || "unknown run"), h("p", { className: "row-note" }, row.lastRun || ""), row.modelLabel ? h("p", { className: "row-note" }, `Model: ${row.modelLabel}`) : row.backend ? h("p", { className: "row-note" }, `Model: ${row.backendLabel || row.backend}`) : null, row.batchId ? h("p", { className: "row-note" }, `Batch: ${row.batchId}`) : null),
-          h("td", null, h(LinkList, { links: row.links, empty: "No output files linked yet" }), created.length ? h("p", { className: "row-note" }, `Created: ${created.join(", ")}`) : null),
-          h("td", null, h("button", { className: "secondary", type: "button", "data-open-dialog": dialogId }, "Inspect"), h(ArtifactInspectionDialog, { id: dialogId, title: row.audioFile || "Diarization artifact", detail: row.runName || "Generated diarization outputs", status: row.status || "unknown", noteLines: [row.lastRun ? `Last run: ${row.lastRun}` : "", row.modelLabel ? `Model: ${row.modelLabel}` : "", row.errorSummary || ""].filter(Boolean), audioHref: row.audioHref, links: row.links || [], preferredLabels: ["Transcript", "Diarized Times", "Summary", "Review Flags", "Review Page"] }))
-        );
-      },
-    });
+    const allRows = rows || [];
+    const [folderFilter, setFolderFilter] = React.useState("all");
+    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    const sortedRows = React.useMemo(
+      () => sortFileRowsByFolder(allRows, fileViewFolderLabel, (row) => row.fileName || row.audioFile),
+      [allRows]
+    );
+    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedRows, fileViewFolderLabel), [sortedRows]);
+    React.useEffect(() => {
+      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
+        setFolderFilter("all");
+      }
+    }, [folderFilter, folderChoices]);
+    const filteredRows = folderFilter === "all"
+      ? sortedRows
+      : sortedRows.filter((row) => fileViewFolderLabel(row) === folderFilter);
+    const renderedRows = filteredRows.slice(0, Math.min(rowLimit, filteredRows.length));
+    return h(
+      React.Fragment,
+      null,
+      allRows.length
+        ? h(
+            "div",
+            { className: "selection-toolbar file-view-toolbar" },
+            h(FolderFilterControl, { id: "diarized_folder_filter", value: folderFilter, onChange: setFolderFilter, folders: folderChoices }),
+            h(FileViewLimitControl, {
+              id: "diarized_row_limit",
+              total: filteredRows.length,
+              shown: renderedRows.length,
+              limit: rowLimit,
+              onLimitChange: setRowLimit,
+            })
+          )
+        : null,
+      h(DataTable, {
+        className: "diarized-files-table dense-file-table file-view-table",
+        headers: ["Audio", "Status", "Model / Run", "Files", "Inspect"],
+        rows: renderedRows,
+        emptyText: h(
+          "div",
+          { className: "empty-state" },
+          h("strong", null, allRows.length ? "No diarized files match this folder." : "No diarized files yet."),
+          allRows.length
+            ? "Choose another folder or switch back to All folders."
+            : "Pick one or more audio files on the Diarization tab and submit a run; transcripts, SRT timing, and review pages will appear here when each file finishes."
+        ),
+        renderRow: (row, index) => {
+          const dialogId = dialogIdFor("media-artifact", row.audioFile, row.runName, index);
+          const created = createdArtifactLabels(row.links);
+          return h(
+            "tr",
+            { key: `${row.audioFile}-${row.runName}-${index}` },
+            h(
+              "td",
+              { title: row.audioFile || "" },
+              h("strong", { className: "file-name" }, row.fileName || row.audioFile),
+              h("p", { className: "row-note" }, fileViewFolderLabel(row)),
+              row.audioHref
+                ? h("div", { className: "audio-review compact-audio" }, h("audio", { controls: true, preload: "none", src: row.audioHref }))
+                : h("p", { className: "row-note" }, "Source audio not found")
+            ),
+            h("td", null, h(StatusPill, { status: row.status || "unknown" }), row.errorSummary ? h("p", { className: "row-note" }, row.errorSummary) : null),
+            h("td", null, h("span", { className: "run-name" }, row.runName || "unknown run"), h("p", { className: "row-note" }, row.lastRun || ""), row.modelLabel ? h("p", { className: "row-note" }, `Model: ${row.modelLabel}`) : row.backend ? h("p", { className: "row-note" }, `Model: ${row.backendLabel || row.backend}`) : null, row.batchId ? h("p", { className: "row-note" }, `Batch: ${row.batchId}`) : null),
+            h("td", null, h(LinkList, { links: row.links, empty: "No output files linked yet" }), created.length ? h("p", { className: "row-note" }, `Created: ${created.join(", ")}`) : null),
+            h("td", null, h("button", { className: "secondary", type: "button", "data-open-dialog": dialogId }, "Inspect"), h(ArtifactInspectionDialog, { id: dialogId, title: row.audioFile || "Diarization artifact", detail: row.runName || "Generated diarization outputs", status: row.status || "unknown", noteLines: [row.lastRun ? `Last run: ${row.lastRun}` : "", row.modelLabel ? `Model: ${row.modelLabel}` : "", row.errorSummary || ""].filter(Boolean), audioHref: row.audioHref, links: row.links || [], preferredLabels: ["Transcript", "Diarized Times", "Summary", "Review Flags", "Review Page"] }))
+          );
+        },
+      })
+    );
   }
 
   function ModelCoverage({ statuses }) {
@@ -2134,7 +2325,7 @@
           h("td", null, `${row.segmentCount || 0} segment(s)`, h("p", { className: "row-note" }, `${formatDuration(row.durationSeconds || 0)} · seed ${row.seed || "auto"}`)),
           h("td", null, trainingTargets.length ? trainingTargets.join(", ") : h("span", { className: "row-note" }, "Not added")),
           h("td", null, h(LinkList, { links: row.links || [], empty: "No linked files yet" })),
-          h("td", null, h("div", { className: "row-actions" }, h("button", { className: "secondary", type: "button", "data-open-dialog": dialogId }, "Inspect"), h("button", { className: "ghost", type: "button", onClick: () => promptRenameStitch(row) }, "Rename")), h(StitchedInspectionDialog, { row, id: dialogId }))
+          h("td", null, h("div", { className: "row-actions" }, h("button", { className: "secondary", type: "button", "data-open-dialog": dialogId }, "Inspect"), h("button", { className: "ghost", type: "button", onClick: () => promptRenameStitch(row) }, "Rename"), h("button", { className: "ghost danger", type: "button", onClick: () => confirmDeleteStitch(row) }, "Delete")), h(StitchedInspectionDialog, { row, id: dialogId }))
         );
       },
     });
@@ -2163,6 +2354,8 @@
     const [addToTraining, setAddToTraining] = React.useState(true);
     const [includeManualTarget, setIncludeManualTarget] = React.useState(() => projectOptions.length === 0);
     const [trainingTargets, setTrainingTargets] = React.useState(() => new Set());
+    const [randomPickCount, setRandomPickCount] = React.useState("");
+    const [folderRandomCounts, setFolderRandomCounts] = React.useState({});
 
     const folderChoices = Array.from(
       rows.reduce((choices, row) => {
@@ -2242,8 +2435,49 @@
     const selectedRows = rows.filter((row) => selected.has(row.name));
     const projectNames = Array.from(new Set((ctx.projects || []).map((project) => project.slug).filter(Boolean))).sort();
     const defaultProject = projectNames[0] || "stitched-site-training";
+    const halfCount = (total) => Math.ceil(Math.max(Number(total) || 0, 0) / 2);
+    const boundedRandomCount = (rawValue, total, fallback) => {
+      const safeTotal = Math.max(Number(total) || 0, 0);
+      const parsed = Number.parseInt(rawValue, 10);
+      const requested = Number.isFinite(parsed) ? parsed : fallback;
+      return Math.min(Math.max(requested, 0), safeTotal);
+    };
+    const randomNamesFromRows = (candidateRows, count) => {
+      const names = candidateRows.map((row) => row.name);
+      for (let index = names.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [names[index], names[swapIndex]] = [names[swapIndex], names[index]];
+      }
+      return names.slice(0, count);
+    };
+    const chooseRandomRows = (candidateRows, rawCount, { replaceAll = false, replaceCandidates = false } = {}) => {
+      const count = boundedRandomCount(rawCount, candidateRows.length, halfCount(candidateRows.length));
+      const picks = new Set(randomNamesFromRows(candidateRows, count));
+      setSelected((current) => {
+        const next = replaceAll ? new Set() : new Set(current);
+        if (replaceCandidates) {
+          candidateRows.forEach((row) => next.delete(row.name));
+        }
+        picks.forEach((name) => next.add(name));
+        return next;
+      });
+    };
+    const randomSelectAll = () => chooseRandomRows(rows, randomPickCount, { replaceAll: true });
+    const randomHalfAll = () => chooseRandomRows(rows, halfCount(rows.length), { replaceAll: true });
+    const folderRowsFor = (folderKey) => rows.filter((row) => folderLabel(row) === folderKey);
+    const folderRandomValue = (folderKey, total) => {
+      const value = folderRandomCounts[folderKey];
+      return value === undefined ? String(halfCount(total)) : value;
+    };
+    const updateFolderRandomCount = (folderKey, value) => {
+      setFolderRandomCounts((current) => ({ ...current, [folderKey]: value }));
+    };
+    const randomSelectFolder = (folderKey, rawCount) => {
+      const folderRows = folderRowsFor(folderKey);
+      chooseRandomRows(folderRows, rawCount, { replaceCandidates: true });
+    };
     const folderStats = (folderKey) => {
-      const folderRows = rows.filter((row) => folderLabel(row) === folderKey);
+      const folderRows = folderRowsFor(folderKey);
       const selectedCount = folderRows.filter((row) => selected.has(row.name)).length;
       return { total: folderRows.length, selected: selectedCount };
     };
@@ -2379,6 +2613,14 @@
                 { className: "details-box compact-details", open: true },
                 h("summary", null, "Speaker Labels By Folder"),
                 h(
+                  "p",
+                  { className: "row-note" },
+                  h("strong", null, "Select Folder"),
+                  " uses every clip in the folder. ",
+                  h("strong", null, "Random Pick"),
+                  " keeps only the N you choose. The stitcher always randomizes the order at submission time."
+                ),
+                h(
                   "div",
                   { className: "speaker-assignment-grid" },
                   folderChoices.map((folder) => {
@@ -2402,13 +2644,54 @@
                         { className: "button-row compact-toolbar" },
                         h("button", { className: "secondary", type: "button", onClick: () => setFolderSelected(folder.key, true), disabled: stats.total > 0 && stats.selected === stats.total }, "Select Folder"),
                         h("button", { className: "ghost", type: "button", onClick: () => setFolderSelected(folder.key, false), disabled: stats.selected === 0 }, "Deselect Folder")
+                      ),
+                      h(
+                        "div",
+                        { className: "random-pick-control" },
+                        h(
+                          "label",
+                          { className: "compact-number-field" },
+                          h("span", null, "Random count"),
+                          h("input", {
+                            type: "number",
+                            min: "0",
+                            max: stats.total,
+                            value: folderRandomValue(folder.key, stats.total),
+                            onChange: (event) => updateFolderRandomCount(folder.key, event.target.value),
+                            "aria-label": `Random file count for ${folder.label}`,
+                          })
+                        ),
+                        h("button", { className: "secondary", type: "button", onClick: () => randomSelectFolder(folder.key, folderRandomValue(folder.key, stats.total)), disabled: stats.total === 0 }, "Random Pick"),
+                        h("button", { className: "ghost", type: "button", onClick: () => randomSelectFolder(folder.key, halfCount(stats.total)), disabled: stats.total === 0 }, "Random Half")
                       )
                     );
                   })
                 )
               )
             : null,
-          h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", onClick: selectAll }, "Select all"), h("button", { className: "ghost", type: "button", onClick: clearSelected }, "Clear"), h("span", { className: "field-status" }, `${selected.size} file(s) selected`)),
+          h(
+            "div",
+            { className: "selection-toolbar stitching-selection-toolbar" },
+            h("button", { className: "secondary", type: "button", onClick: selectAll }, "Select all"),
+            h("button", { className: "ghost", type: "button", onClick: clearSelected }, "Clear"),
+            h(
+              "label",
+              { className: "compact-number-field" },
+              h("span", null, "Random count"),
+              h("input", {
+                type: "number",
+                min: "0",
+                max: rows.length,
+                value: randomPickCount,
+                placeholder: String(halfCount(rows.length)),
+                onChange: (event) => setRandomPickCount(event.target.value),
+                "aria-label": "Random file count for all audio",
+              })
+            ),
+            h("button", { className: "secondary", type: "button", onClick: randomSelectAll, disabled: rows.length === 0 }, "Random Select"),
+            h("button", { className: "ghost", type: "button", onClick: randomHalfAll, disabled: rows.length === 0 }, "Random Half"),
+            h("span", { className: "field-status" }, `${selected.size} file(s) selected`)
+          ),
           h(DataTable, {
             className: "compact-table stitching-audio-table",
             headers: ["Select", "#", "Folder", "Audio File", "Speaker In RTTM"],
@@ -2421,7 +2704,7 @@
                 h("td", null, h("input", { type: "checkbox", checked: selected.has(row.name), "data-check-group": "stitch-audio", onChange: (event) => toggleRow(row.name, event.target.checked) })),
                 h("td", null, index + 1),
                 h("td", null, folderLabel(row)),
-                h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), h("p", { className: "row-note" }, row.name)),
+                h("td", { title: row.name }, h("strong", { className: "file-name" }, row.fileName || row.name)),
                 h("td", null, h("input", { type: "text", value: speakerForRow(row), onChange: (event) => updateSpeakerForFile(row.name, event.target.value), "aria-label": `Speaker label for ${row.name}` }))
               ),
           }),
@@ -3114,6 +3397,22 @@
     const latestRun = diarization.latestRun;
     const modelCounts = summary.modelCounts || [];
     const selectedModelKey = diarization.selectedModelKey || preferences.default_diarization_model_key || preferences.default_backend || "nemo";
+    const [folderFilter, setFolderFilter] = React.useState("all");
+    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    const sortedFiles = React.useMemo(
+      () => sortFileRowsByFolder(files, fileViewFolderLabel, (row) => row.fileName || row.name),
+      [files]
+    );
+    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedFiles, fileViewFolderLabel), [sortedFiles]);
+    React.useEffect(() => {
+      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
+        setFolderFilter("all");
+      }
+    }, [folderFilter, folderChoices]);
+    const folderFilteredFiles = folderFilter === "all"
+      ? sortedFiles
+      : sortedFiles.filter((row) => fileViewFolderLabel(row) === folderFilter);
+    const renderedFiles = folderFilteredFiles.slice(0, Math.min(rowLimit, folderFilteredFiles.length));
     return h(
       React.Fragment,
       null,
@@ -3165,8 +3464,23 @@
           ),
           h("details", { className: "details-box compact-details" }, h("summary", null, "Advanced Runtime Setting"), h("div", null, h(Field, { id: "diarization_batch_size", label: "Batch size" }, h(TextInput, { id: "diarization_batch_size", defaultValue: preferences.whisper_batch_size || "" })), h(Field, { id: "pyannote_hf_token", label: "Hugging Face token for pyannote", note: "Only needed when running pyannote. The token is passed to Slurm for this run and is not saved in site preferences." }, h(TextInput, { id: "pyannote_hf_token", type: "password", defaultValue: "", placeholder: "hf_..." })), h("p", { className: "footer-note" }, "The site submits GPU Slurm jobs, so the device is handled automatically."))),
           h("div", { className: "tracker-heading" }, h("h3", null, "Audio File Tracker"), h("p", null, "Select from files that are new or need another attempt. Completed files stay locked unless re-running is allowed.")),
-          h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "ready", "data-ready-select": "diarization_model_keys" }, "Select ready + retry"), h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "all" }, "Select all"), h("button", { className: "ghost", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "none" }, "Clear"), h("label", { className: "checkbox-row" }, h("input", { type: "checkbox", name: "diarization_include_completed" }), " Allow re-running already diarized files")),
-          h(DataTable, { className: "compact-table", headers: ["Select", "#", "Selected Model Status", "Audio File", "Folder", "Model Coverage", "Last Result"], rows: files, emptyText: h("div", { className: "empty-state" }, h("strong", null, "No audio files to diarize yet."), "Upload audio in Media Library or convert a YouTube URL first; this tracker fills in once files land in audio_in/."), renderRow: (row, index) => h("tr", { key: row.name }, h("td", null, h("input", { type: "checkbox", name: "selected_audio", value: row.name, "data-check-group": "diarization-audio", "data-ready": row.selection_ready || "yes", "data-ready-by-model": row.selectionByModelJson || JSON.stringify(row.selectionByModel || {}) })), h("td", null, row.index || index + 1), h("td", null, h("span", { className: `queue-state ${row.state_class || "ready"}` }, row.queue_state || "ready"), h("p", { className: "row-note" }, row.targetModelLabel || row.targetBackendLabel || row.targetBackend || "selected model")), h("td", null, h("strong", { className: "file-name" }, row.fileName || row.name), h("p", { className: "row-note" }, row.name)), h("td", null, row.folder || "Unsorted Root"), h("td", null, h(ModelCoverage, { statuses: row.modelStatuses || [] })), h("td", null, h("span", { className: "detail-text" }, row.detail || "No previous run."), row.lastRun ? h("p", { className: "row-note" }, row.lastRun) : null)) }),
+          h(
+            "div",
+            { className: "selection-toolbar file-view-toolbar" },
+            h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "ready", "data-ready-select": "diarization_model_keys" }, "Select shown ready"),
+            h("button", { className: "secondary", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "all" }, "Select shown"),
+            h("button", { className: "ghost", type: "button", "data-select-group": "diarization-audio", "data-select-mode": "none" }, "Clear"),
+            h("label", { className: "checkbox-row" }, h("input", { type: "checkbox", name: "diarization_include_completed" }), " Allow re-running already diarized files"),
+            h(FolderFilterControl, { id: "diarization_audio_folder_filter", value: folderFilter, onChange: setFolderFilter, folders: folderChoices }),
+            h(FileViewLimitControl, {
+              id: "diarization_audio_row_limit",
+              total: folderFilteredFiles.length,
+              shown: renderedFiles.length,
+              limit: rowLimit,
+              onLimitChange: setRowLimit,
+            })
+          ),
+          h(DataTable, { className: "compact-table diarization-audio-table dense-file-table file-view-table", headers: ["Select", "#", "Selected Model Status", "Audio File", "Folder", "Model Coverage", "Last Result"], rows: renderedFiles, emptyText: h("div", { className: "empty-state" }, h("strong", null, files.length ? "No audio files match this folder." : "No audio files to diarize yet."), files.length ? "Choose another folder or switch back to All folders." : "Upload audio in Media Library or convert a YouTube URL first; this tracker fills in once files land in audio_in/."), renderRow: (row, index) => h("tr", { key: row.name }, h("td", null, h("input", { type: "checkbox", name: "selected_audio", value: row.name, "data-check-group": "diarization-audio", "data-ready": row.selection_ready || "yes", "data-ready-by-model": row.selectionByModelJson || JSON.stringify(row.selectionByModel || {}) })), h("td", null, row.index || index + 1), h("td", null, h("span", { className: `queue-state ${row.state_class || "ready"}` }, row.queue_state || "ready"), h("p", { className: "row-note" }, row.targetModelLabel || row.targetBackendLabel || row.targetBackend || "selected model")), h("td", { title: row.name }, h("strong", { className: "file-name" }, row.fileName || row.name), row.name !== (row.fileName || row.name) ? h("p", { className: "row-note" }, row.name) : null), h("td", null, fileViewFolderLabel(row)), h("td", null, h(ModelCoverage, { statuses: row.modelStatuses || [] })), h("td", null, h("span", { className: "detail-text" }, row.detail || "No previous run."), row.lastRun ? h("p", { className: "row-note" }, row.lastRun) : null)) }),
           h("p", { className: "field-status" }, h("span", { "data-selection-count": "diarization-audio" }, "0"), " file(s) selected for the next diarization run. ", h(RuntimeEstimateBadge, { group: "diarization-audio", backend: (selectedModelKey || "nemo").split("/")[0] })),
           h("div", { className: "button-row" }, h("button", { type: "submit", name: "diarization_mode", value: "selected", "data-loading-message": "Submitting selected files to Slurm...", "data-selection-submit": "diarization-audio" }, "Run selected"), h("button", { className: "secondary", type: "submit", name: "diarization_mode", value: "all", "data-loading-message": "Submitting the full library to Slurm..." }, "Run all"))
         )
@@ -4029,7 +4343,7 @@
 
   function TrainingLabelsTable({ rows }) {
     return h(DataTable, {
-      className: "training-label-table",
+      className: "training-label-table dense-file-table file-view-table",
       headers: ["#", "Audio", "Status", "Training Target", "Notes", "Label"],
       rows,
       emptyText: "No uploaded audio matches this view.",
@@ -4041,13 +4355,12 @@
           "tr",
           { key: row.name },
           h("td", null, row.index),
-          h(
-            "td",
-            null,
-            h("strong", { className: "file-name" }, row.fileName || row.name),
-            h("p", { className: "row-note" }, row.folder || "Unsorted Root"),
-            h("p", { className: "row-note" }, row.name)
-          ),
+	          h(
+	            "td",
+	            { title: row.name || "" },
+	            h("strong", { className: "file-name" }, row.fileName || row.name),
+	            h("p", { className: "row-note" }, fileViewFolderLabel(row))
+	          ),
           h("td", null, h(StatusPill, { status: row.status || "not_started" }), row.updatedAt ? h("p", { className: "row-note" }, `Updated: ${row.updatedAt}`) : null),
           h(
             "td",
@@ -4093,10 +4406,29 @@
     const rows = labels.rows || [];
     const summary = labels.summary || {};
     const [showCompleted, setShowCompleted] = React.useState(() => Boolean(uiState.showCompletedTrainingLabels));
+    const [folderFilter, setFolderFilter] = React.useState("all");
+    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
     React.useEffect(() => {
       uiState.showCompletedTrainingLabels = showCompleted;
     }, [showCompleted]);
-    const visibleRows = showCompleted ? rows : rows.filter((row) => row.status !== "completed");
+    const statusFilteredRows = React.useMemo(
+      () => showCompleted ? rows : rows.filter((row) => row.status !== "completed"),
+      [rows, showCompleted]
+    );
+    const sortedRows = React.useMemo(
+      () => sortFileRowsByFolder(statusFilteredRows, fileViewFolderLabel, (row) => row.fileName || row.name),
+      [statusFilteredRows]
+    );
+    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedRows, fileViewFolderLabel), [sortedRows]);
+    React.useEffect(() => {
+      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
+        setFolderFilter("all");
+      }
+    }, [folderFilter, folderChoices]);
+    const folderFilteredRows = folderFilter === "all"
+      ? sortedRows
+      : sortedRows.filter((row) => fileViewFolderLabel(row) === folderFilter);
+    const visibleRows = folderFilteredRows.slice(0, Math.min(rowLimit, folderFilteredRows.length));
     const projectNames = Array.from(new Set((ctx.projects || []).map((project) => project.slug).filter(Boolean))).sort();
     const speakerNames = Array.from(
       new Set(
@@ -4148,11 +4480,19 @@
             h("p", null, "Open Inspect to label from the review page with audio playback, timing rows, and fine-tuning save actions.")
           ),
 	          h(
-	            "div",
-	            { className: "training-labels-controls" },
-	            h(TrainingAudioCacheAll, { rows }),
-	            h(
-	              "label",
+		            "div",
+		            { className: "training-labels-controls" },
+		            h(TrainingAudioCacheAll, { rows }),
+		            h(FolderFilterControl, { id: "training_labels_folder_filter", value: folderFilter, onChange: setFolderFilter, folders: folderChoices }),
+		            h(FileViewLimitControl, {
+		              id: "training_labels_row_limit",
+		              total: folderFilteredRows.length,
+		              shown: visibleRows.length,
+		              limit: rowLimit,
+		              onLimitChange: setRowLimit,
+		            }),
+		            h(
+		              "label",
 	              { className: "checkbox-row training-labels-toggle" },
               h("input", { type: "checkbox", checked: showCompleted, onChange: (event) => setShowCompleted(event.target.checked) }),
               ` Show completed labels${completedCount ? ` (${completedCount})` : ""}`
@@ -4187,16 +4527,48 @@
 
   function WorkspaceFileChecklist({ group, name, files, emptyText }) {
     const rows = files || [];
+    const [folderFilter, setFolderFilter] = React.useState("all");
+    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    const sortedRows = React.useMemo(
+      () => sortFileRowsByFolder(rows, fileViewFolderLabel, (row) => row.name || row.path),
+      [rows]
+    );
+    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedRows, fileViewFolderLabel), [sortedRows]);
+    React.useEffect(() => {
+      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
+        setFolderFilter("all");
+      }
+    }, [folderFilter, folderChoices]);
+    const filteredRows = folderFilter === "all"
+      ? sortedRows
+      : sortedRows.filter((row) => fileViewFolderLabel(row) === folderFilter);
+    const renderedRows = filteredRows.slice(0, Math.min(rowLimit, filteredRows.length));
     return h(
       "div",
       { className: "workspace-file-picker" },
       rows.length
-        ? rows.map((file) =>
+        ? h(
+            React.Fragment,
+            null,
             h(
-              "label",
-              { key: file.path, className: "checkbox-row file-choice" },
-              h("input", { type: "checkbox", name, value: file.path, "data-check-group": group }),
-              h("span", null, h("strong", null, file.name || file.path), h("small", null, file.path || ""))
+              "div",
+              { className: "selection-toolbar file-view-toolbar workspace-file-toolbar" },
+              h(FolderFilterControl, { id: `${group}_folder_filter`, value: folderFilter, onChange: setFolderFilter, folders: folderChoices }),
+              h(FileViewLimitControl, {
+                id: `${group}_row_limit`,
+                total: filteredRows.length,
+                shown: renderedRows.length,
+                limit: rowLimit,
+                onLimitChange: setRowLimit,
+              })
+            ),
+            renderedRows.map((file) =>
+              h(
+                "label",
+                { key: file.path, className: "checkbox-row file-choice", title: file.path || "" },
+                h("input", { type: "checkbox", name, value: file.path, "data-check-group": group }),
+                h("span", null, h("strong", null, file.name || file.path), h("small", null, fileViewFolderLabel(file)))
+              )
             )
           )
         : h("p", { className: "field-status" }, emptyText)
@@ -4240,13 +4612,13 @@
         h(Field, { id: "project_name", label: "Project name" }, h("input", { id: "project_name", name: "project_name", list: "fine_tuning_project_names", placeholder: "callhome-msdd" })),
         projectNames.length ? h("datalist", { id: "fine_tuning_project_names" }, projectNames.map((name) => h("option", { key: name, value: name }))) : null,
         h("p", { className: "footer-note" }, "Use an existing project name to append samples."),
-        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select all"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
+        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
         h(Field, { id: "server_audio_paths", label: "SSH audio in audio_in/" }, h(WorkspaceFileChecklist, { group: "fine-tune-audio", name: "server_audio_paths", files: audioFiles, emptyText: "No audio files are present in audio_in/ yet." })),
         h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected."),
-        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "all" }, "Select all"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "none" }, "Clear")),
+        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "none" }, "Clear")),
         h(Field, { id: "server_rttm_paths", label: "SSH RTTM label files" }, h(WorkspaceFileChecklist, { group: "fine-tune-rttm", name: "server_rttm_paths", files: rttmFiles, emptyText: h(React.Fragment, null, "No RTTM files found yet. Use ", h("a", { href: labelHref }, "Training Labels"), " to create labels from any audio_in/ file.") })),
         h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-rttm" }, "0"), " RTTM file(s) selected."),
-        h("details", { className: "details-box compact-details" }, h("summary", null, "Optional Transcripts"), h("div", null, h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "all" }, "Select all"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "none" }, "Clear")), h(Field, { id: "server_transcript_paths", label: "SSH transcript files" }, h(WorkspaceFileChecklist, { group: "fine-tune-transcript", name: "server_transcript_paths", files: transcriptFiles, emptyText: "No optional transcript files found." })), h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-transcript" }, "0"), " transcript file(s) selected."))),
+        h("details", { className: "details-box compact-details" }, h("summary", null, "Optional Transcripts"), h("div", null, h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "none" }, "Clear")), h(Field, { id: "server_transcript_paths", label: "SSH transcript files" }, h(WorkspaceFileChecklist, { group: "fine-tune-transcript", name: "server_transcript_paths", files: transcriptFiles, emptyText: "No optional transcript files found." })), h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-transcript" }, "0"), " transcript file(s) selected."))),
         h(Field, { id: "training_transcript_text", label: "Optional shared transcript text" }, h("textarea", { id: "training_transcript_text", name: "training_transcript_text", placeholder: "Transcript text or annotation notes" })),
         h("p", { className: "footer-note" }, "Batch pairing uses filename stems: ", h("code", null, "001_clip.wav"), " pairs with ", h("code", null, "001_clip.rttm"), " and optional ", h("code", null, "001_clip.txt"), "."),
         h("p", null, h("button", { type: "submit" }, "Add samples"))

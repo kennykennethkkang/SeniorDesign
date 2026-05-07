@@ -1,3 +1,4 @@
+import contextlib
 import io
 import errno
 import json
@@ -11,6 +12,31 @@ from typing import Optional
 from urllib.parse import urlencode
 
 import workflow_dashboard as workflow_web
+
+
+@contextlib.contextmanager
+def stub_auto_train_queue():
+    """Stop dashboard.auto_train from spawning a real daemon thread mid-test.
+
+    The thread races with TemporaryDirectory cleanup (mkdir's project dirs
+    that the test then can't rmtree). Stub it out for any test that uses
+    add_to_training so cleanup is deterministic.
+    """
+
+    from dashboard import auto_train as _auto_train
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_queue(project_name, **kwargs):
+        captured.append((kwargs.get("backend") or "", project_name))
+        return True
+
+    original = _auto_train.queue_auto_train
+    _auto_train.queue_auto_train = fake_queue
+    try:
+        yield captured
+    finally:
+        _auto_train.queue_auto_train = original
 
 
 def wav_bytes(duration_seconds: float = 1.0, sample_rate: int = 16000) -> bytes:
@@ -211,7 +237,7 @@ class WorkflowWebTests(unittest.TestCase):
             )
 
     def test_stitching_tab_creates_rttm_and_training_sample(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, stub_auto_train_queue():
             root = pathlib.Path(tmpdir)
             audio_set = root / "audio_in" / "clips"
             audio_set.mkdir(parents=True)
@@ -275,6 +301,28 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(len(list((project_dir / "audio").glob("*.wav"))), 1)
             self.assertEqual(len(list((project_dir / "rttm").glob("*.rttm"))), 1)
 
+            # Mirror should land in audio_in/stitched/<run-name>/ so the
+            # Media Library + the diarization tab + the stitching tab all
+            # surface the new audio without manual intervention.
+            mirror_dir = root / "audio_in" / "stitched" / run_dir.name
+            self.assertTrue(mirror_dir.is_dir())
+            self.assertTrue(any(mirror_dir.glob("*.wav")))
+            self.assertTrue(any(mirror_dir.glob("*.rttm")))
+
+            # Pre-completed label record so the Training Labels page treats
+            # the stitched sample as already labeled.
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            mirror_audio_key = next(
+                (key for key in label_status.get("items", {}) if key.startswith(f"stitched/{run_dir.name}/")),
+                None,
+            )
+            self.assertIsNotNone(mirror_audio_key)
+            entry = label_status["items"][mirror_audio_key]
+            self.assertEqual(entry["status"], "completed")
+            self.assertEqual(entry["source"], "audio_stitching")
+            self.assertIn("pyannote/stitch-test", entry["target_projects"])
+            self.assertIn(" ", entry["label_segments"])  # at least one timing line
+
     def test_stitching_tab_can_rename_existing_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -330,8 +378,100 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(state["context"]["stitching"]["rows"][0]["displayName"], "Adult Child Infant Set")
             self.assertEqual(state["context"]["stitching"]["rows"][0]["outputName"], "age-class-mix")
 
+    def test_stitching_run_can_be_deleted_and_clears_training_copies(self):
+        with tempfile.TemporaryDirectory() as tmpdir, stub_auto_train_queue():
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_set / "001_child.wav").write_bytes(wav_bytes(1.0))
+            (audio_set / "002_adult.wav").write_bytes(wav_bytes(1.0))
+            (root / "fine_tuning" / "projects" / "pyannote" / "del-test").mkdir(parents=True)
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            fields = [
+                ("stitch_name", "delete-me"),
+                ("stitch_seed", "fixed"),
+                ("add_to_training", "1"),
+                ("training_targets", "pyannote/del-test"),
+                ("selected_audio", "clips/001_child.wav"),
+                ("speaker_labels", "Speaker_0"),
+                ("selected_audio", "clips/002_adult.wav"),
+                ("speaker_labels", "Speaker_1"),
+            ]
+            run_wsgi(
+                app,
+                method="POST",
+                path="/actions/stitch-audio",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+            run_dir = next((root / "stitched").iterdir())
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "del-test"
+            self.assertTrue(any((project_dir / "audio").iterdir()))
+            self.assertTrue(any((project_dir / "rttm").iterdir()))
+
+            del_status, headers, _ = run_wsgi(
+                app,
+                method="POST",
+                path="/stitching/delete",
+                body=urlencode([("run_dir", str(run_dir.relative_to(root)))]).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+            self.assertEqual(del_status, "303 See Other")
+            self.assertIn("/stitching", headers["Location"])
+            self.assertFalse(run_dir.exists())
+            # The pushed sample copies should be gone too — leaving them
+            # behind would make the project look like it still owns the
+            # stitched sample.
+            self.assertFalse(any((project_dir / "audio").iterdir()))
+            self.assertFalse(any((project_dir / "rttm").iterdir()))
+
+    def test_stitching_run_queues_auto_train_for_each_training_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir, stub_auto_train_queue() as queued_calls:
+            root = pathlib.Path(tmpdir)
+            audio_set = root / "audio_in" / "clips"
+            audio_set.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_set / "001_child.wav").write_bytes(wav_bytes(1.0))
+            (audio_set / "002_adult.wav").write_bytes(wav_bytes(1.0))
+            (root / "fine_tuning" / "projects" / "pyannote" / "auto-target").mkdir(parents=True)
+            (root / "fine_tuning" / "projects" / "nemo" / "auto-target").mkdir(parents=True)
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            fields = [
+                ("stitch_name", "auto-train-demo"),
+                ("stitch_seed", "fixed"),
+                ("add_to_training", "1"),
+                ("training_targets", "pyannote/auto-target"),
+                ("training_targets", "nemo/auto-target"),
+                ("selected_audio", "clips/001_child.wav"),
+                ("speaker_labels", "Speaker_0"),
+                ("selected_audio", "clips/002_adult.wav"),
+                ("speaker_labels", "Speaker_1"),
+            ]
+            run_wsgi(
+                app,
+                method="POST",
+                path="/actions/stitch-audio",
+                body=urlencode(fields).encode("utf-8"),
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(
+                sorted(queued_calls),
+                sorted([("nemo", "auto-target"), ("pyannote", "auto-target")]),
+            )
+            run_dir = next((root / "stitched").iterdir())
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata.get("auto_train_triggered"))
+            self.assertEqual(
+                sorted(metadata.get("auto_train_targets") or []),
+                sorted(["nemo/auto-target", "pyannote/auto-target"]),
+            )
+
     def test_stitching_tab_can_add_sample_to_multiple_training_targets(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, stub_auto_train_queue():
             root = pathlib.Path(tmpdir)
             audio_set = root / "audio_in" / "clips"
             audio_set.mkdir(parents=True)
@@ -633,6 +773,8 @@ class WorkflowWebTests(unittest.TestCase):
             media_history = page_state(media_body)["context"]["diarization"]["history"]
             item_links = [link["label"] for link in media_history[0]["links"]]
             self.assertEqual(media_history[0]["audioHref"], "/files/audio_in/001_clip.wav")
+            self.assertEqual(media_history[0]["fileName"], "001_clip.wav")
+            self.assertEqual(media_history[0]["folder"], "Unsorted Root")
             self.assertIn("Source Audio", item_links)
             self.assertIn("Transcript", item_links)
             self.assertIn("Diarized Times", item_links)

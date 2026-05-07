@@ -491,7 +491,26 @@ def parse_rttm(rttm_path: Path) -> list[RttmSegment]:
 
 
 def probe_media_duration(media_path: Path) -> float:
-    """Estimate media duration with ffprobe first and WAV parsing as fallback."""
+    """Read media duration cheaply when possible and fall back to ffprobe.
+
+    The original implementation always shelled out to ffprobe first, which
+    burns ~10-50 ms per file. For a 1700-file stitch run that's a 30-60 s tax
+    in subprocess overhead alone, even though most inputs are PCM WAV that
+    can be answered from the header in microseconds. So we now try the WAV
+    fast path first and only spawn ffprobe for non-WAV (or malformed WAV)
+    inputs.
+    """
+
+    if media_path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(media_path), "rb") as wav_file:
+                frame_rate = wav_file.getframerate()
+                frame_count = wav_file.getnframes()
+            if frame_rate > 0 and frame_count > 0:
+                return frame_count / frame_rate
+        except (OSError, wave.Error):
+            # Compressed-WAV or truncated header: fall through to ffprobe.
+            pass
 
     ffprobe_bin = shutil.which("ffprobe")
     if ffprobe_bin:
@@ -517,13 +536,6 @@ def probe_media_duration(media_path: Path) -> float:
                 duration = 0.0
             if duration > 0:
                 return duration
-
-    if media_path.suffix.lower() == ".wav":
-        with wave.open(str(media_path), "rb") as wav_file:
-            frame_rate = wav_file.getframerate()
-            frame_count = wav_file.getnframes()
-        if frame_rate > 0:
-            return frame_count / frame_rate
 
     raise RuntimeError(
         f"Unable to determine duration for {media_path}. Install ffprobe or use WAV files."

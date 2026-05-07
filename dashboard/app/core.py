@@ -298,6 +298,8 @@ class CoreMixin:
                 status, headers, body = self.handle_stitching_run(environ)
             elif routed_method == "POST" and path == "/stitching/rename":
                 status, headers, body = self.handle_stitching_rename(environ)
+            elif routed_method == "POST" and path == "/stitching/delete":
+                status, headers, body = self.handle_stitching_delete(environ)
             elif routed_method == "POST" and path == "/actions/review":
                 status, headers, body = self.handle_review(environ)
             elif routed_method == "POST" and path == "/actions/run-diarization":
