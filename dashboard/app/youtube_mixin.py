@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""YouTube link queue, conversion, and run history."""
+"""YouTube link queue, conversion, and run history.
+
+The site's "give me audio out of YouTube" flow lives here. Manages the
+pending URL queue, kicks off the sbatch conversion job that downloads and
+transcodes each link, and surfaces the per-run history TSV the user sees
+on the page. The actual download/transcode mechanics live in
+``youtube_audio_batch.py`` — this mixin is just the dashboard front
+half: enqueue, dispatch, render.
+"""
 from __future__ import annotations
 
 

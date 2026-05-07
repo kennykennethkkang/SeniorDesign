@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Audio stitching workflow for randomized RTTM training samples."""
+"""Audio stitching workflow for randomized RTTM training samples.
+
+Used to build longer multi-speaker clips out of shorter source files when
+the corpus we're handed is too short or single-speaker for a real
+diarization signal. Drives ``stitch_audio.py`` over sbatch and mirrors the
+result back into ``audio_in/`` so the rest of the pipeline can pick it up
+exactly like it would a regular upload — keeps the stitched data
+indistinguishable from any other input and avoids special cases downstream.
+"""
 from __future__ import annotations
 
 import json

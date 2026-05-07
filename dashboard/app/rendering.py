@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Rendering mixin: builds the JSON page-state blob and injects it into the React HTML shell."""
+"""Rendering mixin: builds the JSON page-state blob and serves the React HTML shell.
+
+The browser side doesn't talk to a REST API — it boots from a single page
+template with a chunk of JSON shoved into ``<script id="dashboard-state">``.
+This mixin is what assembles that JSON: page context, asset URLs, route
+table, defaults, queue snapshots, etc. Frontend changes that need new data
+end up here first, then in ``dashboard_app.js`` to consume it.
+"""
 from __future__ import annotations
 
 
@@ -1020,6 +1027,7 @@ class RenderingMixin:
                 "fineTuneCreateProject": self.frontend_route("/fine-tuning/create-project", script_name),
                 "fineTuneUpload": self.frontend_route("/fine-tuning/upload-sample", script_name),
                 "fineTunePrepare": self.frontend_route("/fine-tuning/prepare", script_name),
+                "fineTunePrepareLaunch": self.frontend_route("/fine-tuning/prepare-launch", script_name),
                 "fineTuneLaunch": self.frontend_route("/fine-tuning/launch", script_name),
                 "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
                 "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),

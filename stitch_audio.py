@@ -21,6 +21,7 @@ from typing import Iterable, Sequence
 from audio_numbering import AUDIO_EXTENSIONS
 from fine_tuning_manager import (
     build_sample,
+    format_rttm_line,
     normalize_backend,
     probe_media_duration,
     sanitize_filename,
@@ -126,19 +127,11 @@ def write_rttm(path: Path, *, session_id: str, segments: Sequence[StitchSegment]
     lines = []
     for segment in segments:
         lines.append(
-            " ".join(
-                [
-                    "SPEAKER",
-                    session_id,
-                    "1",
-                    f"{segment.start:.3f}",
-                    f"{segment.duration:.3f}",
-                    "<NA>",
-                    "<NA>",
-                    segment.speaker,
-                    "<NA>",
-                    "<NA>",
-                ]
+            format_rttm_line(
+                session_id=session_id,
+                start=segment.start,
+                duration=segment.duration,
+                speaker=segment.speaker,
             )
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

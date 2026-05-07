@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import struct
 import tempfile
 import time
 import unittest
@@ -23,6 +24,24 @@ def wav_bytes(duration_seconds: float = 2.0, sample_rate: int = 16000) -> bytes:
     return buffer.getvalue()
 
 
+def float_wav_bytes(duration_seconds: float = 2.0, sample_rate: int = 16000) -> bytes:
+    frame_count = int(duration_seconds * sample_rate)
+    data_size = frame_count * 4
+    riff_size = 4 + (8 + 16) + (8 + data_size)
+    return b"".join(
+        [
+            b"RIFF",
+            struct.pack("<I", riff_size),
+            b"WAVE",
+            b"fmt ",
+            struct.pack("<IHHIIHH", 16, 3, 1, sample_rate, sample_rate * 4, 4, 32),
+            b"data",
+            struct.pack("<I", data_size),
+            b"\x00" * data_size,
+        ]
+    )
+
+
 class FineTuningTests(unittest.TestCase):
     def assert_default_slurm_resources(self, sbatch_path: pathlib.Path):
         sbatch_text = sbatch_path.read_text(encoding="utf-8")
@@ -30,6 +49,184 @@ class FineTuningTests(unittest.TestCase):
         self.assertIn("#SBATCH --mem=48G", sbatch_text)
         self.assertIn("#SBATCH --time=08:00:00", sbatch_text)
         self.assertIn("#SBATCH --gres=gpu:1", sbatch_text)
+
+    def test_prepare_project_accepts_ieee_float_wav_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            sample = fine_tuning.save_project_sample(
+                project_name="Float WAV Project",
+                audio_name="float_clip.wav",
+                audio_bytes=float_wav_bytes(2.5),
+                rttm_name="float_clip.rttm",
+                rttm_bytes=(
+                    b"SPEAKER float_clip 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                    b"SPEAKER float_clip 1 1.100 0.800 <NA> <NA> speaker_1 <NA> <NA>\n"
+                ),
+                transcript_text="float wav sample",
+                root=root,
+            )
+
+            self.assertAlmostEqual(sample.duration_seconds, 2.5, places=3)
+            artifacts = fine_tuning.prepare_project(
+                project_name="Float WAV Project",
+                root=root,
+            )
+
+            self.assertEqual(artifacts.sample_count, 1)
+            projects = fine_tuning.list_projects(root=root)
+            self.assertEqual(projects[0]["sample_count"], 1)
+
+    def test_save_project_sample_canonicalizes_uploaded_rttm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            fine_tuning.save_project_sample(
+                project_name="Canonical RTTM",
+                backend="nemo",
+                audio_name="canonical.wav",
+                audio_bytes=wav_bytes(3.0),
+                rttm_name="mismatched_name.rttm",
+                rttm_bytes=(
+                    b"# comment is not part of the training RTTM\n"
+                    b"SPEAKER wrong_session 7 0 1 <NA> <NA> Speaker_A confidence extra\n"
+                    b"SPEAKER wrong_session 7 1.2 0.8 <NA> <NA> Speaker_B confidence extra\n"
+                ),
+                root=root,
+            )
+
+            rttm_path = (
+                root
+                / "fine_tuning"
+                / "projects"
+                / "nemo"
+                / "canonical-rttm"
+                / "rttm"
+                / "canonical.rttm"
+            )
+            self.assertEqual(
+                rttm_path.read_text(encoding="utf-8").splitlines(),
+                [
+                    "SPEAKER canonical 1 0.000 1.000 <NA> <NA> Speaker_A <NA> <NA>",
+                    "SPEAKER canonical 1 1.200 0.800 <NA> <NA> Speaker_B <NA> <NA>",
+                ],
+            )
+
+    def test_save_project_sample_streams_canonicalizes_uploaded_rttm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            fine_tuning.save_project_sample_streams(
+                project_name="Stream RTTM",
+                backend="pyannote",
+                audio_name="stream_clip.wav",
+                audio_stream=io.BytesIO(wav_bytes(3.0)),
+                rttm_name="other.rttm",
+                rttm_stream=io.BytesIO(
+                    b"SPEAKER other 1 0.000 1.000 <NA> <NA> Speaker_A <NA> <NA>\n"
+                    b"SPEAKER other 1 1.250 0.500 <NA> <NA> Speaker_B <NA> <NA>\n"
+                ),
+                root=root,
+            )
+
+            rttm_path = (
+                root
+                / "fine_tuning"
+                / "projects"
+                / "pyannote"
+                / "stream-rttm"
+                / "rttm"
+                / "stream_clip.rttm"
+            )
+            self.assertEqual(
+                rttm_path.read_text(encoding="utf-8").splitlines(),
+                [
+                    "SPEAKER stream_clip 1 0.000 1.000 <NA> <NA> Speaker_A <NA> <NA>",
+                    "SPEAKER stream_clip 1 1.250 0.500 <NA> <NA> Speaker_B <NA> <NA>",
+                ],
+            )
+
+    def test_prepare_project_accepts_legacy_default_backend_project_layout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            project_dir = root / "fine_tuning" / "projects" / "legacy-lab"
+            (project_dir / "audio").mkdir(parents=True)
+            (project_dir / "rttm").mkdir()
+            (project_dir / "text").mkdir()
+            (project_dir / "audio" / "legacy.wav").write_bytes(wav_bytes(3.0))
+            (project_dir / "rttm" / "legacy.rttm").write_text(
+                "SPEAKER legacy 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                "SPEAKER legacy 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+
+            artifacts = fine_tuning.prepare_project(project_name="legacy-lab", root=root)
+
+            self.assertEqual(artifacts.project_dir, project_dir)
+            self.assertEqual(artifacts.sample_count, 1)
+            self.assertTrue((project_dir / "artifacts" / "metadata.json").is_file())
+            self.assertFalse((root / "fine_tuning" / "projects" / "nemo" / "legacy-lab").exists())
+
+    def test_prepare_project_warns_and_skips_samples_missing_rttm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            project_dir = root / "fine_tuning" / "projects" / "nemo" / "partial-lab"
+            (project_dir / "audio").mkdir(parents=True)
+            (project_dir / "rttm").mkdir()
+            (project_dir / "text").mkdir()
+            (project_dir / "audio" / "valid.wav").write_bytes(wav_bytes(3.0))
+            (project_dir / "audio" / "missing.wav").write_bytes(wav_bytes(3.0))
+            (project_dir / "rttm" / "valid.rttm").write_text(
+                "SPEAKER valid 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                "SPEAKER valid 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+
+            artifacts = fine_tuning.prepare_project(
+                project_name="partial-lab",
+                backend="nemo",
+                root=root,
+            )
+
+            self.assertEqual(artifacts.sample_count, 1)
+            self.assertEqual(len(artifacts.warnings), 1)
+            self.assertIn("Missing RTTM for training sample 'missing'", artifacts.warnings[0])
+
+    def test_prepare_project_splits_nemo_msdd_on_available_multispeaker_samples(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            fine_tuning.save_project_sample(
+                project_name="Sparse Multispeaker",
+                backend="nemo",
+                audio_name="a_single.wav",
+                audio_bytes=wav_bytes(3.0),
+                rttm_name="a_single.rttm",
+                rttm_bytes=b"SPEAKER a_single 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n",
+                root=root,
+            )
+            fine_tuning.save_project_sample(
+                project_name="Sparse Multispeaker",
+                backend="nemo",
+                audio_name="z_multi.wav",
+                audio_bytes=wav_bytes(3.0),
+                rttm_name="z_multi.rttm",
+                rttm_bytes=(
+                    b"SPEAKER z_multi 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                    b"SPEAKER z_multi 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n"
+                ),
+                root=root,
+            )
+
+            artifacts = fine_tuning.prepare_project(
+                project_name="Sparse Multispeaker",
+                backend="nemo",
+                train_ratio=0.5,
+                root=root,
+            )
+
+            self.assertEqual(artifacts.sample_count, 2)
+            self.assertTrue(artifacts.msdd_manifest_train.read_text(encoding="utf-8").strip())
+            self.assertTrue(artifacts.msdd_manifest_validation.read_text(encoding="utf-8").strip())
+            self.assertTrue(
+                any("single-speaker sample(s)" in warning for warning in artifacts.warnings)
+            )
 
     def test_prepare_project_generates_session_and_msdd_manifests(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -74,6 +271,16 @@ class FineTuningTests(unittest.TestCase):
             self.assertTrue(artifacts.sbatch_script_path.exists())
             self.assert_default_slurm_resources(artifacts.sbatch_script_path)
 
+            # Same cluster-runtime fixes the diarization sbatch ships need to
+            # carry over to NeMo fine-tuning too — without `module load` and
+            # `EBROOTGCCCORE/lib64` on LD_LIBRARY_PATH, the venv's _sqlite3.so
+            # can't resolve `sqlite3_deserialize`.
+            sbatch_text = artifacts.sbatch_script_path.read_text(encoding="utf-8")
+            self.assertIn("module load Python/3.12.3-GCCcore-14.2.0", sbatch_text)
+            self.assertIn("sbatch_runtime_env.sh", sbatch_text)
+            self.assertIn("expose_venv_native_libraries", sbatch_text)
+            self.assertIn("/sbatch_runtime/.venv", sbatch_text)
+
             train_session_rows = artifacts.session_manifest_train.read_text(encoding="utf-8").strip().splitlines()
             validation_session_rows = artifacts.session_manifest_validation.read_text(encoding="utf-8").strip().splitlines()
             self.assertEqual(len(train_session_rows), 1)
@@ -83,6 +290,7 @@ class FineTuningTests(unittest.TestCase):
             validation_msdd_rows = [json.loads(line) for line in artifacts.msdd_manifest_validation.read_text(encoding="utf-8").splitlines()]
             self.assertGreaterEqual(len(train_msdd_rows), 1)
             self.assertGreaterEqual(len(validation_msdd_rows), 1)
+            self.assertEqual(train_msdd_rows[0]["text"], "-")
 
             pairwise_files = sorted(
                 path.name
@@ -91,6 +299,68 @@ class FineTuningTests(unittest.TestCase):
             self.assertIn("b_multi.speaker_a_speaker_b.rttm", pairwise_files)
             self.assertIn("b_multi.speaker_a_speaker_c.rttm", pairwise_files)
             self.assertIn("b_multi.speaker_b_speaker_c.rttm", pairwise_files)
+
+    def test_nemo_launch_script_falls_back_to_detected_nemo_root(self):
+        """A fresh prepare with no nemo_root must still embed a usable default.
+
+        We mimic the runbook's `<workspace-parent>/NeMo` layout in the temp
+        sandbox so `_detect_default_nemo_root` finds it. If this regresses to
+        the old "Set NEMO_ROOT to your NeMo checkout" bail-out, every dashboard
+        Launch click breaks again.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            fake_nemo = root.parent / "NeMo"
+            (fake_nemo / "examples" / "speaker_tasks" / "diarization" / "neural_diarizer").mkdir(parents=True, exist_ok=True)
+            try:
+                # Patch the candidate list so the lookup actually finds the
+                # tempdir-adjacent NeMo we just stubbed out.
+                original_candidates = fine_tuning._NEMO_ROOT_DEFAULT_CANDIDATES
+                fine_tuning._NEMO_ROOT_DEFAULT_CANDIDATES = (fake_nemo,)
+                fine_tuning.save_project_sample(
+                    project_name="Default Nemo Root",
+                    audio_name="default.wav",
+                    audio_bytes=wav_bytes(4.0),
+                    rttm_name="default.rttm",
+                    rttm_bytes=(
+                        b"SPEAKER default 1 0.000 1.000 <NA> <NA> speaker_a <NA> <NA>\n"
+                        b"SPEAKER default 1 1.200 1.000 <NA> <NA> speaker_b <NA> <NA>\n"
+                    ),
+                    transcript_text="default sample",
+                    root=root,
+                )
+                artifacts = fine_tuning.prepare_project(
+                    project_name="Default Nemo Root",
+                    root=root,
+                )
+            finally:
+                fine_tuning._NEMO_ROOT_DEFAULT_CANDIDATES = original_candidates
+
+            launch_text = artifacts.launch_script_path.read_text(encoding="utf-8")
+            self.assertIn(str(fake_nemo), launch_text)
+            self.assertIn("NEMO_ROOT=", launch_text)
+
+            # NeMo v2.x renamed the speaker-embeddings override key. The
+            # upstream multiscale_diar_decoder.py docstring still advertises
+            # `model.base.diarizer.*`, but the actual config schema exposes
+            # `model.diarizer.*` directly — Hydra refuses to override a
+            # missing struct, so the old form fails fast with
+            # "Key 'base' is not in struct".
+            self.assertIn("model.diarizer.speaker_embeddings.model_path", launch_text)
+            self.assertNotIn("model.base.diarizer", launch_text)
+            # Lightning 2.x auto-picks DDP even on a single GPU, and MSDD's
+            # frozen TitaNet has params that don't participate in the loss.
+            # Without find_unused_parameters=True, training crashes mid-step.
+            self.assertIn("trainer.strategy=ddp_find_unused_parameters_true", launch_text)
+            # Lightning saves both a "best" and a "last" checkpoint by default.
+            # On the WAVE cluster the last checkpoint is saved via an atomic
+            # temp→dest shutil.move that crosses the /local/scratch → /WAVE
+            # device boundary; when the user quota is tight this copy hits
+            # EDQUOT and crashes the job even though the best checkpoint was
+            # already written.  Disabling save_last cuts checkpoint storage in
+            # half and avoids the cross-device quota failure.
+            self.assertIn("exp_manager.checkpoint_callback_params.save_last=false", launch_text)
 
     def test_prepare_project_generates_pyannote_training_workspace(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -116,12 +386,113 @@ class FineTuningTests(unittest.TestCase):
             )
 
             self.assertEqual(artifacts.backend, "pyannote")
-            self.assertTrue((artifacts.project_dir / "artifacts" / "database.yml").exists())
-            self.assertTrue((artifacts.project_dir / "artifacts" / "lists" / "train.lst").exists())
-            self.assertTrue((artifacts.project_dir / "artifacts" / "train_pyannote.py").exists())
+            db_yml_path = artifacts.project_dir / "artifacts" / "database.yml"
+            train_lst_path = artifacts.project_dir / "artifacts" / "lists" / "train.lst"
+            train_py_path = artifacts.project_dir / "artifacts" / "train_pyannote.py"
+            self.assertTrue(db_yml_path.exists())
+            self.assertTrue(train_lst_path.exists())
+            self.assertTrue(train_py_path.exists())
             self.assertTrue(artifacts.launch_script_path.exists())
             self.assertTrue(artifacts.sbatch_script_path.exists())
             self.assert_default_slurm_resources(artifacts.sbatch_script_path)
+
+            # Lock in the cluster fixes so future trainings keep them: the
+            # database.yml must point pyannote.database at absolute paths (it
+            # otherwise resolves them relative to the YAML directory and can't
+            # find lists/rttm/uem), the training script must keep the torchaudio
+            # AudioMetaData shim, and the sbatch must load the GCCcore-tied
+            # Python module so the venv's _sqlite3 finds its symbols.
+            db_yml_text = db_yml_path.read_text(encoding="utf-8")
+            self.assertIn(str(train_lst_path), db_yml_text)
+
+            train_py_text = train_py_path.read_text(encoding="utf-8")
+            self.assertIn("_patch_torchaudio_compatibility", train_py_text)
+            self.assertIn("AudioMetaData", train_py_text)
+            # PyTorch 2.6 made torch.load default to weights_only=True, which
+            # rejects the TorchVersion / dataclass payloads in pyannote
+            # checkpoints. The training script needs the same trusted-load
+            # patch the diarization backend uses (`_trusted_torch_load_context`)
+            # or `Model.from_pretrained` dies with `_pickle.UnpicklingError:
+            # Weights only load failed` before training starts.
+            self.assertIn("weights_only", train_py_text)
+            self.assertIn("torch.load", train_py_text)
+            # pyannote.database calls `torchaudio.info` for every training
+            # file to precompute durations. With torchaudio 2.10's `info`/
+            # `load`/`AudioMetaData` removed, a stub-only shim makes the
+            # dataloader raise during the very first epoch — the script must
+            # back the stubs with real soundfile-driven implementations.
+            self.assertIn("import soundfile", train_py_text)
+            self.assertIn("_sf.info", train_py_text)
+            self.assertIn("_sf.read", train_py_text)
+            # In torchaudio 2.10 the names exist but delegate to torchcodec,
+            # which fails on the cluster (no FFmpeg libavutil). The shim has
+            # to override unconditionally — a hasattr guard lets the broken
+            # torchcodec path win and pyannote dies in the dataloader.
+            self.assertNotIn('if not hasattr(torchaudio, "load")', train_py_text)
+            self.assertNotIn('if not hasattr(torchaudio, "info")', train_py_text)
+
+    def test_pyannote_uem_clips_to_actual_audio_frames(self):
+        """A WAV whose RIFF header lies about its length must not push the
+        UEM annotated range past the real audio. Otherwise pyannote's
+        dataloader samples chunks past EOF mid-epoch with
+        `requested chunk … lies outside file bounds`. Fabricating a
+        truncated WAV (header claims much more data than is on disk) is
+        the cheapest way to lock this in.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            real_audio_seconds = 1.5
+            sample_rate = 16000
+            # Build a normal 1.5 s PCM WAV, then rewrite the data-chunk
+            # length field to lie about being 60 s long.
+            audio = wav_bytes(real_audio_seconds, sample_rate=sample_rate)
+            inflated_data_size = (60 * sample_rate) * 2
+            data_marker = b"data"
+            data_pos = audio.index(data_marker)
+            length_pos = data_pos + len(data_marker)
+            corrupted = (
+                audio[:length_pos]
+                + struct.pack("<I", inflated_data_size)
+                + audio[length_pos + 4:]
+            )
+            fine_tuning.save_project_sample(
+                project_name="Truncated WAV",
+                backend="pyannote",
+                audio_name="trunc.wav",
+                audio_bytes=corrupted,
+                rttm_name="trunc.rttm",
+                rttm_bytes=(
+                    b"SPEAKER trunc 1 0.000 0.500 <NA> <NA> Speaker_A <NA> <NA>\n"
+                    b"SPEAKER trunc 1 0.700 0.500 <NA> <NA> Speaker_B <NA> <NA>\n"
+                ),
+                root=root,
+            )
+            artifacts = fine_tuning.prepare_project(
+                project_name="Truncated WAV",
+                backend="pyannote",
+                root=root,
+            )
+
+            train_uem = (artifacts.project_dir / "artifacts" / "uem" / "train.uem")
+            dev_uem = (artifacts.project_dir / "artifacts" / "uem" / "development.uem")
+            uem_text = train_uem.read_text(encoding="utf-8") + dev_uem.read_text(encoding="utf-8")
+            # The UEM line is `<stem> NA 0.000 <duration>`. Anything > the
+            # real audio length means we've trusted the lying header.
+            for line in uem_text.splitlines():
+                parts = line.split()
+                if len(parts) == 4 and parts[0] == "trunc":
+                    self.assertLessEqual(
+                        float(parts[3]),
+                        real_audio_seconds + 0.05,
+                        f"UEM annotated range {parts[3]} exceeds real audio {real_audio_seconds}s",
+                    )
+
+            sbatch_text = artifacts.sbatch_script_path.read_text(encoding="utf-8")
+            self.assertIn("module load Python/3.12.3-GCCcore-14.2.0", sbatch_text)
+            self.assertIn("sbatch_runtime_env.sh", sbatch_text)
+            self.assertIn("expose_venv_native_libraries", sbatch_text)
+            self.assertIn(".venv_pyannote", sbatch_text)
 
     def test_launch_training_runs_generated_script_in_background(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2358,6 +2358,10 @@ dialog.dashboard-dialog::backdrop {
   font-size: 13px;
 }
 
+.quick-train-form {
+  width: auto;
+}
+
 button.danger,
 button.secondary.danger {
   background: rgba(177, 62, 19, 0.08);
@@ -4242,4 +4246,310 @@ button.btn-sm {
   min-width: 130px;
   padding: 0.35rem 0.45rem;
   font-size: 12px;
+}
+
+/* ============================================================
+   Senior-design polish pass.
+   Purely additive — sits at the end of the file so the cascade
+   keeps every earlier rule intact. Goal is small, visible wins:
+   tighten the SCU palette, calm down the dark mode, normalize
+   card padding/radii, fix a few box-overflow cases that wrap
+   awkwardly on narrow viewports, and add the responsive
+   breakpoints that were missing for ~1024px and ~720px.
+   If anything regresses, delete this whole block — the rest of
+   the stylesheet is unchanged.
+   ============================================================ */
+
+:root {
+  /* Soften shadows and pick a slightly cooler border so cards
+     read as "lifted off the page" instead of "outlined hard." */
+  --shadow: 0 10px 26px rgba(42, 55, 63, 0.09);
+  --shadow-soft: 0 4px 12px rgba(42, 55, 63, 0.07);
+  --line: #dde2e7;
+  --border: #c7cfd6;
+  /* Brand-tinted focus ring; reused by the unified focus styles
+     below so every interactive surface looks the same when
+     keyboard-tabbed. */
+  --ring: 0 0 0 3px rgba(140, 28, 46, 0.24);
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+:root[data-theme="dark"] {
+  /* Dark mode used to feel washed-out blue. Pull the panels
+     a touch warmer and bump card contrast so text + borders
+     still read at a glance. */
+  --bg: #0d141b;
+  --panel-solid: #182230;
+  --panel: rgba(24, 34, 46, 0.96);
+  --line: #364553;
+  --border: #4c5e6e;
+  --shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
+  --shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.32);
+  --ring: 0 0 0 3px rgba(255, 154, 172, 0.36);
+}
+
+/* Card-family normalization: same radius, same border treatment.
+   Earlier phases drifted between 8px and var(--radius); pin them
+   here so a panel next to a project-card next to a feature-card
+   actually line up. */
+.hero-card,
+.command-card,
+.panel,
+.status-card,
+.feature-card,
+.project-card,
+.subpanel,
+.summary-card,
+.metric,
+.help-card,
+.details-box {
+  border-radius: var(--radius);
+}
+
+/* Boxes that hold long unbroken strings (file paths, model IDs,
+   stack traces). Without this, narrow viewports show a content
+   bleed past the right edge of the card. */
+.panel,
+.subpanel,
+.summary-card,
+.feature-card,
+.project-card,
+.status-card,
+.help-card,
+.details-box,
+.cluster-queue-panel,
+.file-search-panel {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Tables inside panels: keep the header sticky on scroll and
+   give long cell content a proper wrap path so columns don't
+   blow out the page width. The pipeline produces some really
+   long file stems (JIBO Kids stitched stems get past 60 chars)
+   and they used to push the row into horizontal scroll. */
+.table-scroll {
+  border-radius: var(--radius);
+}
+
+.table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-solid);
+}
+
+.table-scroll td {
+  word-break: break-word;
+}
+
+:root[data-theme="dark"] .table-scroll th {
+  background: var(--panel-solid);
+}
+
+/* Hero card — used to fight with the masthead grid on tablet
+   widths. Drop the min-height and let the content size itself
+   so the second column (command-card) doesn't get squeezed. */
+@media (max-width: 1024px) {
+  .masthead {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hero-card {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    padding: 22px 24px;
+  }
+
+  .hero-card h1 {
+    max-width: none;
+    font-size: 30px;
+  }
+
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    width: min(100%, calc(100% - 16px));
+    padding: 12px 0 28px;
+  }
+
+  .hero-card {
+    padding: 18px 18px;
+  }
+
+  .hero-card h1 {
+    font-size: 26px;
+  }
+
+  .tab-nav {
+    padding: 6px;
+    gap: 6px;
+  }
+
+  .tab-link {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .project-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  }
+
+  .quick-jump-results {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Wide tables on phones: let them scroll horizontally instead
+     of cramming. The sticky header still works inside the scroll
+     container. */
+  .table-scroll {
+    overflow-x: auto;
+  }
+}
+
+/* Buttons — earlier rules paint the surface; here we just clean
+   up edge cases: keep tight inline buttons from full-bleeding
+   their flex container, and make sure the disabled cursor wins. */
+.row-actions button,
+.compact-toolbar button,
+.inline-form button {
+  width: auto;
+}
+
+button[disabled],
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Inputs — match the card border treatment so forms blend into
+   the panel they live in instead of looking pasted on. */
+input,
+select,
+textarea {
+  border-color: var(--border);
+}
+
+input:hover:not(:disabled):not(:focus),
+select:hover:not(:disabled):not(:focus),
+textarea:hover:not(:disabled):not(:focus) {
+  border-color: var(--slate);
+}
+
+/* Code/preview boxes — we use these everywhere (logs, RTTM,
+   transcripts). Tighten the font ramp so the content reads as
+   "structured" rather than "raw dump." */
+.mono-box,
+pre {
+  font-size: 12.5px;
+  line-height: 1.55;
+  border-color: var(--line);
+}
+
+/* Status / score pills — bump letter-spacing and weight so the
+   short labels (OK, FAILED, DRAFT) read clearly even at small
+   sizes inside crowded table rows. */
+.status-pill,
+.queue-state {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Live-progress banner used info-blue in light mode but lost
+   contrast in dark mode. Lift the dark variant a notch. */
+:root[data-theme="dark"] .live-progress-banner {
+  background: rgba(96, 168, 240, 0.18);
+  border-color: rgba(120, 178, 240, 0.55);
+  color: #e6f1fb;
+}
+
+/* Run-tab strip — the pill borders looked too gray; align with
+   the rest of the SCU palette. */
+.run-tab--active {
+  background: rgba(140, 28, 46, 0.10);
+  border-color: var(--accent);
+  color: var(--accent-dark);
+}
+
+:root[data-theme="dark"] .run-tab--active {
+  background: rgba(255, 154, 172, 0.16);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Cluster-queue "self" highlight — same idea, brand the row
+   instead of using a generic blue. */
+.cluster-queue-row--self td {
+  background: rgba(140, 28, 46, 0.08);
+}
+
+.cluster-queue-row--self td:first-child {
+  border-left: 3px solid var(--accent);
+}
+
+:root[data-theme="dark"] .cluster-queue-row--self td {
+  background: rgba(255, 154, 172, 0.14);
+}
+
+/* Tab nav — the sticky bar can sit on top of forms; give it a
+   solid backdrop so the content underneath doesn't bleed through
+   the blur on macOS Safari. */
+.tab-nav {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .tab-nav {
+  background: rgba(15, 21, 28, 0.92);
+  border-color: var(--line);
+}
+
+/* Reduced-motion respects the OS setting. Keeps the live-progress
+   pulse and run-tab transitions calmer for anyone who has it on. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Print — basic readability; the dashboard is a live tool but
+   somebody will eventually print a results table for the
+   senior-design defense binder. */
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .tab-nav,
+  .command-tools,
+  .theme-toggle,
+  .live-progress-banner,
+  .run-tab-strip {
+    display: none !important;
+  }
+
+  .panel,
+  .subpanel,
+  .feature-card,
+  .summary-card {
+    box-shadow: none;
+    border-color: #999;
+  }
 }

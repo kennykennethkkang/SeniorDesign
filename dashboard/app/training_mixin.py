@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Training-label record persistence and segment parsing."""
+"""Training-label record persistence and segment parsing.
+
+Owns the manual-labeling side of the pipeline: serializing per-file label
+records to disk in a stable format, parsing the segments out of RTTM/SRT
+inputs, and bridging completed label sets into the fine-tune project
+queue. The labeler UI itself lives in the React bundle; this mixin is the
+WSGI/storage half that the UI talks to.
+"""
 from __future__ import annotations
 
 
@@ -55,6 +62,7 @@ from fine_tuning_manager import (
     DEFAULT_SLURM_MEMORY,
     DEFAULT_SLURM_PARTITION,
     DEFAULT_SLURM_TIME,
+    format_rttm_line,
     launch_training,
     build_sample,
     list_projects,
@@ -427,19 +435,11 @@ class TrainingLabelsMixin:
         lines = []
         for segment in sorted(segments, key=lambda item: (float(item["start"]), float(item["duration"]), str(item["speaker"]))):
             lines.append(
-                " ".join(
-                    [
-                        "SPEAKER",
-                        session_id,
-                        "1",
-                        f"{float(segment['start']):.3f}",
-                        f"{float(segment['duration']):.3f}",
-                        "<NA>",
-                        "<NA>",
-                        str(segment["speaker"]),
-                        "<NA>",
-                        "<NA>",
-                    ]
+                format_rttm_line(
+                    session_id=session_id,
+                    start=float(segment["start"]),
+                    duration=float(segment["duration"]),
+                    speaker=str(segment["speaker"]),
                 )
             )
         return "\n".join(lines) + "\n"

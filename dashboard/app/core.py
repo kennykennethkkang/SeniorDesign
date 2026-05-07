@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""WSGI application core: request dispatch, response helpers, and shared utilities across all mixins."""
+"""WSGI application core: request dispatch, response helpers, and shared utilities.
+
+This is the spine the per-domain mixins (audio, youtube, diarization,
+training, stitching, fine-tuning, rendering) bolt onto. Owns the route
+table, the plumbing for parsing form/multipart bodies, the JSON helpers,
+the cached_value TTL cache, and the small filesystem utilities every other
+mixin reaches for. Anything cross-cutting lives here so the mixins stay
+narrowly scoped to their feature.
+"""
 from __future__ import annotations
 
 
@@ -314,6 +322,8 @@ class CoreMixin:
                 status, headers, body = self.handle_finetune_upload(environ)
             elif routed_method == "POST" and path == "/fine-tuning/prepare":
                 status, headers, body = self.handle_finetune_prepare(environ)
+            elif routed_method == "POST" and path == "/fine-tuning/prepare-launch":
+                status, headers, body = self.handle_finetune_prepare_launch(environ)
             elif routed_method == "POST" and path == "/fine-tuning/launch":
                 status, headers, body = self.handle_finetune_launch(environ)
             elif routed_method == "POST" and path == "/fine-tuning/rename-project":

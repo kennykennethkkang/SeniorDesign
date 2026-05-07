@@ -2179,6 +2179,7 @@ class WorkflowWebTests(unittest.TestCase):
             state = page_state(body)
             self.assertEqual(state["currentPath"], "/fine-tuning")
             self.assertEqual(state["routes"]["fineTunePrepare"], "/fine-tuning/prepare")
+            self.assertEqual(state["routes"]["fineTunePrepareLaunch"], "/fine-tuning/prepare-launch")
             self.assertEqual(state["routes"]["fineTuneLaunch"], "/fine-tuning/launch")
             self.assertEqual(state["context"]["fineTuningSummary"]["projects_with_samples"], 0)
             self.assertEqual(state["context"]["projects"], [])
@@ -3346,6 +3347,196 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(captured["extra_env"]["HF_TOKEN"], "secret-token")
             self.assertEqual(captured["extra_env"]["HUGGINGFACE_HUB_TOKEN"], "secret-token")
 
+    def test_fine_tuning_prepare_launch_prepares_and_submits_sbatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            (root / "audio_in").mkdir()
+            (root / "job_outputs").mkdir()
+            workflow_web.save_project_sample_streams(
+                project_name="Quick Train",
+                backend="nemo",
+                audio_name="quick.wav",
+                audio_stream=io.BytesIO(wav_bytes(3.0)),
+                rttm_name="quick.rttm",
+                rttm_stream=io.BytesIO(
+                    b"SPEAKER quick 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                    b"SPEAKER quick 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n"
+                ),
+                transcript_text="quick sample",
+                root=root,
+            )
+            metadata_dir = root / "fine_tuning" / "projects" / "nemo" / "quick-train" / "artifacts"
+            metadata_dir.mkdir(parents=True, exist_ok=True)
+            (metadata_dir / "metadata.json").write_text(
+                json.dumps({"slurm_memory": "24G", "slurm_cpus": 4}),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_launch_training(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(version_name="quick-v1", job_id="12345", pid=0)
+
+            original = workflow_web.launch_training
+            workflow_web.launch_training = fake_launch_training
+            try:
+                body = urlencode(
+                    [
+                        ("project_slug", "quick-train"),
+                        ("backend", "nemo"),
+                        ("launch_version_name", "quick-v1"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/fine-tuning/prepare-launch",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                workflow_web.launch_training = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertIn("Slurm+job+12345", headers["Location"])
+            self.assertEqual(captured["project_name"], "quick-train")
+            self.assertEqual(captured["backend"], "nemo")
+            self.assertTrue(captured["prefer_sbatch"])
+            self.assertEqual(captured["root"], root)
+            metadata = json.loads(
+                (
+                    root
+                    / "fine_tuning"
+                    / "projects"
+                    / "nemo"
+                    / "quick-train"
+                    / "artifacts"
+                    / "metadata.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["sample_count"], 1)
+            self.assertEqual(metadata["slurm_memory"], "24G")
+            self.assertEqual(metadata["slurm_cpus"], 4)
+
+    def test_fine_tuning_prepare_launch_uses_prepare_form_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            (root / "audio_in").mkdir()
+            (root / "job_outputs").mkdir()
+            workflow_web.save_project_sample_streams(
+                project_name="Form Submit",
+                backend="nemo",
+                audio_name="form.wav",
+                audio_stream=io.BytesIO(wav_bytes(3.0)),
+                rttm_name="form.rttm",
+                rttm_stream=io.BytesIO(
+                    b"SPEAKER form 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                    b"SPEAKER form 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n"
+                ),
+                root=root,
+            )
+
+            captured = {}
+
+            def fake_launch_training(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(version_name="form-v1", job_id="67890", pid=0)
+
+            original = workflow_web.launch_training
+            workflow_web.launch_training = fake_launch_training
+            try:
+                body = urlencode(
+                    [
+                        ("prepare_project_name", "form-submit"),
+                        ("prepare_backend", "nemo"),
+                        ("train_ratio", "0.7"),
+                        ("slurm_memory", "12G"),
+                        ("slurm_cpus", "2"),
+                        ("slurm_time", "00:30:00"),
+                        ("launch_version_name", "form-v1"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/fine-tuning/prepare-launch",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                workflow_web.launch_training = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertEqual(captured["project_name"], "form-submit")
+            self.assertEqual(captured["backend"], "nemo")
+            metadata = json.loads(
+                (
+                    root
+                    / "fine_tuning"
+                    / "projects"
+                    / "nemo"
+                    / "form-submit"
+                    / "artifacts"
+                    / "metadata.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["slurm_memory"], "12G")
+            self.assertEqual(metadata["slurm_cpus"], 2)
+            self.assertEqual(metadata["slurm_time"], "00:30:00")
+
+    def test_fine_tuning_prepare_launch_uses_sampled_backend_when_form_backend_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            (root / "audio_in").mkdir()
+            (root / "job_outputs").mkdir()
+            workflow_web.save_project_sample_streams(
+                project_name="Backend Guess",
+                backend="nemo",
+                audio_name="guess.wav",
+                audio_stream=io.BytesIO(wav_bytes(3.0)),
+                rttm_name="guess.rttm",
+                rttm_stream=io.BytesIO(
+                    b"SPEAKER guess 1 0.000 1.000 <NA> <NA> speaker_0 <NA> <NA>\n"
+                    b"SPEAKER guess 1 1.200 1.000 <NA> <NA> speaker_1 <NA> <NA>\n"
+                ),
+                root=root,
+            )
+
+            captured = {}
+
+            def fake_launch_training(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(version_name="guess-v1", job_id="24680", pid=0)
+
+            original = workflow_web.launch_training
+            workflow_web.launch_training = fake_launch_training
+            try:
+                body = urlencode(
+                    [
+                        ("project_slug", "backend-guess"),
+                        ("backend", "pyannote"),
+                        ("launch_version_name", "guess-v1"),
+                    ]
+                ).encode("utf-8")
+                status, headers, _ = run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/fine-tuning/prepare-launch",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+            finally:
+                workflow_web.launch_training = original
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertIn("Prepared+nemo%2Fbackend-guess", headers["Location"])
+            self.assertEqual(captured["project_name"], "backend-guess")
+            self.assertEqual(captured["backend"], "nemo")
+
     def test_diarization_route_submits_sbatch_job(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -4499,6 +4690,7 @@ class WorkflowWebTests(unittest.TestCase):
 
             self.assertEqual(status, "200 OK")
             state = page_state(body)
+            self.assertEqual(state["routes"]["fineTunePrepareLaunch"], "/proxy/app/fine-tuning/prepare-launch")
             self.assertEqual(state["routes"]["fineTuneLaunch"], "/proxy/app/fine-tuning/launch")
 
     def test_dashboard_derives_prefix_from_request_uri_when_script_name_is_missing(self):

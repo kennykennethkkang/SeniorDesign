@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import shlex
+import struct
 import subprocess
 import sys
 import wave
@@ -169,6 +170,80 @@ def normalize_backend(backend: str | None) -> str:
     return normalized
 
 
+def format_rttm_line(
+    *,
+    session_id: str,
+    start: float | str,
+    duration: float | str,
+    speaker: str,
+) -> str:
+    """Return one canonical 10-column RTTM SPEAKER row for training."""
+
+    return " ".join(
+        [
+            "SPEAKER",
+            str(session_id).strip() or "sample",
+            "1",
+            f"{float(start):.3f}",
+            f"{float(duration):.3f}",
+            "<NA>",
+            "<NA>",
+            str(speaker).strip() or "speaker",
+            "<NA>",
+            "<NA>",
+        ]
+    )
+
+
+def canonicalize_rttm_text(raw_text: str, *, session_id: str) -> str:
+    """Normalize valid RTTM speaker rows without changing segment timing or speaker assignment."""
+
+    lines: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 8 or parts[0].upper() != "SPEAKER":
+            continue
+        try:
+            start = float(parts[3])
+            duration = float(parts[4])
+        except ValueError:
+            continue
+        if duration <= 0:
+            continue
+        lines.append(
+            format_rttm_line(
+                session_id=session_id,
+                start=start,
+                duration=duration,
+                speaker=parts[7],
+            )
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def write_canonical_rttm_text(path: Path, raw_text: str, *, session_id: str) -> None:
+    """Write RTTM content in the canonical format consumed by the training jobs."""
+
+    path.write_text(
+        canonicalize_rttm_text(raw_text, session_id=session_id),
+        encoding="utf-8",
+    )
+
+
+def _has_audio_samples(audio_dir: Path) -> bool:
+    """Return whether an audio directory contains at least one supported media file."""
+
+    if not audio_dir.is_dir():
+        return False
+    return any(
+        path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+        for path in audio_dir.iterdir()
+    )
+
+
 # Display names live in display.json next to metadata.json. prepare_project
 # regenerates metadata.json every run, so any name stored there gets wiped.
 # Keeping it in a separate sidecar means renames survive re-prepares.
@@ -283,7 +358,16 @@ def project_dir(
     """Compute the canonical on-disk location for a project — one source of truth for the path structure."""
 
     normalized_backend = normalize_backend(backend)
-    return root / "fine_tuning" / "projects" / normalized_backend / slugify(project_name)
+    slug = slugify(project_name)
+    canonical = root / "fine_tuning" / "projects" / normalized_backend / slug
+    legacy = root / "fine_tuning" / "projects" / slug
+    if (
+        normalized_backend == DEFAULT_FINE_TUNING_BACKEND
+        and not canonical.exists()
+        and _has_audio_samples(legacy / "audio")
+    ):
+        return legacy
+    return canonical
 
 
 def project_paths(
@@ -385,7 +469,11 @@ def save_project_sample(
     audio_path = paths["audio_dir"] / f"{stem}{audio_suffix}"
     rttm_path = paths["rttm_dir"] / f"{stem}.rttm"
     audio_path.write_bytes(audio_bytes)
-    rttm_path.write_bytes(rttm_bytes)
+    try:
+        rttm_text = rttm_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("RTTM upload must be UTF-8 text.") from exc
+    write_canonical_rttm_text(rttm_path, rttm_text, session_id=stem)
 
     transcript_path: Path | None = None
     if transcript_bytes:
@@ -442,6 +530,11 @@ def save_project_sample_streams(
         raise ValueError("Audio upload is empty.")
     if rttm_path.stat().st_size == 0:
         raise ValueError("RTTM upload is empty.")
+    try:
+        rttm_text = rttm_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("RTTM upload must be UTF-8 text.") from exc
+    write_canonical_rttm_text(rttm_path, rttm_text, session_id=stem)
 
     transcript_path: Path | None = None
     if transcript_stream is not None and transcript_name:
@@ -508,9 +601,17 @@ def probe_media_duration(media_path: Path) -> float:
                 frame_count = wav_file.getnframes()
             if frame_rate > 0 and frame_count > 0:
                 return frame_count / frame_rate
+            try:
+                return probe_wav_duration_from_header(media_path)
+            except (OSError, ValueError, struct.error):
+                pass
         except (OSError, wave.Error):
-            # Compressed-WAV or truncated header: fall through to ffprobe.
-            pass
+            # Python 3.9's wave module rejects valid WAV variants such as IEEE
+            # float WAVs. Read RIFF chunks directly before requiring ffprobe.
+            try:
+                return probe_wav_duration_from_header(media_path)
+            except (OSError, ValueError, struct.error):
+                pass
 
     ffprobe_bin = shutil.which("ffprobe")
     if ffprobe_bin:
@@ -540,6 +641,53 @@ def probe_media_duration(media_path: Path) -> float:
     raise RuntimeError(
         f"Unable to determine duration for {media_path}. Install ffprobe or use WAV files."
     )
+
+
+def probe_wav_duration_from_header(media_path: Path) -> float:
+    """Return WAV duration from RIFF chunks without decoding sample data."""
+
+    with media_path.open("rb") as handle:
+        header = handle.read(12)
+        if len(header) != 12 or header[8:12] != b"WAVE":
+            raise ValueError(f"Not a WAVE file: {media_path}")
+        if header[0:4] == b"RIFF":
+            endian = "<"
+        elif header[0:4] == b"RIFX":
+            endian = ">"
+        else:
+            raise ValueError(f"Not a RIFF/RIFX WAVE file: {media_path}")
+
+        sample_rate = 0
+        byte_rate = 0
+        block_align = 0
+        data_size = 0
+
+        while True:
+            chunk_header = handle.read(8)
+            if len(chunk_header) < 8:
+                break
+            chunk_id = chunk_header[:4]
+            chunk_size = struct.unpack(f"{endian}I", chunk_header[4:8])[0]
+            if chunk_id == b"fmt ":
+                fmt_data = handle.read(chunk_size)
+                if len(fmt_data) >= 16:
+                    _, _, sample_rate, byte_rate, block_align, _ = struct.unpack(
+                        f"{endian}HHIIHH",
+                        fmt_data[:16],
+                    )
+            elif chunk_id == b"data":
+                data_size = chunk_size
+                handle.seek(chunk_size, os.SEEK_CUR)
+            else:
+                handle.seek(chunk_size, os.SEEK_CUR)
+            if chunk_size % 2:
+                handle.seek(1, os.SEEK_CUR)
+
+        if data_size > 0 and byte_rate > 0:
+            return data_size / byte_rate
+        if data_size > 0 and block_align > 0 and sample_rate > 0:
+            return (data_size / block_align) / sample_rate
+        raise ValueError(f"WAV duration fields are missing or empty: {media_path}")
 
 
 def read_transcript_text(path: Path | None) -> str:
@@ -586,6 +734,7 @@ def discover_samples(
     project_name: str,
     *,
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    missing_rttm_warnings: list[str] | None = None,
     root: Path = PROJECT_ROOT,
 ) -> list[TrainingSample]:
     """Load every valid sample that has both audio and RTTM supervision."""
@@ -600,9 +749,11 @@ def discover_samples(
             continue
         rttm_path = paths["rttm_dir"] / f"{audio_path.stem}.rttm"
         if not rttm_path.is_file():
-            raise FileNotFoundError(
-                f"Missing RTTM for training sample '{audio_path.stem}': {rttm_path}"
-            )
+            message = f"Missing RTTM for training sample '{audio_path.stem}': {rttm_path}"
+            if missing_rttm_warnings is not None:
+                missing_rttm_warnings.append(message)
+                continue
+            raise FileNotFoundError(message)
         transcript_path = next(
             (
                 candidate
@@ -685,19 +836,11 @@ def write_pairwise_rttm(
             if segment.speaker not in speakers_set:
                 continue
             handle.write(
-                " ".join(
-                    [
-                        "SPEAKER",
-                        segment.session_id,
-                        "1",
-                        f"{segment.start:.3f}",
-                        f"{segment.duration:.3f}",
-                        "<NA>",
-                        "<NA>",
-                        segment.speaker,
-                        "<NA>",
-                        "<NA>",
-                    ]
+                format_rttm_line(
+                    session_id=target_path.stem.split(".", 1)[0] or segment.session_id,
+                    start=segment.start,
+                    duration=segment.duration,
+                    speaker=segment.speaker,
                 )
                 + "\n"
             )
@@ -753,7 +896,6 @@ def build_msdd_rows_for_sample(
     )
 
     rows: list[dict[str, object]] = []
-    transcript_text = sample.transcript_text
     for speaker_pair in speaker_sets:
         speaker_pair_set = set(speaker_pair)
         filtered_segments = [
@@ -785,7 +927,7 @@ def build_msdd_rows_for_sample(
                         "offset": round(cursor, 3),
                         "duration": round(duration, 3),
                         "label": "infer",
-                        "text": transcript_text,
+                        "text": "-",
                         "num_speakers": len(speaker_pair),
                         "rttm_filepath": str(pairwise_path),
                         "uem_filepath": None,
@@ -819,31 +961,50 @@ def write_pyannote_subset_rttm(path: Path, samples: Sequence[TrainingSample]) ->
         for sample in samples:
             for segment in sample.segments:
                 handle.write(
-                    " ".join(
-                        [
-                            "SPEAKER",
-                            sample.stem,
-                            "1",
-                            f"{segment.start:.3f}",
-                            f"{segment.duration:.3f}",
-                            "<NA>",
-                            "<NA>",
-                            segment.speaker,
-                            "<NA>",
-                            "<NA>",
-                        ]
+                    format_rttm_line(
+                        session_id=sample.stem,
+                        start=segment.start,
+                        duration=segment.duration,
+                        speaker=segment.speaker,
                     )
                     + "\n"
                 )
 
 
 def write_pyannote_subset_uem(path: Path, samples: Sequence[TrainingSample]) -> None:
-    """Write one full-file annotated range per sample for pyannote training."""
+    """Write one full-file annotated range per sample for pyannote training.
+
+    `sample.duration_seconds` (and `probe_media_duration`) trust the WAV
+    header / ffprobe metadata — fine for clean files, but the workspace has
+    truncated WAVs where the header claims a 7-minute clip but only 16 s of
+    samples actually exist on disk. soundfile counts real frames, so use it
+    to set the UEM `annotated` upper bound. Otherwise pyannote's dataloader
+    samples chunks past EOF and crashes with `requested chunk … lies outside
+    file bounds` partway through epoch 0.
+    """
+
+    try:
+        import soundfile as sf
+    except Exception:  # pragma: no cover - soundfile ships with both backends
+        sf = None
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for sample in samples:
-            handle.write(f"{sample.stem} NA 0.000 {sample.duration_seconds:.3f}\n")
+            actual_duration = 0.0
+            if sf is not None:
+                try:
+                    info = sf.info(str(sample.audio_path))
+                    if info.samplerate and info.frames:
+                        actual_duration = float(info.frames) / float(info.samplerate)
+                except Exception:
+                    actual_duration = 0.0
+            if actual_duration <= 0.0:
+                try:
+                    actual_duration = float(probe_media_duration(sample.audio_path))
+                except Exception:
+                    actual_duration = float(sample.duration_seconds)
+            handle.write(f"{sample.stem} NA 0.000 {actual_duration:.3f}\n")
 
 
 def write_pyannote_database_config(
@@ -861,6 +1022,12 @@ def write_pyannote_database_config(
         f"    - {json.dumps(str(project_paths_map['audio_dir'] / f'{{uri}}{extension}'))}"
         for extension in sorted(AUDIO_EXTENSIONS)
     )
+    # pyannote.database 5.x resolves protocol file paths against the YAML
+    # directory (not the cwd or some workspace root). Earlier we made these
+    # paths relative to the SeniorDesign root, which left pyannote searching
+    # under `<artifacts>/fine_tuning/...` and bailing with FileNotFoundError
+    # before the trainer ever started. Absolute paths sidestep the resolver
+    # entirely so the layout works no matter where sbatch ends up running.
     config = (
         "Databases:\n"
         "  SeniorDesign:\n"
@@ -872,17 +1039,17 @@ def write_pyannote_database_config(
         f"      {project_slug}:\n"
         "        scope: file\n"
         "        train:\n"
-        f"          uri: {json.dumps(str(project_paths_map['train_list_path'].relative_to(root)))}\n"
-        f"          annotation: {json.dumps(str(project_paths_map['train_rttm_path'].relative_to(root)))}\n"
-        f"          annotated: {json.dumps(str(project_paths_map['train_uem_path'].relative_to(root)))}\n"
+        f"          uri: {json.dumps(str(project_paths_map['train_list_path']))}\n"
+        f"          annotation: {json.dumps(str(project_paths_map['train_rttm_path']))}\n"
+        f"          annotated: {json.dumps(str(project_paths_map['train_uem_path']))}\n"
         "        development:\n"
-        f"          uri: {json.dumps(str(project_paths_map['development_list_path'].relative_to(root)))}\n"
-        f"          annotation: {json.dumps(str(project_paths_map['development_rttm_path'].relative_to(root)))}\n"
-        f"          annotated: {json.dumps(str(project_paths_map['development_uem_path'].relative_to(root)))}\n"
+        f"          uri: {json.dumps(str(project_paths_map['development_list_path']))}\n"
+        f"          annotation: {json.dumps(str(project_paths_map['development_rttm_path']))}\n"
+        f"          annotated: {json.dumps(str(project_paths_map['development_uem_path']))}\n"
         "        test:\n"
-        f"          uri: {json.dumps(str(project_paths_map['test_list_path'].relative_to(root)))}\n"
-        f"          annotation: {json.dumps(str(project_paths_map['test_rttm_path'].relative_to(root)))}\n"
-        f"          annotated: {json.dumps(str(project_paths_map['test_uem_path'].relative_to(root)))}\n"
+        f"          uri: {json.dumps(str(project_paths_map['test_list_path']))}\n"
+        f"          annotation: {json.dumps(str(project_paths_map['test_rttm_path']))}\n"
+        f"          annotated: {json.dumps(str(project_paths_map['test_uem_path']))}\n"
     )
     database_config_path.parent.mkdir(parents=True, exist_ok=True)
     database_config_path.write_text(config, encoding="utf-8")
@@ -909,6 +1076,97 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+# Compatibility shim for torchaudio 2.10 — `AudioMetaData`, `info`, `load`,
+# and `list_audio_backends` were all removed/renamed, but pyannote.audio 3.4
+# still references them at import time AND at runtime (its database loader
+# calls `torchaudio.info` to precompute durations). The diarization backend's
+# stubbed-info shim is enough for inference because the pipeline path never
+# touches pyannote.database — but training does, so we have to back the
+# stubs with real soundfile-driven implementations or the dataloader bails.
+import torch
+import torchaudio
+import soundfile as _sf
+
+
+def _patch_torchaudio_compatibility() -> None:
+    # In torchaudio 2.10 the names *exist* but `info`/`load` are
+    # delegated to torchcodec, which the cluster can't load (no FFmpeg
+    # libavutil on the GPU node). A "missing-only" shim lets the broken
+    # torchcodec path win and pyannote dies in the dataloader. We have to
+    # unconditionally replace these with soundfile-backed implementations
+    # the cluster *does* have.
+    class _SoundfileAudioMetaData:
+        __slots__ = ("sample_rate", "num_frames", "num_channels", "bits_per_sample", "encoding")
+
+        def __init__(self, sample_rate, num_frames, num_channels, bits_per_sample, encoding):
+            self.sample_rate = sample_rate
+            self.num_frames = num_frames
+            self.num_channels = num_channels
+            self.bits_per_sample = bits_per_sample
+            self.encoding = encoding
+
+    torchaudio.AudioMetaData = _SoundfileAudioMetaData
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
+
+    _BITS_BY_SUBTYPE = (
+        ("PCM_8", 8), ("PCM_16", 16), ("PCM_24", 24), ("PCM_32", 32),
+        ("FLOAT", 32), ("DOUBLE", 64),
+    )
+
+    def info(path, *_args, **_kwargs):
+        sf_info = _sf.info(str(path))
+        subtype = (sf_info.subtype or "").upper()
+        bits_per_sample = 0
+        for token, bits in _BITS_BY_SUBTYPE:
+            if token in subtype:
+                bits_per_sample = bits
+                break
+        return torchaudio.AudioMetaData(
+            sample_rate=int(sf_info.samplerate),
+            num_frames=int(sf_info.frames),
+            num_channels=int(sf_info.channels),
+            bits_per_sample=bits_per_sample,
+            encoding=subtype or "UNKNOWN",
+        )
+
+    torchaudio.info = info
+
+    def load(path, frame_offset=0, num_frames=-1, normalize=True, channels_first=True, **_kwargs):
+        data, sample_rate = _sf.read(
+            str(path),
+            start=int(frame_offset),
+            frames=-1 if int(num_frames) == -1 else int(num_frames),
+            dtype="float32" if normalize else "int16",
+            always_2d=True,
+        )
+        tensor = torch.from_numpy(data)
+        if channels_first:
+            tensor = tensor.transpose(0, 1).contiguous()
+        return tensor, int(sample_rate)
+
+    torchaudio.load = load
+
+
+_patch_torchaudio_compatibility()
+
+# PyTorch 2.6 flipped torch.load's `weights_only` default to True, which
+# refuses to unpickle the TorchVersion / dataclass blobs baked into pyannote
+# checkpoints. The diarization backend already patches torch.load via
+# `_trusted_torch_load_context`; mirror it here so Model.from_pretrained
+# doesn't die with `_pickle.UnpicklingError: Weights only load failed`.
+_original_torch_load = torch.load
+
+
+def _trusted_torch_load(*args, **kwargs):
+    # Force-override, do not use setdefault: lightning_fabric's pl_load
+    # explicitly passes weights_only=True to torch.load, so a setdefault
+    # silently loses to it and the unpickler still bails.
+    kwargs["weights_only"] = False
+    return _original_torch_load(*args, **kwargs)
+
+
+torch.load = _trusted_torch_load
 
 import pytorch_lightning as pl
 from pyannote.audio import Model
@@ -959,10 +1217,19 @@ def write_launch_script(
     """Write a direct launcher for environments where local execution is acceptable."""
 
     suggested_nemo_root = str(nemo_root.resolve()) if nemo_root else ""
+    detected_nemo_root = _detect_default_nemo_root()
+    fallback_nemo_root = str(detected_nemo_root) if detected_nemo_root else ""
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
+# NEMO_ROOT precedence: caller's env > the value frozen at prepare-time >
+# whichever well-known checkout we detected on disk when we generated this
+# launcher. The detected fallback means NeMo training keeps working after a
+# fresh `prepare` even if the user never fills the "NeMo root" form field.
 NEMO_ROOT="${{NEMO_ROOT:-{suggested_nemo_root}}}"
+if [ -z "$NEMO_ROOT" ]; then
+  NEMO_ROOT={json.dumps(fallback_nemo_root)}
+fi
 PYTHON_BIN="${{PYTHON_BIN:-python3}}"
 NEURAL_DIR="$NEMO_ROOT/examples/speaker_tasks/diarization/neural_diarizer"
 TRAIN_MANIFEST="{project_paths_map['manifests_dir'] / 'train_msdd_manifest.jsonl'}"
@@ -988,22 +1255,111 @@ if [ ! -d "$NEURAL_DIR" ]; then
 fi
 
 cd "$NEURAL_DIR"
+# NeMo v2.x dropped the `model.base.*` prefix that the upstream
+# multiscale_diar_decoder.py docstring still advertises — the YAML schema
+# now exposes `model.diarizer.speaker_embeddings.model_path` directly, and
+# Hydra refuses to override a missing struct key, so passing `model.base.*`
+# is what fails the run with "Key 'base' is not in struct".
+#
+# `trainer.strategy=ddp_find_unused_parameters_true` is the other override
+# we need. Lightning 2.x auto-picks DDP even on a single GPU, and the MSDD
+# model holds a frozen TitaNet whose params don't participate in the loss;
+# without `find_unused_parameters=True`, DDP raises mid-training with
+# "It looks like your LightningModule has parameters that were not used in
+# producing the loss returned by training_step."
 exec "$PYTHON_BIN" multiscale_diar_decoder.py \\
   --config-path="../conf/neural_diarizer" \\
   --config-name="{config_name}" \\
   trainer.devices={devices} \\
   trainer.max_epochs={max_epochs} \\
-  model.base.diarizer.speaker_embeddings.model_path="{speaker_model}" \\
+  trainer.strategy=ddp_find_unused_parameters_true \\
+  model.diarizer.speaker_embeddings.model_path="{speaker_model}" \\
   model.train_ds.manifest_filepath="$TRAIN_MANIFEST" \\
   model.validation_ds.manifest_filepath="$VAL_MANIFEST" \\
   model.train_ds.emb_dir="$TRAIN_EMB_DIR" \\
   model.validation_ds.emb_dir="$VAL_EMB_DIR" \\
   exp_manager.name="$EXP_NAME" \\
-  exp_manager.exp_dir="$EXP_DIR"
+  exp_manager.exp_dir="$EXP_DIR" \\
+  exp_manager.checkpoint_callback_params.save_last=false
 """
     launch_script_path.parent.mkdir(parents=True, exist_ok=True)
     launch_script_path.write_text(script, encoding="utf-8")
     launch_script_path.chmod(0o755)
+
+
+# WAVE module + venv shared across the diarization pipeline.
+# Loaded modules + LD_LIBRARY_PATH need to be set the same way the production
+# `run_site_diarization.sbatch` does, otherwise the venv's python imports
+# explode on `_sqlite3.so: undefined symbol: sqlite3_deserialize` because the
+# stock cluster libs lag the GCCcore ones our binaries were linked against.
+_PYTHON_MODULE = "Python/3.12.3-GCCcore-14.2.0"
+_RUNTIME_ENV_SCRIPT = PROJECT_ROOT / "scheduler" / "sbatch_runtime_env.sh"
+_SBATCH_RUNTIME_DIR = PROJECT_ROOT / "sbatch_runtime"
+_BACKEND_VENV = {
+    "nemo": _SBATCH_RUNTIME_DIR / ".venv",
+    "pyannote": _SBATCH_RUNTIME_DIR / ".venv_pyannote",
+}
+# NeMo MSDD fine-tuning needs a real source checkout because the upstream
+# `multiscale_diar_decoder.py` lives under `examples/`, not in the pip
+# distribution. The runbook recommends cloning to the workspace's parent so the
+# checkout outlives any single project. Auto-defaulting here means the user
+# can leave the dashboard's "NeMo root" field blank as long as the clone exists.
+_NEMO_ROOT_DEFAULT_CANDIDATES = (
+    PROJECT_ROOT.parent / "NeMo",
+    Path.home() / "NeMo",
+)
+
+
+def _detect_default_nemo_root() -> Path | None:
+    """Return the first existing well-known NeMo checkout, if any."""
+
+    for candidate in _NEMO_ROOT_DEFAULT_CANDIDATES:
+        if (candidate / "examples" / "speaker_tasks" / "diarization" / "neural_diarizer").is_dir():
+            return candidate
+    return None
+
+
+def _runtime_env_block(*, backend: str) -> str:
+    """Return the bash snippet that prepares modules, venv, and LD_LIBRARY_PATH.
+
+    Mirrors the working `run_site_diarization.sbatch` so the fine-tuning jobs
+    inherit the same cluster runtime — the dashboard's `sys.executable` ends up
+    pointing at the dashboard's own venv, which is the wrong one for pyannote
+    training and never had module-loaded GCCcore on its LD path either way.
+    """
+
+    backend_key = normalize_backend(backend)
+    default_venv = _BACKEND_VENV[backend_key]
+    other_venv = _BACKEND_VENV["pyannote" if backend_key == "nemo" else "nemo"]
+    return "\n".join(
+        [
+            f"module load {_PYTHON_MODULE}",
+            f"_FT_DEFAULT_VENV={json.dumps(str(default_venv))}",
+            f"_FT_OTHER_VENV={json.dumps(str(other_venv))}",
+            f"_FT_RUNTIME_ENV_SCRIPT={json.dumps(str(_RUNTIME_ENV_SCRIPT))}",
+            'PYTHON_BIN="${PYTHON_BIN:-$_FT_DEFAULT_VENV/bin/python3}"',
+            # Steer away from the wrong-backend venv when the caller forwarded
+            # the dashboard's own interpreter (the common case from the web UI).
+            'case "$PYTHON_BIN" in',
+            '  "$_FT_OTHER_VENV/bin/"*)',
+            '    PYTHON_BIN="$_FT_DEFAULT_VENV/bin/python3"',
+            "    ;;",
+            "esac",
+            "export PYTHON_BIN",
+            'if [ -d "$_FT_DEFAULT_VENV" ]; then',
+            "  # shellcheck disable=SC1091",
+            '  source "$_FT_DEFAULT_VENV/bin/activate"',
+            "fi",
+            'if [ -f "$_FT_RUNTIME_ENV_SCRIPT" ]; then',
+            "  # shellcheck disable=SC1090",
+            '  source "$_FT_RUNTIME_ENV_SCRIPT"',
+            '  if [ -n "${EBROOTGCCCORE:-}" ]; then',
+            '    append_ld_library_path "$EBROOTGCCCORE/lib64"',
+            "  fi",
+            "  expose_venv_native_libraries",
+            "fi",
+        ]
+    )
 
 
 def write_sbatch_script(
@@ -1023,6 +1379,7 @@ def write_sbatch_script(
 
     suggested_nemo_root = str(nemo_root.resolve()) if nemo_root else ""
     job_name = f"msdd_ft_{slugify(project_name)}"[:60]
+    runtime_block = _runtime_env_block(backend="nemo")
     lines = [
         "#!/bin/bash -l",
         f"#SBATCH --job-name={job_name}",
@@ -1043,7 +1400,7 @@ def write_sbatch_script(
             "set -euo pipefail",
             f"mkdir -p {json.dumps(str(slurm_logs_dir))}",
             f'export NEMO_ROOT="${{NEMO_ROOT:-{suggested_nemo_root}}}"',
-            'export PYTHON_BIN="${PYTHON_BIN:-python3}"',
+            runtime_block,
             f"bash {json.dumps(str(launch_script_path))}",
             "",
         ]
@@ -1088,6 +1445,7 @@ def write_pyannote_sbatch_script(
     """Write the Slurm launcher for pyannote fine-tuning runs."""
 
     job_name = f"pyannote_ft_{slugify(project_name)}"[:60]
+    runtime_block = _runtime_env_block(backend="pyannote")
     lines = [
         "#!/bin/bash -l",
         f"#SBATCH --job-name={job_name}",
@@ -1107,7 +1465,7 @@ def write_pyannote_sbatch_script(
             "",
             "set -euo pipefail",
             f"mkdir -p {json.dumps(str(slurm_logs_dir))}",
-            'export PYTHON_BIN="${PYTHON_BIN:-python3}"',
+            runtime_block,
             f"bash {json.dumps(str(launch_script_path))}",
             "",
         ]
@@ -1188,17 +1546,50 @@ def prepare_project(
             shutil.rmtree(generated_dir)
         generated_dir.mkdir(parents=True, exist_ok=True)
 
-    samples = discover_samples(project_name, backend=normalized_backend, root=root)
+    warnings: list[str] = []
+    samples = discover_samples(
+        project_name,
+        backend=normalized_backend,
+        missing_rttm_warnings=warnings,
+        root=root,
+    )
+    if not samples:
+        detail = f" First issue: {warnings[0]}" if warnings else ""
+        raise ValueError(
+            f"No training samples found in {paths['audio_dir']}. "
+            "Add at least one audio+RTTM pair, or check that the selected backend matches the project."
+            f"{detail}"
+        )
     train_samples, validation_samples = split_samples(samples, train_ratio)
 
     session_manifest_train = paths["manifests_dir"] / "train_session_manifest.jsonl"
     session_manifest_validation = paths["manifests_dir"] / "validation_session_manifest.jsonl"
     msdd_manifest_train = paths["manifests_dir"] / "train_msdd_manifest.jsonl"
     msdd_manifest_validation = paths["manifests_dir"] / "validation_msdd_manifest.jsonl"
-    warnings: list[str] = []
     primary_artifacts: list[Path] = []
 
     if normalized_backend == "nemo":
+        msdd_train_samples = train_samples
+        msdd_validation_samples = validation_samples
+        if not any(sample.num_speakers >= 2 for sample in train_samples) or not any(
+            sample.num_speakers >= 2 for sample in validation_samples
+        ):
+            msdd_candidates = [sample for sample in samples if sample.num_speakers >= 2]
+            if msdd_candidates:
+                msdd_train_samples, msdd_validation_samples = split_samples(
+                    msdd_candidates,
+                    train_ratio,
+                )
+                excluded_count = len(samples) - len(msdd_candidates)
+                if excluded_count:
+                    warnings.append(
+                        f"{excluded_count} single-speaker sample(s) were kept in session manifests "
+                        "but excluded from NeMo MSDD pairwise rows."
+                    )
+                warnings.append(
+                    "Adjusted NeMo MSDD train/validation split to use the available multi-speaker sample(s)."
+                )
+
         write_jsonl(session_manifest_train, (session_manifest_row(sample) for sample in train_samples))
         write_jsonl(
             session_manifest_validation,
@@ -1223,7 +1614,7 @@ def prepare_project(
 
         train_rows: list[dict[str, object]] = []
         validation_rows: list[dict[str, object]] = []
-        for sample in train_samples:
+        for sample in msdd_train_samples:
             rows, sample_warnings = build_msdd_rows_for_sample(
                 sample=sample,
                 pairwise_dir=paths["pairwise_train_dir"],
@@ -1233,7 +1624,7 @@ def prepare_project(
             )
             train_rows.extend(rows)
             warnings.extend(sample_warnings)
-        for sample in validation_samples:
+        for sample in msdd_validation_samples:
             rows, sample_warnings = build_msdd_rows_for_sample(
                 sample=sample,
                 pairwise_dir=paths["pairwise_validation_dir"],

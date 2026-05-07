@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Diarization model selection, run state, and handlers."""
+"""Diarization model selection, run state, and submission handlers.
+
+Wraps everything between "user picked some files and a model" and "sbatch
+job is in flight": validating selections, resolving the chosen backend
+(NeMo / pyannote / fine-tuned), composing the run directory, and handing
+off to ``scheduler/run_site_diarization.sbatch``. We never call the
+diarization pipeline directly here — that lives in ``run_diarization.py``
+and we treat it as a black box on purpose so the dashboard side can change
+without touching ML code.
+"""
 from __future__ import annotations
 
 

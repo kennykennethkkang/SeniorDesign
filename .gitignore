@@ -1,20 +1,37 @@
 # Python build/cache artifacts
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.benchmarks/
 *.py[cod]
+*.pyo
 *.log
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 *.egg-info/
 .venv/
 .venv_*/
+.python-version
+.ipynb_checkpoints/
 
-# Editor / OS
+# Editor / OS — user-specific files that shouldn't follow the repo around
 .local_dashboard/
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.tmp
+*.temp
+tmp/
 
 # Node / frontend build outputs (we ship the React/TS source, not the built bundles)
 node_modules/
@@ -24,6 +41,19 @@ frontend/dist/
 frontend/app/dist/
 frontend/static/dist/
 frontend/app/tsconfig.tsbuildinfo
+# Vite + npm side effects we don't want creeping in
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.parcel-cache/
+.cache-loader/
+*.tsbuildinfo
+
+# Hand-written JS doesn't need source maps committed; if we ever build
+# the dist bundle we ignore the maps too.
+frontend/static/dist/*.map
+frontend/static/js/*.map
 
 # Project-local data — these dirs are write-once-per-run and personal to this host.
 audio_in/
@@ -34,6 +64,15 @@ fine_tuning/projects/
 fine_tuning/label_work/
 stitched/
 youtube_links_err/*.tsv
+
+# SLURM scratch — wallclock outputs, error logs, and pid/url scratch files
+# don't belong in the repo. The sbatch templates in scheduler/ stay tracked.
+slurm-*.out
+slurm-*.err
+*.slurm.out
+*.slurm.err
+*.pid
+*.url
 
 # Bulk archives (corpus dumps, slurm bundles) — never push these to GitHub;
 # they're either reproducible from the public source or too big for git.

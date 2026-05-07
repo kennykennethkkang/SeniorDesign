@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Audio inventory, folder management, uploads, and reference rewrites."""
+"""Audio inventory, folder management, uploads, and reference rewrites.
+
+Owns everything the dashboard does with raw audio that isn't a diarization run:
+listing folders, paginating ``audio_in/`` so the page doesn't choke on large
+corpora, accepting uploads, normalizing filenames, and rewriting the per-run
+reference paths when a folder is renamed. Pure I/O and metadata work — the
+ML pipeline never lives here, so this mixin is safe to evolve independently.
+"""
 from __future__ import annotations
 
 

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Serve a lightweight web dashboard for the ML Speech Diarization workflow.
+"""Local web dashboard for the ML Speech Diarization senior-design workflow.
 
-The site deliberately remains small and dependency-light so it can run inside the
-same Python environment as the rest of the project. The operational model mirrors
-the local WAVE documentation: interactive browsing and setup can happen in a web
-session, while longer-running GPU work should be handed off to Slurm-backed jobs.
+Kept small on purpose: pure stdlib WSGI + Waitress (optional), so it boots
+inside the same Python environment as the rest of the project without a
+separate service to babysit. The split matches how WAVE actually works
+day-to-day — the web UI is for interactive setup, browsing, and quick
+edits, while anything GPU-heavy gets handed off to sbatch and watched
+through the same dashboard.
+
+The class itself is composed from per-domain mixins under ``dashboard.app``;
+this file is just the assembly + bootstrap. If you're hunting for handler
+code, follow the mixin import.
 """
 from __future__ import annotations
 

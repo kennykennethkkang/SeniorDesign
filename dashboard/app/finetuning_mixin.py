@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Fine-tuning mixin: project prep, training launch, rename, and DER/JER scoring endpoints for the dashboard."""
+"""Fine-tuning mixin: project prep, training launch, rename, and DER/JER scoring.
+
+This is the longest mixin and on purpose — it owns the entire fine-tune flow
+the dashboard exposes. Everything from "create a project shell" through
+"score a checkpoint against a reference RTTM and surface the metric" lives
+here. The actual training and metric implementations are imported from
+``fine_tuning_manager`` and ``diarization_metrics``; this file is the WSGI
+glue that drives them and serves the result back to the React frontend.
+"""
 from __future__ import annotations
 
 
@@ -153,6 +161,108 @@ from dashboard.cli import build_parser
 
 class FineTuningMixin:
     """Handles all fine-tuning HTTP routes: upload, prepare, launch, rename, and score."""
+
+    FINE_TUNE_PREPARE_FIELD_NAMES = {
+        "train_ratio",
+        "base_window",
+        "base_shift",
+        "step_count",
+        "config_name",
+        "speaker_model",
+        "devices",
+        "max_epochs",
+        "slurm_partition",
+        "slurm_time",
+        "slurm_memory",
+        "slurm_cpus",
+        "slurm_gpus",
+        "nemo_root",
+        "pyannote_pretrained_model",
+        "pyannote_duration",
+        "pyannote_max_speakers_per_chunk",
+        "pyannote_max_speakers_per_frame",
+    }
+
+    def fine_tune_audio_sample_count(self, project_name: str, backend: str) -> int:
+        """Count uploaded audio files for one project/backend without preparing artifacts."""
+
+        project_path = fine_tune_project_dir(project_name, backend=backend, root=self.root)
+        audio_dir = project_path / "audio"
+        if not audio_dir.is_dir():
+            return 0
+        return sum(
+            1
+            for path in audio_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+        )
+
+    def resolve_fine_tune_backend_for_samples(self, project_name: str, requested_backend: str) -> str:
+        """Use the backend that actually contains samples when the form backend is stale."""
+
+        normalized_backend = normalize_backend(requested_backend)
+        if self.fine_tune_audio_sample_count(project_name, normalized_backend) > 0:
+            return normalized_backend
+
+        sampled_backends = [
+            backend
+            for backend in sorted(ftm.SUPPORTED_FINE_TUNING_BACKENDS)
+            if backend != normalized_backend
+            and self.fine_tune_audio_sample_count(project_name, backend) > 0
+        ]
+        if len(sampled_backends) == 1:
+            return sampled_backends[0]
+        return normalized_backend
+
+    def fine_tune_prepare_form_has_options(self, form) -> bool:
+        """Return whether this submission came from the prepare form rather than a compact project-card button."""
+
+        return any(
+            (form.getfirst(field_name) or "").strip()
+            for field_name in self.FINE_TUNE_PREPARE_FIELD_NAMES
+        )
+
+    def fine_tune_prepare_options_from_form(self, form, backend: str) -> dict[str, object]:
+        """Parse the manual prepare form into prepare_project keyword arguments."""
+
+        preferences = self.model_preferences()
+        pyannote_defaults = preferences["pyannote_fine_tuning"]
+        nemo_defaults = preferences["nemo_fine_tuning"]
+        return {
+            "train_ratio": self.parse_float(form.getfirst("train_ratio"), float(nemo_defaults.get("train_ratio", DEFAULT_TRAIN_RATIO)), "train_ratio"),
+            "base_window": self.parse_float(form.getfirst("base_window"), float(nemo_defaults.get("base_window", DEFAULT_BASE_WINDOW)), "base_window"),
+            "base_shift": self.parse_float(form.getfirst("base_shift"), float(nemo_defaults.get("base_shift", DEFAULT_BASE_SHIFT)), "base_shift"),
+            "step_count": self.parse_int(form.getfirst("step_count"), int(nemo_defaults.get("step_count", DEFAULT_STEP_COUNT)), "step_count"),
+            "config_name": form.getfirst("config_name") or str(nemo_defaults.get("config_name", DEFAULT_CONFIG_NAME)),
+            "speaker_model": form.getfirst("speaker_model") or str(nemo_defaults.get("speaker_model", DEFAULT_SPEAKER_MODEL)),
+            "devices": self.parse_int(
+                form.getfirst("devices"),
+                int(
+                    pyannote_defaults.get("devices", DEFAULT_DEVICES)
+                    if backend == "pyannote"
+                    else nemo_defaults.get("devices", DEFAULT_DEVICES)
+                ),
+                "devices",
+            ),
+            "max_epochs": self.parse_int(
+                form.getfirst("max_epochs"),
+                int(
+                    pyannote_defaults.get("max_epochs", DEFAULT_MAX_EPOCHS)
+                    if backend == "pyannote"
+                    else nemo_defaults.get("max_epochs", DEFAULT_MAX_EPOCHS)
+                ),
+                "max_epochs",
+            ),
+            "slurm_partition": form.getfirst("slurm_partition") or DEFAULT_SLURM_PARTITION,
+            "slurm_time": form.getfirst("slurm_time") or DEFAULT_SLURM_TIME,
+            "slurm_memory": form.getfirst("slurm_memory") or DEFAULT_SLURM_MEMORY,
+            "slurm_cpus": self.parse_int(form.getfirst("slurm_cpus"), DEFAULT_SLURM_CPUS, "slurm_cpus"),
+            "slurm_gpus": self.parse_int(form.getfirst("slurm_gpus"), DEFAULT_SLURM_GPUS, "slurm_gpus"),
+            "nemo_root": self.resolve_local_path(form.getfirst("nemo_root")) if (form.getfirst("nemo_root") or "").strip() else None,
+            "pyannote_pretrained_model": form.getfirst("pyannote_pretrained_model") or str(pyannote_defaults.get("pretrained_model", DEFAULT_PYANNOTE_PRETRAINED_MODEL)),
+            "pyannote_duration": self.parse_float(form.getfirst("pyannote_duration"), float(pyannote_defaults.get("duration", DEFAULT_PYANNOTE_DURATION)), "pyannote_duration"),
+            "pyannote_max_speakers_per_chunk": self.parse_int(form.getfirst("pyannote_max_speakers_per_chunk"), int(pyannote_defaults.get("max_speakers_per_chunk", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_CHUNK)), "pyannote_max_speakers_per_chunk"),
+            "pyannote_max_speakers_per_frame": self.parse_int(form.getfirst("pyannote_max_speakers_per_frame"), int(pyannote_defaults.get("max_speakers_per_frame", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME)), "pyannote_max_speakers_per_frame"),
+        }
 
     def save_project_sample_from_paths(
         self,
@@ -558,52 +668,29 @@ class FineTuningMixin:
 
         form = self.parse_form(environ)
         preferences = self.model_preferences()
-        pyannote_defaults = preferences["pyannote_fine_tuning"]
-        nemo_defaults = preferences["nemo_fine_tuning"]
         project_name = (form.getfirst("prepare_project_name") or "").strip()
         if not project_name:
             return self.redirect(environ, "/fine-tuning", message="Provide a project name to prepare fine-tuning.", status="error")
-        backend = normalize_backend(form.getfirst("prepare_backend") or str(preferences["fine_tuning_backend"]))
-
-        artifacts = prepare_project(
-            project_name=project_name,
-            backend=backend,
-            train_ratio=self.parse_float(form.getfirst("train_ratio"), float(nemo_defaults.get("train_ratio", DEFAULT_TRAIN_RATIO)), "train_ratio"),
-            base_window=self.parse_float(form.getfirst("base_window"), float(nemo_defaults.get("base_window", DEFAULT_BASE_WINDOW)), "base_window"),
-            base_shift=self.parse_float(form.getfirst("base_shift"), float(nemo_defaults.get("base_shift", DEFAULT_BASE_SHIFT)), "base_shift"),
-            step_count=self.parse_int(form.getfirst("step_count"), int(nemo_defaults.get("step_count", DEFAULT_STEP_COUNT)), "step_count"),
-            config_name=form.getfirst("config_name") or str(nemo_defaults.get("config_name", DEFAULT_CONFIG_NAME)),
-            speaker_model=form.getfirst("speaker_model") or str(nemo_defaults.get("speaker_model", DEFAULT_SPEAKER_MODEL)),
-            devices=self.parse_int(
-                form.getfirst("devices"),
-                int(
-                    pyannote_defaults.get("devices", DEFAULT_DEVICES)
-                    if backend == "pyannote"
-                    else nemo_defaults.get("devices", DEFAULT_DEVICES)
-                ),
-                "devices",
-            ),
-            max_epochs=self.parse_int(
-                form.getfirst("max_epochs"),
-                int(
-                    pyannote_defaults.get("max_epochs", DEFAULT_MAX_EPOCHS)
-                    if backend == "pyannote"
-                    else nemo_defaults.get("max_epochs", DEFAULT_MAX_EPOCHS)
-                ),
-                "max_epochs",
-            ),
-            slurm_partition=form.getfirst("slurm_partition") or DEFAULT_SLURM_PARTITION,
-            slurm_time=form.getfirst("slurm_time") or DEFAULT_SLURM_TIME,
-            slurm_memory=form.getfirst("slurm_memory") or DEFAULT_SLURM_MEMORY,
-            slurm_cpus=self.parse_int(form.getfirst("slurm_cpus"), DEFAULT_SLURM_CPUS, "slurm_cpus"),
-            slurm_gpus=self.parse_int(form.getfirst("slurm_gpus"), DEFAULT_SLURM_GPUS, "slurm_gpus"),
-            nemo_root=self.resolve_local_path(form.getfirst("nemo_root")) if (form.getfirst("nemo_root") or "").strip() else None,
-            pyannote_pretrained_model=form.getfirst("pyannote_pretrained_model") or str(pyannote_defaults.get("pretrained_model", DEFAULT_PYANNOTE_PRETRAINED_MODEL)),
-            pyannote_duration=self.parse_float(form.getfirst("pyannote_duration"), float(pyannote_defaults.get("duration", DEFAULT_PYANNOTE_DURATION)), "pyannote_duration"),
-            pyannote_max_speakers_per_chunk=self.parse_int(form.getfirst("pyannote_max_speakers_per_chunk"), int(pyannote_defaults.get("max_speakers_per_chunk", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_CHUNK)), "pyannote_max_speakers_per_chunk"),
-            pyannote_max_speakers_per_frame=self.parse_int(form.getfirst("pyannote_max_speakers_per_frame"), int(pyannote_defaults.get("max_speakers_per_frame", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME)), "pyannote_max_speakers_per_frame"),
-            root=self.root,
+        backend = self.resolve_fine_tune_backend_for_samples(
+            project_name,
+            normalize_backend(form.getfirst("prepare_backend") or str(preferences["fine_tuning_backend"])),
         )
+
+        try:
+            prepare_options = self.fine_tune_prepare_options_from_form(form, backend)
+            artifacts = prepare_project(
+                project_name=project_name,
+                backend=backend,
+                root=self.root,
+                **prepare_options,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message=f"Could not prepare {backend}/{project_name}: {exc}",
+                status="error",
+            )
         self.invalidate_dashboard_cache()
         return self.redirect(
             environ,
@@ -612,17 +699,9 @@ class FineTuningMixin:
             status="success",
         )
 
-    def handle_finetune_launch(self, environ):
-        """Launch a prepared fine-tuning project locally or via Slurm."""
+    def fine_tune_launch_extra_env(self, backend: str) -> dict[str, str]:
+        """Return backend-specific secrets for launch without exposing them to frontend state."""
 
-        form = self.parse_form(environ)
-        preferences = self.model_preferences()
-        project_name = (form.getfirst("launch_project_name") or "").strip()
-        if not project_name:
-            return self.redirect(environ, "/fine-tuning", message="Provide a project name to launch fine-tuning.", status="error")
-        backend = normalize_backend(form.getfirst("launch_backend") or str(preferences["fine_tuning_backend"]))
-
-        nemo_root_value = (form.getfirst("launch_nemo_root") or "").strip()
         extra_env: dict[str, str] = {}
         if backend == "pyannote":
             hf_token = (
@@ -636,15 +715,105 @@ class FineTuningMixin:
             if hf_token:
                 extra_env["HF_TOKEN"] = hf_token
                 extra_env["HUGGINGFACE_HUB_TOKEN"] = hf_token
+        return extra_env
+
+    def handle_finetune_prepare_launch(self, environ):
+        """Prepare a project and immediately submit a Slurm-preferred training run."""
+
+        form = self.parse_form(environ)
+        preferences = self.model_preferences()
+        project_name = (
+            form.getfirst("project_slug")
+            or form.getfirst("project_name")
+            or form.getfirst("prepare_project_name")
+            or ""
+        ).strip()
+        if not project_name:
+            return self.redirect(environ, "/fine-tuning", message="Choose a project to prepare and submit.", status="error")
+        backend = self.resolve_fine_tune_backend_for_samples(
+            project_name,
+            normalize_backend(form.getfirst("backend") or form.getfirst("prepare_backend") or str(preferences["fine_tuning_backend"])),
+        )
+        try:
+            prepare_options = (
+                self.fine_tune_prepare_options_from_form(form, backend)
+                if self.fine_tune_prepare_form_has_options(form)
+                else self.auto_train_prepare_options(project_name, backend)
+            )
+            artifacts = prepare_project(
+                project_name=project_name,
+                backend=backend,
+                root=self.root,
+                **prepare_options,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message=f"Could not prepare {backend}/{project_name}: {exc}",
+                status="error",
+            )
+
+        import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
+        try:
+            # Match the explicit-launch handler: when the prepare-and-launch
+            # form skipped the NeMo root field, fall back to the detected
+            # default so the auto-launch path doesn't 1-shot bail out.
+            auto_nemo_root = ftm._detect_default_nemo_root() if backend == "nemo" else None
+            run = _wd.launch_training(
+                project_name=artifacts.project_slug,
+                backend=backend,
+                nemo_root=auto_nemo_root,
+                python_bin=sys.executable,
+                prefer_sbatch=True,
+                version_name=(form.getfirst("launch_version_name") or "").strip(),
+                extra_env=self.fine_tune_launch_extra_env(backend),
+                root=self.root,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message=f"Prepared {artifacts.backend}/{artifacts.project_slug} with {artifacts.sample_count} sample(s), but launch failed: {exc}",
+                status="error",
+            )
+
+        self.invalidate_dashboard_cache()
+        launch_message = (
+            f"Prepared {artifacts.backend}/{artifacts.project_slug} with {artifacts.sample_count} sample(s) and submitted '{run.version_name}' as Slurm job {run.job_id}."
+            if run.job_id
+            else f"Prepared {artifacts.backend}/{artifacts.project_slug} with {artifacts.sample_count} sample(s) and launched '{run.version_name}' locally (pid {run.pid})."
+        )
+        return self.redirect(environ, "/fine-tuning", message=launch_message, status="success")
+
+    def handle_finetune_launch(self, environ):
+        """Launch a prepared fine-tuning project locally or via Slurm."""
+
+        form = self.parse_form(environ)
+        preferences = self.model_preferences()
+        project_name = (form.getfirst("launch_project_name") or "").strip()
+        if not project_name:
+            return self.redirect(environ, "/fine-tuning", message="Provide a project name to launch fine-tuning.", status="error")
+        backend = normalize_backend(form.getfirst("launch_backend") or str(preferences["fine_tuning_backend"]))
+
+        nemo_root_value = (form.getfirst("launch_nemo_root") or "").strip()
+        if nemo_root_value:
+            resolved_nemo_root = self.resolve_local_path(nemo_root_value)
+        else:
+            # Fall back to whichever NeMo checkout the manager detects on disk
+            # (matches the runbook's `/WAVE/.../NeMo` location). Without this,
+            # users who don't paste a path get an immediate `Set NEMO_ROOT…`
+            # bail-out from the launcher even when the clone is already there.
+            resolved_nemo_root = ftm._detect_default_nemo_root() if backend == "nemo" else None
         import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
         run = _wd.launch_training(
             project_name=project_name,
             backend=backend,
-            nemo_root=self.resolve_local_path(nemo_root_value) if nemo_root_value else None,
+            nemo_root=resolved_nemo_root,
             python_bin=form.getfirst("launch_python_bin") or sys.executable,
             prefer_sbatch=not bool(form.getfirst("launch_local")),
             version_name=(form.getfirst("launch_version_name") or "").strip(),
-            extra_env=extra_env,
+            extra_env=self.fine_tune_launch_extra_env(backend),
             root=self.root,
         )
         self.invalidate_dashboard_cache()

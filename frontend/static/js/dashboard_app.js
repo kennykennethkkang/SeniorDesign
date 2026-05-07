@@ -1,4 +1,28 @@
 /* global React, ReactDOM */
+/*
+ * dashboard_app.js — senior-design dashboard frontend.
+ *
+ * One hand-written React bundle (no JSX, no build step) that renders every
+ * page of the local dashboard. Boots from a JSON blob the Python backend
+ * stamps into <script id="dashboard-state">, then talks to the same Python
+ * server over plain form posts and JSON endpoints — no separate API tier.
+ *
+ * Why one file: the app is small enough that the cost of a build pipeline
+ * outweighed the cleanliness of splitting per-page. A Vite/TS scaffold
+ * exists at frontend/app/ but is intentionally not live yet — see
+ * frontend/app/README.md for the cut-over plan.
+ *
+ * Structure (top → bottom):
+ *   1. Module-scope constants, theme handling, IndexedDB audio cache.
+ *   2. Small primitives (h, formatters, fetch helpers, polling).
+ *   3. Per-page renderers (Overview, MediaLibrary, YouTube, Diarization,
+ *      Stitching, TrainingLabels, FineTuning).
+ *   4. Shell components (tab nav, hero card, command card, mount + boot).
+ *
+ * If you're adding a feature: state lives in module-level `state` (the
+ * server-stamped blob, refreshed by polling) plus the per-page `uiState`
+ * for ephemeral UI toggles. Keep behavior server-driven where possible.
+ */
 (function () {
   "use strict";
 
@@ -4750,10 +4774,10 @@
     return h(
       "section",
       { className: "subpanel" },
-      h("div", { className: "panel-head" }, h("div", null, h("h2", null, "2. Prepare Artifacts"), h("p", null, "Generate backend-specific training files."))),
+      h("div", { className: "panel-head" }, h("div", null, h("h2", null, "2. Prepare / Submit"), h("p", null, "Generate training files, or send the project straight to Slurm."))),
       h(
         "form",
-        { method: "post", action: routes.fineTunePrepare },
+        { method: "post", action: routes.fineTunePrepare, "data-loading-message": "Preparing fine-tuning artifacts..." },
         h(Field, { id: "prepare_project_choice", label: "Project with uploaded samples" }, h("select", { id: "prepare_project_choice", "data-project-name-target": "prepare_project_name", "data-project-backend-target": "prepare_backend" }, h(FineTuneProjectOptions, { projects: sampleProjects }))),
         h(Field, { id: "prepare_backend", label: "Backend" }, h(SelectInput, { id: "prepare_backend", defaultValue: preferences.fine_tuning_backend || "pyannote" }, h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "pyannote" }, "pyannote"))),
         h(Field, { id: "prepare_project_name", label: "Project name" }, h(TextInput, { id: "prepare_project_name", placeholder: "callhome-msdd" })),
@@ -4773,7 +4797,22 @@
             h("div", { className: "inline" }, h(Field, { id: "slurm_cpus", label: "Slurm CPUs" }, h(TextInput, { id: "slurm_cpus", defaultValue: nemo.slurm_cpus || defaults.slurmCpus })), h(Field, { id: "slurm_gpus", label: "Slurm GPUs" }, h(TextInput, { id: "slurm_gpus", defaultValue: nemo.slurm_gpus || defaults.slurmGpus })))
           )
         ),
-        h("p", null, h("button", { className: "secondary", type: "submit", disabled }, "Prepare Training Artifacts"))
+        h(
+          "div",
+          { className: "button-row" },
+          h("button", { className: "secondary", type: "submit", disabled }, "Prepare Only"),
+          h(
+            "button",
+            {
+              className: "primary",
+              type: "submit",
+              disabled,
+              formAction: routes.fineTunePrepareLaunch || routes.fineTunePrepare,
+              "data-loading-message": "Preparing artifacts and submitting fine-tuning to Slurm...",
+            },
+            "Prepare + Submit to Sbatch"
+          )
+        )
       ),
       disabled ? h("p", { className: "field-status" }, "Upload at least one labeled sample before you prepare training artifacts.") : null
     );
@@ -4898,7 +4937,7 @@
         )
       ),
       h("progress", { value: project.completedSteps, max: 3 }),
-      h("p", { className: "progress-meta" }, `${project.completedSteps} of 3 stages complete: upload, prepare, launch.`),
+      h("p", { className: "progress-meta" }, `${project.completedSteps} of 3 stages complete. Upload-ready projects can prepare and submit in one click.`),
       h(
         "details",
         { className: "details-box compact-details project-details" },
@@ -4952,6 +4991,28 @@
       h(
         "div",
         { className: "project-actions" },
+        Number(project.sampleCount || 0) > 0 && routes.fineTunePrepareLaunch
+          ? h(
+              "form",
+              {
+                method: "post",
+                action: routes.fineTunePrepareLaunch,
+                className: "inline-form quick-train-form",
+                "data-loading-message": "Preparing artifacts and submitting fine-tuning to Slurm...",
+              },
+              h("input", { type: "hidden", name: "project_slug", value: project.slug }),
+              h("input", { type: "hidden", name: "backend", value: project.backend }),
+              h(
+                "button",
+                {
+                  className: "primary",
+                  type: "submit",
+                  title: "Prepare this project with saved defaults and immediately submit a Slurm-preferred training run.",
+                },
+                "Prepare + Submit to Sbatch"
+              )
+            )
+          : null,
         h("button", { className: "secondary", type: "button", "data-fill-project-name": project.slug, "data-fill-project-backend": project.backend, "data-fill-name-target": "project_name", "data-fill-backend-target": "fine_tuning_backend", "data-fill-focus-target": "project_name" }, "Use For Upload"),
         h("button", { className: "secondary", type: "button", "data-fill-project-name": project.slug, "data-fill-project-backend": project.backend, "data-fill-name-target": "prepare_project_name", "data-fill-backend-target": "prepare_backend", "data-fill-focus-target": "prepare_project_name" }, "Use For Prepare"),
         h("button", { className: "secondary", type: "button", "data-fill-project-name": project.slug, "data-fill-project-backend": project.backend, "data-fill-name-target": "launch_project_name", "data-fill-backend-target": "launch_backend", "data-fill-focus-target": "launch_project_name" }, "Use For Launch")

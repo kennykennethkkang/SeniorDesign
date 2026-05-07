@@ -293,24 +293,31 @@ or any newly uploaded audio that was not included in the completed labels.
 
 ## Step 6: Prepare NeMo Only After NeMo Exists
 
-This workspace currently does not show a full NeMo source checkout under the
-project root. NeMo training expects a checkout with:
+NeMo training expects a checkout with:
 
 ```text
 examples/speaker_tasks/diarization/neural_diarizer/
 examples/speaker_tasks/diarization/conf/neural_diarizer/
 ```
 
-Once that exists, use this `NEMO_ROOT` value in the site:
+A shallow clone at the workspace's parent is the recommended layout (this is
+also the path the launcher auto-detects, so you can leave the dashboard
+"NeMo root" field blank):
+
+```bash
+git clone --depth=1 --branch v2.6.2 https://github.com/NVIDIA/NeMo.git \
+  /WAVE/users2/unix/kkang/NeMo
+```
+
+The tag should match the installed `nemo_toolkit` version (currently 2.6.2)
+so the example training script and config files line up with the package
+that gets imported at runtime.
+
+If you want to override that auto-detected path, paste a different `NEMO_ROOT`
+value into the site, e.g.:
 
 ```text
 /path/to/NeMo
-```
-
-For example, if you clone it at `/WAVE/users2/unix/kkang/NeMo`, use:
-
-```text
-/WAVE/users2/unix/kkang/NeMo
 ```
 
 On `Fine-Tuning`, in `2. Prepare Artifacts`, use:
