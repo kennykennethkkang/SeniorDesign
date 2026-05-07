@@ -958,6 +958,19 @@ def build_html(
     button.primary {{
       background: linear-gradient(135deg, var(--scu-red), var(--bronco-red));
     }}
+    button.ghost {{
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--slate-dark);
+      box-shadow: none;
+    }}
+    button.ghost.danger {{
+      border-color: rgba(163, 32, 53, 0.42);
+      color: var(--accent);
+    }}
+    button.ghost.danger:hover {{
+      background: var(--flag);
+    }}
     :root[data-theme="dark"] button:not(.secondary),
     :root[data-theme="dark"] button.primary {{
       background: linear-gradient(135deg, #c44255, var(--bronco-red));
@@ -1423,13 +1436,14 @@ def build_html(
     }}
     .training-target-option {{
       display: grid;
-      grid-template-columns: auto 1fr;
+      grid-template-columns: auto 1fr auto;
       gap: 10px;
       align-items: start;
       padding: 10px 12px;
       border: 1px solid var(--line);
       border-radius: var(--radius-sm);
       background: var(--soft);
+      cursor: pointer;
     }}
     .training-target-option strong {{
       display: block;
@@ -1440,15 +1454,80 @@ def build_html(
       color: var(--muted);
       font-weight: 700;
     }}
-    .training-target-option.create-new {{
-      border-color: rgba(77, 135, 152, 0.44);
-      background: rgba(77, 135, 152, 0.1);
+    .training-target-option.is-selected {{
+      border-color: rgba(77, 135, 152, 0.6);
+      background: rgba(77, 135, 152, 0.12);
+    }}
+    .training-target-rename {{
+      align-self: center;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-solid);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }}
+    .training-target-rename:hover {{
+      border-color: rgba(77, 135, 152, 0.5);
     }}
     .training-target-empty {{
       margin: 4px 0 0;
       color: var(--muted);
       font-size: 13px;
       font-weight: 800;
+    }}
+    .training-target-subtitle {{
+      margin: -8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .training-mode-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 10px;
+    }}
+    .training-mode-tile {{
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--soft);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }}
+    .training-mode-tile.is-selected {{
+      border-color: rgba(77, 135, 152, 0.6);
+      background: rgba(77, 135, 152, 0.12);
+    }}
+    .training-mode-tile strong {{
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }}
+    .training-mode-tile small {{
+      display: block;
+      color: var(--muted);
+      font-weight: 700;
+      line-height: 1.4;
+    }}
+    .training-mode-pane[hidden] {{
+      display: none;
+    }}
+    .training-version-name-row {{
+      display: block;
+      margin-top: 10px;
+    }}
+    .training-target-note {{
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
     }}
     .dialog-actions {{
       justify-content: flex-end;
@@ -1880,26 +1959,53 @@ def build_html(
             <button type="button" id="addLabelRow">Add Label</button>
             <button class="secondary" type="submit" name="label_action" value="draft">Save Draft</button>
             <button class="primary" type="submit" name="label_action" value="complete">Complete For Training</button>
+            <button type="button" id="uncompleteLabelButton" class="ghost danger" hidden title="Remove this sample from the fine-tuning project's training set and roll the label back to a draft.">Remove From Training</button>
           </div>
         </form>
         <dialog id="trainingTargetDialog" class="training-target-dialog" aria-labelledby="trainingTargetTitle">
           <div class="training-target-card">
             <div class="panel-head">
-              <h3 id="trainingTargetTitle">Select Training Targets</h3>
+              <h3 id="trainingTargetTitle">Train This Sample</h3>
               <button type="button" id="closeTrainingTargetDialog" class="secondary">Cancel</button>
             </div>
-            <div class="training-target-create">
-              <h4>Create New Fine-Tuned Model</h4>
+            <p class="training-target-subtitle">Choose how this completed label should be used to train a diarization model.</p>
+            <div class="training-mode-grid" role="radiogroup" aria-label="Training mode">
+              <label class="training-mode-tile" data-training-mode-tile="existing">
+                <input type="radio" name="trainingModeChoice" value="existing">
+                <div>
+                  <strong>Continue training an existing fine-tuned model</strong>
+                  <small>Adds this label to a project's training set and starts a new run that builds on the previous samples.</small>
+                </div>
+              </label>
+              <label class="training-mode-tile" data-training-mode-tile="base">
+                <input type="radio" name="trainingModeChoice" value="base">
+                <div>
+                  <strong>Train a new model from the default base</strong>
+                  <small>Creates a brand-new fine-tuning project for this label. Name the model — it will be available for future training runs.</small>
+                </div>
+              </label>
+            </div>
+            <section id="trainingModeExistingPane" class="training-mode-pane" hidden>
+              <h4>Pick one or more fine-tuned models</h4>
+              <p class="training-target-note">Tick every model that should receive this label. Each ticked project gets a fresh training run.</p>
+              <div id="trainingTargetOptions" class="training-target-options"></div>
+              <label class="training-version-name-row">
+                <span>New trained version name (optional, applied to every selected model)</span>
+                <input id="existingTrainingVersionName" type="text" placeholder="cleaned-stage-2">
+              </label>
+            </section>
+            <section id="trainingModeBasePane" class="training-mode-pane training-target-create" hidden>
+              <h4>Create a new fine-tuned model</h4>
               <div class="field-grid fine-tuned-target-fields">
                 <label><span>Backend</span><select id="newTrainingBackend"><option value="pyannote"{selected_attr("pyannote", selected_create_backend)}>pyannote</option><option value="nemo"{selected_attr("nemo", selected_create_backend)}>NeMo</option></select></label>
-                <label><span>Fine-tuned model name</span><input id="newTrainingProjectName" type="text" value="{project_name}" placeholder="speaker-lab"></label>
+                <label><span>Model name</span><input id="newTrainingProjectName" type="text" value="{project_name}" placeholder="speaker-lab"></label>
                 <label><span>New trained version name</span><input id="newTrainingVersionName" type="text" placeholder="cleaned-stage-2"></label>
               </div>
-            </div>
-            <div id="trainingTargetOptions" class="training-target-options"></div>
+              <p class="training-target-note">Naming the model registers it for future use so more labels can be added to it later.</p>
+            </section>
             <div class="controls dialog-actions">
-              <button type="button" id="skipTrainingQueue" class="secondary">Complete Without Queue</button>
-              <button type="button" id="confirmTrainingTargets" class="primary">Queue Selected</button>
+              <button type="button" id="skipTrainingQueue" class="secondary">Save Without Training</button>
+              <button type="button" id="confirmTrainingTargets" class="primary">Train Now</button>
             </div>
           </div>
         </dialog>
@@ -1996,6 +2102,12 @@ def build_html(
     const newTrainingBackend = document.getElementById("newTrainingBackend");
     const newTrainingProjectName = document.getElementById("newTrainingProjectName");
     const newTrainingVersionName = document.getElementById("newTrainingVersionName");
+    const existingTrainingVersionName = document.getElementById("existingTrainingVersionName");
+    const trainingModeExistingPane = document.getElementById("trainingModeExistingPane");
+    const trainingModeBasePane = document.getElementById("trainingModeBasePane");
+    const trainingModeRadios = document.querySelectorAll("input[name='trainingModeChoice']");
+    const trainingModeTiles = document.querySelectorAll(".training-mode-tile");
+    let currentTrainingMode = "existing";
     const saveStatus = document.getElementById("saveStatus");
     const labelReturnTo = document.getElementById("labelReturnTo");
     const trainingLabelsLink = document.getElementById("trainingLabelsLink");
@@ -2143,62 +2255,181 @@ def build_html(
       return Array.from(choices.values());
     }}
 
+    function existingTrainingTargetsByProject() {{
+      // Collapse the per-run target list down to one row per project so the
+      // popup shows a single picker entry per fine-tuned model. Run-level
+      // metadata still rides along on the chosen project — the user just
+      // doesn't have to think about which version row to click.
+      const byKey = new Map();
+      (trainingTargetData.targets || []).forEach(function (target) {{
+        if (!target || target.kind === "new") return;
+        if (byKey.has(target.key)) return;
+        byKey.set(target.key, target);
+      }});
+      return Array.from(byKey.values()).sort(function (left, right) {{
+        const leftLabel = (left.displayName || left.projectName || "").toLowerCase();
+        const rightLabel = (right.displayName || right.projectName || "").toLowerCase();
+        return leftLabel.localeCompare(rightLabel);
+      }});
+    }}
+
+    function refreshExistingRowSelection() {{
+      // Tile-style "is-selected" highlight follows the checkbox state. Multi-
+      // select means we can't just store one row — refresh every time anything
+      // toggles so the visuals match exactly which models are queued.
+      if (!trainingTargetOptions) return;
+      trainingTargetOptions.querySelectorAll(".training-target-option").forEach(function (row) {{
+        const box = row.querySelector("input[name='trainingExistingTarget']");
+        row.classList.toggle("is-selected", Boolean(box && box.checked));
+      }});
+    }}
+
+    function promptRenameExistingTarget(target) {{
+      // Reuse the dashboard's rename-project endpoint so the popup and the
+      // Fine-Tuning tab stay in lock-step on what each model is called.
+      const current = target.displayName || target.projectName;
+      const next = window.prompt("Rename fine-tuned model \\"" + current + "\\"", current);
+      if (next === null) return;
+      const cleaned = String(next).trim();
+      if (!cleaned || cleaned === current) return;
+      const formData = new FormData();
+      formData.append("project_slug", target.projectName);
+      formData.append("backend", target.backend);
+      formData.append("display_name", cleaned);
+      window.fetch(appBasePath() + "/fine-tuning/rename-project", {{
+        method: "POST",
+        body: formData,
+        credentials: "same-origin",
+        redirect: "follow",
+        headers: {{ Accept: "text/html,*/*" }},
+      }})
+        .then(function (response) {{
+          if (!response.ok && response.type !== "opaqueredirect") {{
+            window.alert("Could not rename. Check the server log.");
+            return;
+          }}
+          target.displayName = cleaned;
+          (trainingTargetData.targets || []).forEach(function (entry) {{
+            if (entry && entry.key === target.key) entry.displayName = cleaned;
+          }});
+          renderTrainingTargetChoices();
+        }})
+        .catch(function () {{
+          window.alert("Rename request failed.");
+        }});
+    }}
+
     function renderTrainingTargetChoices() {{
       if (!trainingTargetOptions) return;
+      // Preserve whatever the user had ticked across renders triggered by
+      // rename actions or the auto-refresh when the new-model name changes.
+      const previousKeys = new Set(
+        Array.from(trainingTargetOptions.querySelectorAll("input[name='trainingExistingTarget']:checked"))
+          .map(function (input) {{ return input.value; }})
+      );
       trainingTargetOptions.innerHTML = "";
-      const choices = trainingTargetChoices();
+      const choices = existingTrainingTargetsByProject();
+      if (!choices.length) {{
+        const note = document.createElement("p");
+        note.className = "training-target-empty";
+        note.textContent = "No fine-tuned models exist yet. Switch to 'Train a new model from the default base' to create your first one.";
+        trainingTargetOptions.appendChild(note);
+        return;
+      }}
+      let firstBox = null;
+      let restoredAny = false;
       choices.forEach(function (target) {{
-        const label = document.createElement("label");
-        label.className = "training-target-option " + (target.kind === "new" ? "create-new" : "existing-fine-tuned");
+        const row = document.createElement("label");
+        row.className = "training-target-option";
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
+        checkbox.name = "trainingExistingTarget";
         checkbox.value = target.key;
-        checkbox.checked = Boolean(target.checked);
         checkbox.dataset.targetKey = target.key;
-        checkbox.dataset.choiceKey = target.choiceKey;
-        label.appendChild(checkbox);
+        checkbox.dataset.projectName = target.projectName;
+        checkbox.dataset.backend = target.backend;
+        checkbox.dataset.displayName = target.displayName || target.projectName;
+        if (previousKeys.has(target.key)) {{
+          checkbox.checked = true;
+          restoredAny = true;
+        }}
+        checkbox.addEventListener("change", refreshExistingRowSelection);
+        row.appendChild(checkbox);
 
-        const body = document.createElement("span");
+        const body = document.createElement("div");
         const title = document.createElement("strong");
-        title.textContent = target.kind === "new"
-          ? "Create new " + target.backendLabel + " fine-tuned model / " + (target.displayName || target.projectName)
-          : target.backendLabel + " / " + (target.displayName || target.projectName);
+        title.textContent = target.backendLabel + " / " + (target.displayName || target.projectName);
         body.appendChild(title);
 
         const meta = document.createElement("small");
-        const details = [];
-        if (target.kind === "new") details.push("new fine-tuned model");
-        if (target.kind === "fine_tuned") details.push("previous fine-tuned model");
+        const details = ["previous fine-tuned model"];
         if (target.prepared) details.push("prepared");
         if (target.autoTrain) details.push("auto-train saved");
         details.push(String(target.sampleCount || 0) + " sample(s)");
-        if (target.versionName && target.versionName !== target.displayName) details.push("version: " + target.versionName);
-        if (target.runName) details.push("run: " + target.runName);
         if (target.latestRunText) details.push("latest: " + target.latestRunText);
+        if (target.projectName && target.projectName !== (target.displayName || "")) details.push("slug: " + target.projectName);
         meta.textContent = details.join(" | ");
         body.appendChild(meta);
-        label.appendChild(body);
-        trainingTargetOptions.appendChild(label);
+        row.appendChild(body);
+
+        const renameButton = document.createElement("button");
+        renameButton.type = "button";
+        renameButton.className = "training-target-rename";
+        renameButton.textContent = "Rename";
+        renameButton.title = "Give this fine-tuned model a friendlier name. The on-disk slug stays the same.";
+        renameButton.addEventListener("click", function (event) {{
+          event.preventDefault();
+          event.stopPropagation();
+          promptRenameExistingTarget(target);
+        }});
+        row.appendChild(renameButton);
+
+        trainingTargetOptions.appendChild(row);
+        if (!firstBox) firstBox = checkbox;
       }});
-      if (!choices.some(function (target) {{ return target.kind === "fine_tuned"; }})) {{
-        const note = document.createElement("p");
-        note.className = "training-target-empty";
-        note.textContent = "No previous fine-tuned runs are available yet. Use the checked create-new target above.";
-        trainingTargetOptions.appendChild(note);
-      }}
+      // Default to the first model so a user who just opens the dialog and
+      // hits Train Now isn't blocked by an empty-list error. After that the
+      // user's explicit selections (preserved across renders) win.
+      if (!restoredAny && firstBox) firstBox.checked = true;
+      refreshExistingRowSelection();
+    }}
+
+    function selectedExistingTargets() {{
+      if (!trainingTargetOptions) return [];
+      const seen = new Set();
+      const targets = [];
+      trainingTargetOptions.querySelectorAll("input[name='trainingExistingTarget']:checked").forEach(function (box) {{
+        if (seen.has(box.value)) return;
+        seen.add(box.value);
+        targets.push({{
+          key: box.value,
+          backend: box.dataset.backend || "",
+          projectName: box.dataset.projectName || "",
+          displayName: box.dataset.displayName || box.dataset.projectName || "",
+        }});
+      }});
+      return targets;
+    }}
+
+    function setTrainingMode(mode) {{
+      currentTrainingMode = mode === "base" ? "base" : "existing";
+      if (trainingModeExistingPane) trainingModeExistingPane.hidden = currentTrainingMode !== "existing";
+      if (trainingModeBasePane) trainingModeBasePane.hidden = currentTrainingMode !== "base";
+      trainingModeRadios.forEach(function (radio) {{
+        radio.checked = radio.value === currentTrainingMode;
+      }});
+      trainingModeTiles.forEach(function (tile) {{
+        const radio = tile.querySelector("input[name='trainingModeChoice']");
+        tile.classList.toggle("is-selected", Boolean(radio && radio.checked));
+      }});
     }}
 
     function selectedDialogTargets() {{
-      if (!trainingTargetOptions) return [];
-      const seenTargets = new Set();
-      return Array.from(trainingTargetOptions.querySelectorAll("input[data-target-key]:checked"))
-        .map(function (input) {{ return input.value; }})
-        .filter(function (value) {{
-          if (seenTargets.has(value)) return false;
-          seenTargets.add(value);
-          return true;
-        }});
+      if (currentTrainingMode === "existing") {{
+        return selectedExistingTargets().map(function (target) {{ return target.key; }});
+      }}
+      return currentTrainingTargets().map(function (target) {{ return target.key; }});
     }}
 
     function setTrainingTargetHiddenInputs(targets, queueSelected) {{
@@ -2230,7 +2461,8 @@ def build_html(
         appendHidden("label_backend", firstBackend);
         appendHidden("label_project_name", firstProject);
       }}
-      const versionName = newTrainingVersionName ? String(newTrainingVersionName.value || "").trim() : "";
+      const versionInput = currentTrainingMode === "existing" ? existingTrainingVersionName : newTrainingVersionName;
+      const versionName = versionInput ? String(versionInput.value || "").trim() : "";
       if (versionName) {{
         appendHidden("label_new_training_name", versionName);
       }}
@@ -2264,12 +2496,22 @@ def build_html(
     }}
 
     function openTrainingTargetDialog() {{
+      // Pick the default mode by what's actually available — if there are no
+      // fine-tuned models yet, jump straight to the "create new" pane so the
+      // user isn't staring at an empty list wondering what to do.
+      const hasExisting = existingTrainingTargetsByProject().length > 0;
+      setTrainingMode(hasExisting ? "existing" : "base");
       renderTrainingTargetChoices();
       if (trainingTargetDialog && typeof trainingTargetDialog.showModal === "function") {{
         trainingTargetDialog.showModal();
         return;
       }}
-      setTrainingTargetHiddenInputs(currentTrainingTargets().map(function (target) {{ return target.key; }}), true);
+      // Fallback: no <dialog> support. Submit with whichever mode we picked.
+      const fallbackTargets = selectedDialogTargets();
+      setTrainingTargetHiddenInputs(
+        fallbackTargets.length ? fallbackTargets : currentTrainingTargets().map(function (target) {{ return target.key; }}),
+        true,
+      );
       submitCompletedTrainingLabel();
     }}
 
@@ -2971,11 +3213,76 @@ def build_html(
     // "draft" rather than "not started" — so flip the visible status pill the
     // moment any edit happens, instead of waiting for the round-trip to land.
     const labelStatePill = document.querySelector(".label-state");
+    const uncompleteLabelButton = document.getElementById("uncompleteLabelButton");
     let visibleStatusFlipped = false;
+    function labelStatusText() {{
+      if (!labelStatePill) return "";
+      return String(labelStatePill.textContent || "").toLowerCase();
+    }}
+    function updateUncompleteVisibility() {{
+      if (!uncompleteLabelButton) return;
+      const completed = labelStatusText().indexOf("completed") >= 0;
+      uncompleteLabelButton.hidden = !completed;
+    }}
     function markVisibleStatusDraft() {{
       if (visibleStatusFlipped || !labelStatePill) return;
       visibleStatusFlipped = true;
       labelStatePill.textContent = "Status: draft";
+      updateUncompleteVisibility();
+    }}
+    updateUncompleteVisibility();
+    if (uncompleteLabelButton) {{
+      uncompleteLabelButton.addEventListener("click", function () {{
+        // Confirm before deleting the project sample files. Roll-back also
+        // clears any auto-train queue for this label, so the user shouldn't
+        // be surprised when the next Train Now click starts from scratch.
+        const ok = window.confirm(
+          "Remove this sample from the fine-tuning project's training set and roll the label back to a draft? "
+          + "Audio and RTTM copies in the project's training set will be deleted."
+        );
+        if (!ok) return;
+        const audioInput = labelForm.querySelector("input[name='audio_file']");
+        const audioName = audioInput ? String(audioInput.value || "").trim() : "";
+        if (!audioName) {{
+          window.alert("This page is missing the audio file reference.");
+          return;
+        }}
+        clearLabelAutoSave();
+        if (labelAutoSaveController) {{
+          labelAutoSaveController.abort();
+          labelAutoSaveController = null;
+        }}
+        const formData = new FormData();
+        formData.append("audio_file", audioName);
+        formData.append("label_return_to", appLocalPath());
+        setLabelFormBusy(true);
+        if (saveStatus) {{
+          saveStatus.className = "save-status";
+          saveStatus.style.display = "block";
+          saveStatus.textContent = "Removing sample from training...";
+        }}
+        window.fetch(appBasePath() + "/training-labels/uncomplete", {{
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+          redirect: "follow",
+          headers: {{ Accept: "text/html,*/*" }},
+        }})
+          .then(function (response) {{
+            if (!response.ok && response.type !== "opaqueredirect") {{
+              throw new Error("Uncomplete failed");
+            }}
+            window.location.replace(response.url || (appBasePath() + appLocalPath()));
+          }})
+          .catch(function () {{
+            setLabelFormBusy(false);
+            if (saveStatus) {{
+              saveStatus.className = "save-status error";
+              saveStatus.style.display = "block";
+              saveStatus.textContent = "Could not remove the sample. Check the server and try again.";
+            }}
+          }});
+      }});
     }}
 
     // Force a save on the very first edit so the dashboard sees "draft" right
@@ -3513,11 +3820,34 @@ def build_html(
         trainingTargetDialog.close();
       }});
     }}
+    trainingModeRadios.forEach(function (radio) {{
+      radio.addEventListener("change", function () {{
+        if (radio.checked) setTrainingMode(radio.value);
+      }});
+    }});
+    function validateBaseModeInputs() {{
+      // Need a model name to register a brand-new fine-tuned project. The
+      // backend slugifies it, but an empty value would slugify to "project"
+      // and silently overwrite an existing default-named project — better to
+      // make the user be explicit.
+      const projectValue = newTrainingProjectName ? String(newTrainingProjectName.value || "").trim() : "";
+      if (!projectValue) {{
+        window.alert("Provide a name for the new model so future training runs can find it.");
+        if (newTrainingProjectName) newTrainingProjectName.focus();
+        return false;
+      }}
+      return true;
+    }}
     if (confirmTrainingTargets) {{
       confirmTrainingTargets.addEventListener("click", function () {{
+        if (currentTrainingMode === "existing" && !selectedExistingTargets().length) {{
+          window.alert("Tick at least one fine-tuned model to continue training, or switch to the default base option.");
+          return;
+        }}
+        if (currentTrainingMode === "base" && !validateBaseModeInputs()) return;
         const targets = selectedDialogTargets();
         if (!targets.length) {{
-          window.alert("Select at least one target, or complete without queue.");
+          window.alert("Pick a model to train, or cancel to keep editing.");
           return;
         }}
         setTrainingTargetHiddenInputs(targets, true);
@@ -3527,6 +3857,11 @@ def build_html(
     }}
     if (skipTrainingQueue) {{
       skipTrainingQueue.addEventListener("click", function () {{
+        if (currentTrainingMode === "existing" && !selectedExistingTargets().length) {{
+          window.alert("Tick at least one fine-tuned model to associate this label with, or switch to the default base option.");
+          return;
+        }}
+        if (currentTrainingMode === "base" && !validateBaseModeInputs()) return;
         const targets = selectedDialogTargets();
         setTrainingTargetHiddenInputs(targets, false);
         if (trainingTargetDialog) trainingTargetDialog.close();

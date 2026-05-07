@@ -1640,8 +1640,21 @@ def list_projects(*, root: Path = PROJECT_ROOT) -> list[dict[str, object]]:
         latest_run = latest_run_summary(candidate)
         if latest_run is not None:
             summary["latest_run"] = latest_run
-        if sample_count == 0 and not summary.get("prepared") and latest_run is None:
+        # Skip stale empty folders (legacy test fixtures, etc.) but keep
+        # explicitly-created project shells that the user registered through
+        # "Create Empty Project". The marker is written by the create-project
+        # handler so we can tell intentional-but-empty projects from the
+        # leftovers of an aborted upload.
+        manually_created = bool(display_payload.get("manually_created"))
+        if (
+            sample_count == 0
+            and not summary.get("prepared")
+            and latest_run is None
+            and not manually_created
+        ):
             continue
+        if manually_created:
+            summary["manually_created"] = True
         summaries.append(summary)
     return summaries
 

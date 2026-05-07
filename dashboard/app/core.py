@@ -274,6 +274,8 @@ class CoreMixin:
                 status, headers, body = self.handle_audio_file_move(environ)
             elif routed_method == "POST" and path == "/training-labels/save":
                 status, headers, body = self.handle_training_label_save(environ)
+            elif routed_method == "POST" and path == "/training-labels/uncomplete":
+                status, headers, body = self.handle_training_label_uncomplete(environ)
             elif routed_method == "POST" and path == "/youtube-links":
                 status, headers, body = self.handle_youtube_links(environ)
             elif routed_method == "POST" and path == "/youtube-links/delete":
@@ -290,6 +292,8 @@ class CoreMixin:
                 status, headers, body = self.handle_tests(environ)
             elif routed_method == "POST" and path == "/models/save":
                 status, headers, body = self.handle_model_preferences(environ)
+            elif routed_method == "POST" and path == "/fine-tuning/create-project":
+                status, headers, body = self.handle_finetune_create_project(environ)
             elif routed_method == "POST" and path == "/fine-tuning/upload-sample":
                 status, headers, body = self.handle_finetune_upload(environ)
             elif routed_method == "POST" and path == "/fine-tuning/prepare":

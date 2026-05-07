@@ -36,6 +36,7 @@ with warnings.catch_warnings():
     )
     import cgi
 
+import fine_tuning_manager as ftm
 from fine_tuning_manager import (
     DEFAULT_BASE_SHIFT,
     DEFAULT_BASE_WINDOW,
@@ -55,6 +56,7 @@ from fine_tuning_manager import (
     DEFAULT_SLURM_MEMORY,
     DEFAULT_SLURM_PARTITION,
     DEFAULT_SLURM_TIME,
+    ensure_project_structure,
     launch_training,
     build_sample,
     list_projects,
@@ -185,6 +187,80 @@ class FineTuningMixin:
                 transcript_stream.close()
             rttm_stream.close()
             audio_stream.close()
+
+    def handle_finetune_create_project(self, environ):
+        """Create an empty fine-tuning project so samples can be added later.
+
+        The upload form requires audio + RTTM to land before a project shell
+        exists on disk, which is annoying when the user just wants to register
+        a name (and optionally a friendlier display name) up front and feed it
+        labels from the Inspect popup over time. This handler makes the
+        directory structure and, if a display name is provided, writes the
+        display sidecar so the project shows up in the Fine-Tuning tab and the
+        popup's "existing models" list immediately.
+        """
+
+        form = self.parse_form(environ)
+        preferences = self.model_preferences()
+        project_name = (form.getfirst("project_name") or "").strip()
+        if not project_name:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message="Provide a project name for the new fine-tuned model.",
+                status="error",
+            )
+        try:
+            backend = normalize_backend(
+                form.getfirst("fine_tuning_backend") or str(preferences["fine_tuning_backend"])
+            )
+        except ValueError as exc:
+            return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+
+        slug = slugify(project_name)
+        if not slug:
+            return self.redirect(
+                environ,
+                "/fine-tuning",
+                message="Project name must contain at least one alphanumeric character.",
+                status="error",
+            )
+        target = fine_tune_project_dir(slug, backend=backend, root=self.root)
+        already_exists = target.is_dir() and any(target.iterdir())
+        try:
+            ensure_project_structure(slug, backend=backend, root=self.root)
+        except OSError as exc:
+            return self.redirect(environ, "/fine-tuning", message=f"Could not create project folder: {exc}", status="error")
+
+        # Drop a marker into display.json so list_projects keeps showing this
+        # project even with 0 samples — otherwise the empty shell gets filtered
+        # out and the user wonders where their freshly-created model went.
+        display_path = target / "display.json"
+        sidecar_updates: dict[str, object] = {
+            "manually_created": True,
+            "manually_created_at_utc": utc_now_iso(),
+        }
+        display_name = (form.getfirst("display_name") or "").strip()
+        if display_name:
+            sidecar_updates["display_name"] = display_name
+        try:
+            ftm._write_display_sidecar(display_path, updates=sidecar_updates)  # noqa: SLF001 — internal helper, intentional cross-module use
+        except OSError as exc:
+            return self.redirect(environ, "/fine-tuning", message=f"Could not write display.json: {exc}", status="error")
+
+        self.invalidate_dashboard_cache()
+        if already_exists:
+            message = (
+                f"Project '{display_name or slug}' already exists for {backend}; left it untouched."
+                if not display_name
+                else f"Updated display name for existing {backend}/{slug} to '{display_name}'."
+            )
+            status = "info"
+        else:
+            label = display_name or slug
+            message = f"Created empty {backend} project '{label}'. Add samples here, from Training Labels, or via the Inspect popup."
+            status = "success"
+        return self.redirect(environ, "/fine-tuning", message=message, status=status)
 
     def handle_finetune_upload(self, environ):
         """Accept one or more labeled audio+RTTM pairs from the browser or SSH workspace and add them to a project."""

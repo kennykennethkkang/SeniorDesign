@@ -126,7 +126,10 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("id=\"newTrainingBackend\"", html)
             self.assertIn("id=\"newTrainingProjectName\"", html)
             self.assertIn("id=\"newTrainingVersionName\"", html)
-            self.assertIn("Queue Selected", html)
+            self.assertIn("Train Now", html)
+            self.assertIn("Save Without Training", html)
+            self.assertIn("training-mode-grid", html)
+            self.assertIn("training-target-rename", html)
 
             with report_path.open("r", encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))

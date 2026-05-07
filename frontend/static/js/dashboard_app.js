@@ -3690,6 +3690,20 @@
     );
   }
 
+  function uncompleteTrainingLabel(row) {
+    if (!row || !row.name || !routes.uncompleteTrainingLabel) return;
+    // Confirm before deleting sample files. The audio + RTTM in the project's
+    // training set get removed, so we don't want this triggered by a
+    // mis-click. Status rolls back to draft; the segments stay intact for
+    // editing.
+    const ok = window.confirm(
+      `Remove "${row.fileName || row.name}" from completed training? ` +
+      `This deletes the sample files from ${row.trainingProjects?.length ? row.trainingProjects.join(", ") : "the fine-tuning project"} and rolls the label back to a draft.`
+    );
+    if (!ok) return;
+    submitHiddenForm(routes.uncompleteTrainingLabel, { audio_file: row.name });
+  }
+
   function TrainingLabelsTable({ rows }) {
     return h(DataTable, {
       className: "training-label-table",
@@ -3732,7 +3746,19 @@
             null,
             row.reviewHref
               ? h("a", { className: "tab-link", href: row.reviewHref }, row.status === "completed" ? "Review Label" : "Inspect")
-              : h("span", { className: "row-note" }, "Run diarization to create a review page")
+              : h("span", { className: "row-note" }, "Run diarization to create a review page"),
+            row.status === "completed"
+              ? h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "ghost danger training-label-uncomplete",
+                    onClick: () => uncompleteTrainingLabel(row),
+                    title: "Remove this sample from the fine-tuning project's training set and roll the label back to a draft.",
+                  },
+                  "Remove From Training"
+                )
+              : null
           )
         );
       },
@@ -3851,6 +3877,26 @@
             )
           )
         : h("p", { className: "field-status" }, emptyText)
+    );
+  }
+
+  function FineTuneCreateProjectCard({ preferences }) {
+    // Lightweight escape hatch from the upload-first workflow: register a
+    // fine-tuning project name (and an optional display name) before any
+    // labels exist. Lets the user reserve a slot in the popup's "existing
+    // models" list and send Inspect-completed labels at it later.
+    return h(
+      "section",
+      { className: "subpanel", id: "fine-tune-create" },
+      h("div", { className: "panel-head" }, h("div", null, h("h2", null, "0. Create Empty Project"), h("p", null, "Reserve a fine-tuned model slot now and feed it labels later."))),
+      h(
+        "form",
+        { method: "post", action: routes.fineTuneCreateProject, "data-loading-message": "Creating fine-tuning project..." },
+        h(Field, { id: "create_project_backend", label: "Backend" }, h(SelectInput, { id: "create_project_backend", name: "fine_tuning_backend", defaultValue: preferences.fine_tuning_backend || "pyannote" }, h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "pyannote" }, "pyannote"))),
+        h(Field, { id: "create_project_name", label: "Project name (slug)", note: "Used as the on-disk folder. Letters, numbers, dashes." }, h("input", { id: "create_project_name", name: "project_name", placeholder: "callhome-msdd", required: true })),
+        h(Field, { id: "create_project_display", label: "Display name (optional)", note: "Friendly label shown in the popup and project cards. Slug stays the same on disk." }, h("input", { id: "create_project_display", name: "display_name", placeholder: "Callhome MSDD" })),
+        h("p", null, h("button", { type: "submit" }, "Create empty project"))
+      )
     );
   }
 
@@ -4295,6 +4341,7 @@
         "article",
         { className: "panel", id: "fine-tune-workflow" },
         h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Training Workflow"), h("p", null, "Only the actions needed to build and run a fine-tuning project."))),
+        h(FineTuneCreateProjectCard, { preferences }),
         h("div", { className: "three-grid" }, h(FineTuneUploadCard, { preferences, projectNames, trainingSources: ctx.trainingSources || {} }), h(FineTunePrepareCard, { preferences, sampleProjects }), h(FineTuneLaunchCard, { preferences, preparedProjects }))
       ),
       h(

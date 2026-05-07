@@ -62,6 +62,7 @@ from fine_tuning_manager import (
     parse_rttm,
     probe_media_duration,
     prepare_project,
+    project_dir as ftm_project_dir,
     read_project_display as ftm_read_project_display,
     run_status as fine_tuning_run_status,
     sanitize_filename,
@@ -579,6 +580,147 @@ class TrainingLabelsMixin:
         )
         return options
 
+    def project_sample_stem(self, audio_name: str) -> str:
+        """Return the on-disk stem the project's audio/rttm/text files share.
+
+        We use ``diarization_output_base`` so that two audio files with the
+        same basename in different subfolders (``a/clip.wav`` vs.
+        ``b/clip.wav``) get unique, path-flattened stems
+        (``a__clip`` / ``b__clip``) and never overwrite each other. The label
+        completion handler now passes this stem in for both audio and RTTM
+        when calling ``save_project_sample_streams``, so the two files are
+        guaranteed to pair on disk.
+        """
+
+        flattened = self.diarization_output_base(audio_name)
+        if flattened:
+            return flattened
+        # Fallback: very old / pre-flatten records may have been saved using
+        # the basename-only stem produced by sanitize_filename. The legacy
+        # variant is offered separately by ``legacy_project_sample_stem`` so
+        # cleanup can still find pre-flatten files.
+        return Path(sanitize_filename(audio_name)).stem or "sample"
+
+    def legacy_project_sample_stem(self, audio_name: str) -> str:
+        """Old basename-only stem ``save_project_sample_streams`` used to write.
+
+        Kept around so that re-completing or uncompleting a label whose
+        previous run used the basename can still find and remove the stale
+        ``001_clip.wav`` / ``001_clip.rttm`` pair, even though the new save
+        path uses ``subfolder__001_clip`` instead.
+        """
+
+        return Path(sanitize_filename(audio_name)).stem or ""
+
+    def remove_project_sample_files(
+        self,
+        *,
+        project_name: str,
+        backend: str,
+        stem: str,
+    ) -> dict[str, list[str]]:
+        """Delete the audio/rttm/transcript files for one stem from a project.
+
+        Returns a small report of what got removed so the caller can include it
+        in the user-facing notification. We glob on stem to catch any extension
+        that might have been used for the audio/transcript copy.
+        """
+
+        removed: dict[str, list[str]] = {"audio": [], "rttm": [], "transcript": []}
+        if not stem:
+            return removed
+        try:
+            normalized_backend = normalize_backend(backend)
+        except ValueError:
+            return removed
+        target = ftm_project_dir(project_name, backend=normalized_backend, root=self.root)
+        if not target.is_dir():
+            return removed
+        # ``audio`` and ``text`` files keep their original extension, so glob on
+        # stem rather than hard-coding ".wav" or ".txt".
+        for sub_dir, key in (("audio", "audio"), ("text", "transcript")):
+            sub_path = target / sub_dir
+            if not sub_path.is_dir():
+                continue
+            for path in sorted(sub_path.glob(f"{stem}.*")):
+                try:
+                    path.unlink()
+                    removed[key].append(self.describe_path(path))
+                except OSError:
+                    continue
+        rttm_path = target / "rttm" / f"{stem}.rttm"
+        if rttm_path.is_file():
+            try:
+                rttm_path.unlink()
+                removed["rttm"].append(self.describe_path(rttm_path))
+            except OSError:
+                pass
+        return removed
+
+    def remove_label_sample_from_project(
+        self,
+        *,
+        project_name: str,
+        backend: str,
+        audio_name: str,
+    ) -> dict[str, list[str]]:
+        """Remove a label's audio/rttm/transcript copies from one project.
+
+        Tries the current path-flattened stem first, then the legacy
+        basename-only stem so records written before the pairing fix still
+        get cleaned. Both variants share the same project folders, so we
+        merge the reports.
+        """
+
+        merged: dict[str, list[str]] = {"audio": [], "rttm": [], "transcript": []}
+        seen_stems: set[str] = set()
+        for stem in (
+            self.project_sample_stem(audio_name),
+            self.legacy_project_sample_stem(audio_name),
+        ):
+            if not stem or stem in seen_stems:
+                continue
+            seen_stems.add(stem)
+            removed = self.remove_project_sample_files(
+                project_name=project_name,
+                backend=backend,
+                stem=stem,
+            )
+            for key, paths in removed.items():
+                merged[key].extend(paths)
+        return merged
+
+    def cleanup_stale_training_targets(
+        self,
+        *,
+        previous_keys: list[str],
+        new_keys: list[str],
+        audio_name: str,
+    ) -> list[str]:
+        """Drop sample files from projects this label no longer points at.
+
+        When a user re-completes a label and switches the chosen fine-tuned
+        model, the old project's ``audio/`` and ``rttm/`` folders would
+        otherwise keep a stale copy of the sample and silently feed it to the
+        next training run. Compare old vs. new target keys and clear anything
+        the new completion isn't going to write to.
+        """
+
+        new_set = {key for key in new_keys if key}
+        cleared: list[str] = []
+        for key in previous_keys:
+            if not key or key in new_set or "/" not in key:
+                continue
+            backend, project_name = key.split("/", 1)
+            removed = self.remove_label_sample_from_project(
+                project_name=project_name,
+                backend=backend,
+                audio_name=audio_name,
+            )
+            if any(removed.values()):
+                cleared.append(key)
+        return cleared
+
     def auto_train_extra_env(self, backend: str) -> dict[str, str]:
         """Return launch environment needed for automatic training."""
 
@@ -827,14 +969,45 @@ class TrainingLabelsMixin:
                 status="error",
             )
 
+        # Drop any sample copies the previous completion left in projects this
+        # label is no longer training. Without this, switching the popup choice
+        # from project A to project B would silently keep training A on stale
+        # data — exactly the duplicate-RTTM bug we hit before.
+        previous_target_keys = [
+            str(item)
+            for item in (existing_record.get("training_projects") or [])
+            if str(item).strip()
+        ]
+        new_target_keys = [target["key"] for target in training_targets]
+        cleared_target_keys = self.cleanup_stale_training_targets(
+            previous_keys=previous_target_keys,
+            new_keys=new_target_keys,
+            audio_name=audio_name,
+        )
+
+        # Audio and RTTM must share the same stem so the training pipeline can
+        # pair them. Build the project-side filename from ``label_stem`` (the
+        # path-flattened identifier) so that two audio files with the same
+        # basename in different folders never collide. ``save_project_sample_streams``
+        # uses the audio filename's stem as the canonical key, so feeding it
+        # ``<label_stem><suffix>`` is the simplest way to align the pair.
+        project_audio_filename = f"{label_stem}{audio_path.suffix.lower() or '.wav'}"
         completed_targets = []
         try:
             for target in training_targets:
+                # Same project, possibly older naming: drop any legacy basename
+                # copy first so we don't end up with two pairs (old and new)
+                # in audio/ and rttm/.
+                self.remove_label_sample_from_project(
+                    project_name=target["project_name"],
+                    backend=target["backend"],
+                    audio_name=audio_name,
+                )
                 with audio_path.open("rb") as audio_stream:
                     sample = save_project_sample_streams(
                         project_name=target["project_name"],
                         backend=target["backend"],
-                        audio_name=audio_name,
+                        audio_name=project_audio_filename,
                         audio_stream=audio_stream,
                         rttm_name=f"{label_stem}.rttm",
                         rttm_stream=io.BytesIO(rttm_text.encode("utf-8")),
@@ -977,5 +1150,101 @@ class TrainingLabelsMixin:
                 "The completed label is now part of the fine-tuning samples used by Prepare Artifacts.",
                 *auto_train_messages,
             ),
+            status="success",
+        )
+
+    def handle_training_label_uncomplete(self, environ):
+        """Roll a completed label back to draft and remove its training sample copies.
+
+        The user wanted a way to take a label OUT of the fine-tuning sample
+        pool — common after spotting a labeling mistake post-completion. We
+        delete the audio/rttm/transcript copies from every project this label
+        was added to (covers both the new path-flattened stem and the legacy
+        basename stem), drop the staged copy in ``label_work/``, and rewind
+        the record's status to ``draft`` so the user can keep editing the
+        segments without retyping anything.
+        """
+
+        form = self.parse_form(environ)
+        return_location = self.training_label_return_location(form)
+        requested_audio = self.clean_audio_selection_value((form.getfirst("audio_file") or "").strip())
+        if not requested_audio:
+            return self.redirect(
+                environ,
+                return_location,
+                message="Which completed label should be removed from training?",
+                status="error",
+            )
+        records = self.load_training_label_records()
+        record = records.get(requested_audio) or records.get(Path(requested_audio).name) or {}
+        if not record:
+            return self.redirect(
+                environ,
+                return_location,
+                message=f"No saved label exists for '{requested_audio}'.",
+                status="error",
+            )
+        audio_name = str(record.get("audio_file") or requested_audio)
+        previous_target_keys = [
+            str(item)
+            for item in (record.get("training_projects") or [])
+            if str(item).strip()
+        ]
+
+        cleared_projects: list[str] = []
+        for key in previous_target_keys:
+            if "/" not in key:
+                continue
+            backend, project_name = key.split("/", 1)
+            removed = self.remove_label_sample_from_project(
+                project_name=project_name,
+                backend=backend,
+                audio_name=audio_name,
+            )
+            if any(removed.values()):
+                cleared_projects.append(key)
+
+        # Drop the label_work staging copy too — it gets rewritten on the next
+        # completion, so leaving it behind would just be confusing dead state.
+        label_stem = self.diarization_output_base(audio_name)
+        review_rttm_path = self.training_label_work_dir / f"{label_stem}.rttm"
+        if review_rttm_path.is_file():
+            try:
+                review_rttm_path.unlink()
+            except OSError:
+                pass
+
+        # Preserve segments / transcript / questions so the user can keep
+        # editing — only flip the status and clear the completion bookkeeping.
+        rewound = dict(record)
+        rewound["status"] = "draft"
+        rewound["training_projects"] = []
+        rewound["training_project"] = ""
+        rewound["queued_training_projects"] = []
+        rewound["training_usage"] = []
+        rewound["training_audio_path"] = ""
+        rewound["training_rttm_path"] = ""
+        rewound["training_transcript_path"] = ""
+        rewound["explicit_training_targets"] = False
+        rewound.pop("completed_at_utc", None)
+        rewound["uncompleted_at_utc"] = utc_now_iso()
+        rewound.setdefault("system_questions", [])
+        self.upsert_training_label_record(audio_name, rewound)
+
+        if cleared_projects:
+            message = self.notification_message(
+                f"Removed '{audio_name}' from training.",
+                f"Cleared sample files in: {', '.join(cleared_projects)}.",
+                "Edit and click Complete For Training again to add it back.",
+            )
+        else:
+            message = self.notification_message(
+                f"Reverted '{audio_name}' to draft.",
+                "No project sample files needed clearing.",
+            )
+        return self.redirect(
+            environ,
+            return_location,
+            message=message,
             status="success",
         )

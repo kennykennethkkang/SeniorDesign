@@ -627,8 +627,11 @@ class WorkflowWebTests(unittest.TestCase):
                 "0.000 0.500 Speaker_0\n0.600 0.900 Speaker_1",
             )
             project_dir = root / "fine_tuning" / "projects" / "pyannote" / "review-lab"
-            self.assertTrue((project_dir / "audio" / "001_clip.wav").is_file())
-            self.assertTrue((project_dir / "rttm" / "001_clip.rttm").is_file())
+            # Audio and RTTM are written under the same path-flattened stem so
+            # two files named ``001_clip.wav`` in different subfolders can both
+            # land in the same project without overwriting each other.
+            self.assertTrue((project_dir / "audio" / "field_uploads__001_clip.wav").is_file())
+            self.assertTrue((project_dir / "rttm" / "field_uploads__001_clip.rttm").is_file())
 
             status, _, body = run_wsgi(
                 workflow_web.WorkflowWebApp(root=root),
@@ -2306,6 +2309,218 @@ class WorkflowWebTests(unittest.TestCase):
                 [(item["project_key"], item["auto_train_status"]) for item in record["training_usage"]],
                 [("pyannote/existing-lab", "queued"), ("nemo/new-default-lab", "queued")],
             )
+
+    def test_uncomplete_training_label_removes_project_sample_and_rewinds_status(self):
+        # End-to-end: complete a label so a sample lands in the project, then
+        # POST to /training-labels/uncomplete and verify the audio + rttm are
+        # removed and the record is rolled back to draft.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            complete_body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_backend", "pyannote"),
+                    ("label_project_name", "speaker-lab"),
+                    ("label_segments", "0.00 0.50 SPEAKER_00"),
+                    ("label_action", "complete"),
+                ]
+            ).encode("utf-8")
+            run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=complete_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "speaker-lab"
+            self.assertTrue((project_dir / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((project_dir / "rttm" / "001_clip.rttm").is_file())
+
+            uncomplete_body = urlencode([("audio_file", "001_clip.wav")]).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/uncomplete",
+                body=uncomplete_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            # Project copies are gone, draft state restored, segments preserved.
+            self.assertFalse((project_dir / "audio" / "001_clip.wav").exists())
+            self.assertFalse((project_dir / "rttm" / "001_clip.rttm").exists())
+            label_status = json.loads((root / "fine_tuning" / "label_status.json").read_text(encoding="utf-8"))
+            record = label_status["items"]["001_clip.wav"]
+            self.assertEqual(record["status"], "draft")
+            self.assertEqual(record["training_projects"], [])
+            self.assertEqual(record.get("training_audio_path", ""), "")
+            self.assertEqual(record["label_segments"], "0.000 0.500 SPEAKER_00")
+
+    def test_recomplete_training_label_removes_stale_project_copy(self):
+        # Switching the chosen project on a re-completion must clear the
+        # previous project's audio/rttm so the old copy doesn't keep feeding
+        # the abandoned project's training set.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+
+            first_body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_training_targets", "pyannote/old-lab"),
+                    ("label_segments", "0.00 0.50 SPEAKER_00"),
+                    ("label_auto_train_skip", "1"),
+                    ("label_action", "complete"),
+                ]
+            ).encode("utf-8")
+            run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=first_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            old_project = root / "fine_tuning" / "projects" / "pyannote" / "old-lab"
+            self.assertTrue((old_project / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((old_project / "rttm" / "001_clip.rttm").is_file())
+
+            second_body = urlencode(
+                [
+                    ("audio_file", "001_clip.wav"),
+                    ("label_training_targets", "pyannote/new-lab"),
+                    ("label_segments", "0.00 0.50 SPEAKER_00"),
+                    ("label_auto_train_skip", "1"),
+                    ("label_action", "complete"),
+                ]
+            ).encode("utf-8")
+            run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/training-labels/save",
+                body=second_body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            new_project = root / "fine_tuning" / "projects" / "pyannote" / "new-lab"
+            self.assertTrue((new_project / "audio" / "001_clip.wav").is_file())
+            self.assertTrue((new_project / "rttm" / "001_clip.rttm").is_file())
+            # Stale copy in the old project must be cleared.
+            self.assertFalse((old_project / "audio" / "001_clip.wav").exists())
+            self.assertFalse((old_project / "rttm" / "001_clip.rttm").exists())
+
+    def test_completed_training_label_pairs_audio_and_rttm_for_nested_audio(self):
+        # When the audio lives in a subfolder, the project copy uses the
+        # path-flattened stem for both audio and RTTM so the pair stays
+        # unambiguous and two ``001_clip.wav`` files in different folders
+        # can both land in the same project.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            (audio_dir / "alpha").mkdir(parents=True)
+            (audio_dir / "beta").mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_dir / "alpha" / "001_clip.wav").write_bytes(wav_bytes())
+            (audio_dir / "beta" / "001_clip.wav").write_bytes(wav_bytes())
+
+            for folder in ("alpha", "beta"):
+                body = urlencode(
+                    [
+                        ("audio_file", f"{folder}/001_clip.wav"),
+                        ("label_training_targets", "pyannote/shared-lab"),
+                        ("label_auto_train_skip", "1"),
+                        ("label_segments", "0.00 0.50 SPEAKER_00"),
+                        ("label_action", "complete"),
+                    ]
+                ).encode("utf-8")
+                run_wsgi(
+                    workflow_web.WorkflowWebApp(root=root),
+                    method="POST",
+                    path="/training-labels/save",
+                    body=body,
+                    content_type="application/x-www-form-urlencoded",
+                )
+
+            project = root / "fine_tuning" / "projects" / "pyannote" / "shared-lab"
+            for stem in ("alpha__001_clip", "beta__001_clip"):
+                self.assertTrue((project / "audio" / f"{stem}.wav").is_file())
+                self.assertTrue((project / "rttm" / f"{stem}.rttm").is_file())
+
+    def test_create_empty_fine_tuning_project_endpoint(self):
+        # The Fine-Tuning tab's "Create Empty Project" form lets the user
+        # register a project name without uploading anything yet. The endpoint
+        # creates the directory shell and writes the optional display name.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in"
+            audio_dir.mkdir()
+            (root / "job_outputs").mkdir()
+
+            body = urlencode(
+                [
+                    ("fine_tuning_backend", "pyannote"),
+                    ("project_name", "Empty Test Lab"),
+                    ("display_name", "Empty Test Lab"),
+                ]
+            ).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/fine-tuning/create-project",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            project_dir = root / "fine_tuning" / "projects" / "pyannote" / "empty-test-lab"
+            self.assertTrue((project_dir / "audio").is_dir())
+            self.assertTrue((project_dir / "rttm").is_dir())
+            self.assertTrue((project_dir / "text").is_dir())
+            # No samples should be present yet.
+            self.assertEqual(list((project_dir / "audio").iterdir()), [])
+            self.assertEqual(list((project_dir / "rttm").iterdir()), [])
+            display_path = project_dir / "display.json"
+            self.assertTrue(display_path.is_file())
+            display = json.loads(display_path.read_text(encoding="utf-8"))
+            self.assertEqual(display.get("display_name"), "Empty Test Lab")
+            self.assertTrue(display.get("manually_created"))
+
+            # Empty manually-created projects must still appear in the
+            # Fine-Tuning tab so the user can see what they registered. The
+            # popup pulls from the same context.projects list.
+            status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path="/fine-tuning")
+            self.assertEqual(status, "200 OK")
+            projects = page_state(body)["context"]["projects"]
+            slugs = sorted((p["backend"], p["slug"]) for p in projects)
+            self.assertIn(("pyannote", "empty-test-lab"), slugs)
+
+    def test_create_empty_fine_tuning_project_rejects_blank_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            (root / "audio_in").mkdir()
+            (root / "job_outputs").mkdir()
+
+            body = urlencode([("fine_tuning_backend", "pyannote"), ("project_name", "   ")]).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/fine-tuning/create-project",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=error", headers["Location"])
+            # Nothing was created.
+            self.assertFalse((root / "fine_tuning" / "projects").exists())
 
     def test_completed_training_label_queues_named_training_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
