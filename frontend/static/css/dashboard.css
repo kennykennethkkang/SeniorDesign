@@ -1066,6 +1066,27 @@ code {
   cursor: not-allowed;
 }
 
+.der-file-toolbar {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.der-file-toolbar .compact-checkbox {
+  margin: 0;
+  font-size: 13px;
+}
+
+.der-no-runs-hint {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--der-warn-bg);
+  background: rgba(182, 105, 18, 0.08);
+  border-radius: 4px;
+}
+
 .der-file-filter {
   margin: 8px 0 6px;
 }

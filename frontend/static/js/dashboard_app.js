@@ -5174,6 +5174,8 @@
     });
     const [selectedAudio, setSelectedAudio] = React.useState(() => new Set());
     const [fileFilter, setFileFilter] = React.useState("");
+    const [folderFilter, setFolderFilter] = React.useState("all");
+    const [hideUnavailable, setHideUnavailable] = React.useState(false);
     const [status, setStatus] = React.useState({ state: "idle", error: "", payload: null });
 
     const usingLabelsReference = referenceSource === "labels";
@@ -5240,7 +5242,28 @@
       return filterTokens.every((token) => haystack.includes(token));
     };
 
-    const visibleEntries = candidateEntries.filter(matchesFilter);
+    // Folder choices come from the same fileViewFolderLabel helper the SSH
+    // pickers use, so the user sees the same folder names (JIBOKids,
+    // JIBOKids/blocks, etc.) here too.
+    const folderChoices = React.useMemo(
+      () => fileViewFolderChoices(candidateEntries, fileViewFolderLabel),
+      [candidateEntries.map((entry) => entry.name).join("|")]
+    );
+    React.useEffect(() => {
+      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
+        setFolderFilter("all");
+      }
+    }, [folderFilter, folderChoices]);
+
+    const matchesFolder = (entry) =>
+      folderFilter === "all" || fileViewFolderLabel(entry) === folderFilter;
+    const matchesAvailability = (entry) =>
+      !hideUnavailable || entry.modelHits > 0;
+
+    const visibleEntries = candidateEntries
+      .filter(matchesFilter)
+      .filter(matchesFolder)
+      .filter(matchesAvailability);
     const availableCount = candidateEntries.filter((entry) => entry.modelHits > 0).length;
 
     React.useEffect(() => {
@@ -5677,7 +5700,7 @@
                     h(
                       "p",
                       { className: "row-note" },
-                      `${selectedAudio.size} of ${availableCount} available file${availableCount === 1 ? "" : "s"} selected · ${candidateEntries.length} file${candidateEntries.length === 1 ? "" : "s"} in scope.`
+                      `${selectedAudio.size} of ${availableCount} scorable file${availableCount === 1 ? "" : "s"} selected · ${candidateEntries.length} file${candidateEntries.length === 1 ? "" : "s"} in scope · ${candidateEntries.length - availableCount} not yet in any selected run.`
                     )
                   ),
                   h(
@@ -5685,6 +5708,40 @@
                     { className: "button-row" },
                     h("button", { className: "secondary", type: "button", onClick: selectAvailableAudio }, "Select All Available"),
                     h("button", { className: "ghost", type: "button", onClick: clearAudioSelection }, "Clear")
+                  )
+                ),
+                // Hint banner: when none of the files in scope are present in
+                // any chosen run, scoring is blocked; point the user at the
+                // diarization tab so they can run inference first.
+                availableCount === 0 && candidateEntries.length > 0 && selectedModelPaths.size > 0
+                  ? h(
+                      "p",
+                      { className: "field-status der-no-runs-hint" },
+                      "None of these files appear in the selected run(s) yet. ",
+                      h("a", { href: "/diarization" }, "Run diarization on them"),
+                      " first, then come back and pick that run as a model."
+                    )
+                  : null,
+                h(
+                  "div",
+                  { className: "selection-toolbar compact-toolbar der-file-toolbar" },
+                  folderChoices.length
+                    ? h(FolderFilterControl, {
+                        id: "der_calc_folder_filter",
+                        value: folderFilter,
+                        onChange: setFolderFilter,
+                        folders: folderChoices,
+                      })
+                    : null,
+                  h(
+                    "label",
+                    { className: "checkbox-row compact-checkbox" },
+                    h("input", {
+                      type: "checkbox",
+                      checked: hideUnavailable,
+                      onChange: (event) => setHideUnavailable(event.target.checked),
+                    }),
+                    " Hide files not in any selected run"
                   )
                 ),
                 h(
@@ -5705,9 +5762,11 @@
                     ? h(
                         "li",
                         { className: "der-file-empty" },
-                        usingLabelsReference
-                          ? "No completed-label files match that filter."
-                          : "No files match — pick a reference run with files and at least one comparison model."
+                        hideUnavailable && availableCount === 0
+                          ? "No files are scorable yet — uncheck the filter or run diarization on this folder first."
+                          : usingLabelsReference
+                            ? "No completed-label files match the current filters."
+                            : "No files match — pick a reference run with files and at least one comparison model."
                       )
                     : visibleEntries.map((entry) => {
                         const inReference = usingLabelsReference || (referenceRunFiles ? referenceRunFiles.has(entry.name) : false);
