@@ -1003,8 +1003,14 @@ class FineTuningMixin:
             "training_source_files",
             ttl_seconds=3.0,
             builder=lambda: {
+                # audio_in is included so RTTMs that ship next to a WAV
+                # (e.g. the JIBO Kids corpus, future pre-labeled sets) get
+                # surfaced in the SSH RTTM picker without forcing the user
+                # to copy them into a project first. Limit was bumped from
+                # 250 → 800 to leave room for label-pre-completed corpora.
                 "rttm_files": self.newest_files(
                     search_roots=[
+                        self.audio_dir,
                         self.stitched_dir,
                         self.training_label_work_dir,
                         self.root / "fine_tuning" / "projects",
@@ -1012,18 +1018,19 @@ class FineTuningMixin:
                         self.root / "job_outputs",
                     ],
                     suffixes=TRAINING_RTTM_SUFFIXES,
-                    limit=250,
+                    limit=800,
                     exclude_dir_names=TRAINING_SOURCE_SCAN_EXCLUDE_DIRS,
                 ),
                 "transcript_files": self.newest_files(
                     search_roots=[
+                        self.audio_dir,
                         self.stitched_dir,
                         self.root / "fine_tuning" / "projects",
                         self.outputs_root,
                         self.root / "job_outputs",
                     ],
                     suffixes=TRAINING_TRANSCRIPT_SUFFIXES,
-                    limit=250,
+                    limit=800,
                     exclude_dir_names=TRAINING_SOURCE_SCAN_EXCLUDE_DIRS,
                 ),
             },

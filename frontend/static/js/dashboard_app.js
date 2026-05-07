@@ -432,6 +432,13 @@
       return "Unsorted Root";
     }
     if (parts[0] === "audio_in") {
+      // For nested sets like ``audio_in/JIBOKids/letters_digits/<file>``
+      // group by ``<set>/<sub>`` so the picker can drill into individual
+      // tasks. Flat sets (audio_in/<set>/<file>) keep their existing
+      // ``<set>`` grouping.
+      if (parts.length >= 5) {
+        return `${parts[1]}/${parts[2]}`;
+      }
       return parts.length > 2 ? parts[1] : "Unsorted Root";
     }
     // Group RTTM/audio/text files inside fine_tuning/projects/<backend>/<slug>/...

@@ -31,7 +31,17 @@ job_logs/
 job_outputs/
 sbatch_runtime/
 fine_tuning/projects/
+fine_tuning/label_work/
+stitched/
 youtube_links_err/*.tsv
+
+# Bulk archives (corpus dumps, slurm bundles) — never push these to GitHub;
+# they're either reproducible from the public source or too big for git.
+combined.zip
+*.zip
+*.tar
+*.tar.gz
+*.tgz
 
 # Full diarization runs are huge; the index TSV stays tracked so reruns can dedupe.
 outputs/diarization_runs/
