@@ -219,6 +219,18 @@
     });
   }
 
+  function confirmDeleteFineTunedModel(run) {
+    if (!run || !run.runDir) return;
+    const current = run.displayName || run.versionName || run.runName || "this fine-tuned model";
+    const confirmed = window.confirm(
+      `Delete the fine-tuned model artifacts for "${current}"?\n\nThis removes the checkpoint/model files from the model picker. The run record and Slurm logs are kept.`
+    );
+    if (!confirmed) return;
+    submitHiddenForm(routes.fineTuneDeleteRunModel, {
+      run_dir: run.runDir,
+    });
+  }
+
   function promptRenameStitch(row) {
     if (!row || !row.runDir) return;
     const current = row.displayName || row.outputName || row.name || "stitched output";
@@ -389,13 +401,14 @@
     );
   }
 
-  function TextInput({ id, name, defaultValue, placeholder, type = "text" }) {
+  function TextInput({ id, name, defaultValue, placeholder, type = "text", extra }) {
     return h("input", {
       id,
       name: name || id,
       type,
       defaultValue: defaultValue === undefined ? "" : defaultValue,
       placeholder,
+      ...(extra || {}),
     });
   }
 
@@ -4020,6 +4033,12 @@
         { className: "label-training-target" },
         h(
           "div",
+          { className: "label-training-target-head" },
+          h("div", null, h("h3", null, "Fine-tune target"), h("p", null, targetDisplayLabel)),
+          h("span", { className: "target-backend-pill" }, backendDisplayName(targetBackend))
+        ),
+        h(
+          "div",
           { className: "inline" },
           h(
             Field,
@@ -4590,9 +4609,14 @@
       ? sortedRows
       : sortedRows.filter((row) => fileViewFolderLabel(row) === folderFilter);
     const renderedRows = filteredRows.slice(0, Math.min(rowLimit, filteredRows.length));
+    const pickerClass = classNames(
+      "workspace-file-picker",
+      group === "fine-tune-audio" && "workspace-file-picker-audio",
+      group === "fine-tune-rttm" && "workspace-file-picker-rttm"
+    );
     return h(
       "div",
-      { className: "workspace-file-picker" },
+      { className: pickerClass },
       rows.length
         ? h(
             React.Fragment,
@@ -4614,7 +4638,12 @@
                 "label",
                 { key: file.path, className: "checkbox-row file-choice", title: file.path || "" },
                 h("input", { type: "checkbox", name, value: file.path, "data-check-group": group }),
-                h("span", null, h("strong", null, file.name || file.path), h("small", null, fileViewFolderLabel(file)))
+                h(
+                  "span",
+                  { className: "file-choice-text" },
+                  h("strong", { className: "file-choice-name" }, file.name || file.path),
+                  h("small", { className: "file-choice-path" }, fileViewFolderLabel(file))
+                )
               )
             )
           )
@@ -4754,12 +4783,22 @@
           )
         ),
         projectNames.length ? h("datalist", { id: "fine_tuning_project_names" }, projectNames.map((name) => h("option", { key: name, value: name }))) : null,
-        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
-        h(Field, { id: "server_audio_paths", label: "SSH audio in audio_in/" }, h(WorkspaceFileChecklist, { group: "fine-tune-audio", name: "server_audio_paths", files: audioFiles, emptyText: "No audio files are present in audio_in/ yet." })),
-        h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected."),
-        h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "none" }, "Clear")),
-        h(Field, { id: "server_rttm_paths", label: "SSH RTTM label files" }, h(WorkspaceFileChecklist, { group: "fine-tune-rttm", name: "server_rttm_paths", files: rttmFiles, emptyText: h(React.Fragment, null, "No RTTM files found yet. Use ", h("a", { href: labelHref }, "Training Labels"), " to create labels from any audio_in/ file.") })),
-        h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-rttm" }, "0"), " RTTM file(s) selected."),
+        h(
+          "section",
+          { className: "fine-tune-file-section fine-tune-file-section-audio" },
+          h("div", { className: "fine-tune-file-section-head" }, h("h3", null, "SSH audio in audio_in/"), h("p", null, `${audioFiles.length} file(s) found`)),
+          h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
+          h(Field, { id: "server_audio_paths", label: "Audio files" }, h(WorkspaceFileChecklist, { group: "fine-tune-audio", name: "server_audio_paths", files: audioFiles, emptyText: "No audio files are present in audio_in/ yet." })),
+          h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected.")
+        ),
+        h(
+          "section",
+          { className: "fine-tune-file-section fine-tune-file-section-rttm" },
+          h("div", { className: "fine-tune-file-section-head" }, h("h3", null, "SSH RTTM label files"), h("p", null, `${rttmFiles.length} file(s) found`)),
+          h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-rttm", "data-select-mode": "none" }, "Clear")),
+          h(Field, { id: "server_rttm_paths", label: "RTTM label files" }, h(WorkspaceFileChecklist, { group: "fine-tune-rttm", name: "server_rttm_paths", files: rttmFiles, emptyText: h(React.Fragment, null, "No RTTM files found yet. Use ", h("a", { href: labelHref }, "Training Labels"), " to create labels from any audio_in/ file.") })),
+          h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-rttm" }, "0"), " RTTM file(s) selected.")
+        ),
         h("details", { className: "details-box compact-details" }, h("summary", null, "Optional Transcripts"), h("div", null, h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-transcript", "data-select-mode": "none" }, "Clear")), h(Field, { id: "server_transcript_paths", label: "SSH transcript files" }, h(WorkspaceFileChecklist, { group: "fine-tune-transcript", name: "server_transcript_paths", files: transcriptFiles, emptyText: "No optional transcript files found." })), h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-transcript" }, "0"), " transcript file(s) selected."))),
         h(Field, { id: "training_transcript_text", label: "Optional shared transcript text" }, h("textarea", { id: "training_transcript_text", name: "training_transcript_text", placeholder: "Transcript text or annotation notes" })),
         h("p", { className: "footer-note" }, "Batch pairing uses filename stems: ", h("code", null, "001_clip.wav"), " pairs with ", h("code", null, "001_clip.rttm"), " and optional ", h("code", null, "001_clip.txt"), "."),
@@ -4771,6 +4810,10 @@
   function FineTunePrepareCard({ preferences, sampleProjects }) {
     const nemo = preferences.nemo_fine_tuning || {};
     const pyannote = preferences.pyannote_fine_tuning || {};
+    const preferredBackend = text(sampleProjects[0]?.backend || preferences.fine_tuning_backend || "pyannote").toLowerCase() === "nemo" ? "nemo" : "pyannote";
+    const nemoBaseModel = nemo.speaker_model || defaults.speakerModel || "";
+    const pyannoteBaseModel = pyannote.pretrained_model || defaults.pyannotePretrainedModel || "";
+    const baseModelDefault = preferredBackend === "nemo" ? nemoBaseModel : pyannoteBaseModel;
     const disabled = sampleProjects.length === 0;
     return h(
       "section",
@@ -4780,7 +4823,7 @@
         "form",
         { method: "post", action: routes.fineTunePrepare, "data-loading-message": "Preparing fine-tuning artifacts..." },
         h(Field, { id: "prepare_project_choice", label: "Project with uploaded samples" }, h("select", { id: "prepare_project_choice", "data-project-name-target": "prepare_project_name", "data-project-backend-target": "prepare_backend" }, h(FineTuneProjectOptions, { projects: sampleProjects }))),
-        h(Field, { id: "prepare_backend", label: "Backend" }, h(SelectInput, { id: "prepare_backend", defaultValue: preferences.fine_tuning_backend || "pyannote" }, h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "pyannote" }, "pyannote"))),
+        h(Field, { id: "prepare_backend", label: "Backend" }, h(SelectInput, { id: "prepare_backend", defaultValue: preferredBackend, extra: { "data-base-model-backend": "true" } }, h(Option, { value: "nemo" }, "NeMo"), h(Option, { value: "pyannote" }, "pyannote"))),
         h(Field, { id: "prepare_project_name", label: "Project name" }, h(TextInput, { id: "prepare_project_name", placeholder: "callhome-msdd" })),
         h(
           "details",
@@ -4790,8 +4833,7 @@
             h("div", { className: "inline" }, h(Field, { id: "train_ratio", label: "Train ratio" }, h(TextInput, { id: "train_ratio", defaultValue: nemo.train_ratio || defaults.trainRatio })), h(Field, { id: "devices", label: "Devices" }, h(TextInput, { id: "devices", defaultValue: nemo.devices || "" }))),
             h("div", { className: "inline-3" }, h(Field, { id: "base_window", label: "NeMo base window" }, h(TextInput, { id: "base_window", defaultValue: nemo.base_window || defaults.baseWindow })), h(Field, { id: "base_shift", label: "NeMo base shift" }, h(TextInput, { id: "base_shift", defaultValue: nemo.base_shift || defaults.baseShift })), h(Field, { id: "step_count", label: "NeMo step count" }, h(TextInput, { id: "step_count", defaultValue: nemo.step_count || defaults.stepCount }))),
             h(Field, { id: "config_name", label: "NeMo config name" }, h(TextInput, { id: "config_name", defaultValue: nemo.config_name || defaults.configName })),
-            h(Field, { id: "speaker_model", label: "NeMo speaker model" }, h(TextInput, { id: "speaker_model", defaultValue: nemo.speaker_model || defaults.speakerModel })),
-            h(Field, { id: "pyannote_pretrained_model", label: "pyannote pretrained model" }, h(TextInput, { id: "pyannote_pretrained_model", defaultValue: pyannote.pretrained_model || "" })),
+            h(Field, { id: "base_model", label: "Base model" }, h(TextInput, { id: "base_model", name: "base_model", defaultValue: baseModelDefault, extra: { "data-base-model-input": "true", "data-nemo-default": nemoBaseModel, "data-pyannote-default": pyannoteBaseModel, "data-active-backend": preferredBackend, title: "NeMo speaker model or pyannote pretrained model for the selected backend" } })),
             h("div", { className: "inline-3" }, h(Field, { id: "pyannote_duration", label: "pyannote chunk duration" }, h(TextInput, { id: "pyannote_duration", defaultValue: pyannote.duration || "" })), h(Field, { id: "pyannote_max_speakers_per_chunk", label: "Max speakers per chunk" }, h(TextInput, { id: "pyannote_max_speakers_per_chunk", defaultValue: pyannote.max_speakers_per_chunk || "" })), h(Field, { id: "pyannote_max_speakers_per_frame", label: "Max speakers per frame" }, h(TextInput, { id: "pyannote_max_speakers_per_frame", defaultValue: pyannote.max_speakers_per_frame || "" }))),
             h("div", { className: "inline" }, h(Field, { id: "max_epochs", label: "Max epochs" }, h(TextInput, { id: "max_epochs", defaultValue: nemo.max_epochs || defaults.maxEpochs })), h(Field, { id: "nemo_root", label: "Optional NeMo root" }, h(TextInput, { id: "nemo_root", placeholder: "path/to/NeMo" }))),
             h("div", { className: "inline-3" }, h(Field, { id: "slurm_partition", label: "Slurm partition" }, h(TextInput, { id: "slurm_partition", defaultValue: nemo.slurm_partition || defaults.slurmPartition })), h(Field, { id: "slurm_time", label: "Slurm time" }, h(TextInput, { id: "slurm_time", defaultValue: nemo.slurm_time || defaults.slurmTime })), h(Field, { id: "slurm_memory", label: "Slurm memory" }, h(TextInput, { id: "slurm_memory", defaultValue: nemo.slurm_memory || defaults.slurmMemory }))),
@@ -4953,39 +4995,59 @@
               h("p", { key: label }, h("span", null, label), h("strong", null, value))
             )
           ),
-          project.recentRuns?.length
-            ? h(
-                "ul",
-                { className: "compact-list" },
-                project.recentRuns.map((run) =>
-                  h(
-                    "li",
-                    { key: run.runName },
-                    h("strong", null, run.displayName || run.versionName),
-                    `: ${run.status}`,
-                    run.displayName && run.versionName && run.displayName !== run.versionName
-                      ? h("span", { className: "row-note" }, ` (v: ${run.versionName})`)
-                      : null,
-                    run.baseModel
-                      ? h("span", { className: "row-note" }, ` · base: ${run.baseModel}`)
-                      : null,
-                    run.runDir
-                      ? h(
+        project.recentRuns?.length
+          ? h(
+              "ul",
+              { className: "compact-list" },
+              project.recentRuns.map((run) => {
+                const activeRun = ["running", "submitted"].includes(text(run.status).toLowerCase());
+                return h(
+                  "li",
+                  { key: run.runName },
+                  h("strong", null, run.displayName || run.versionName),
+                  `: ${run.status}`,
+                  run.displayName && run.versionName && run.displayName !== run.versionName
+                    ? h("span", { className: "row-note" }, ` (v: ${run.versionName})`)
+                    : null,
+                  run.baseModel
+                    ? h("span", { className: "row-note" }, ` · base: ${run.baseModel}`)
+                    : null,
+                  run.modelDeleted
+                    ? h("span", { className: "row-note" }, " · model files deleted")
+                    : null,
+                  run.runDir
+                    ? h(
+                        "span",
+                        { className: "run-inline-actions" },
+                        h(
                           "button",
                           {
                             className: "ghost",
                             type: "button",
-                            style: { marginLeft: "8px" },
                             onClick: () => promptRenameRun(run),
                             title: "Give this training run a friendlier name. Useful when you've got several versions and need to remember which one was the best.",
                           },
                           "Rename"
-                        )
-                      : null
-                  )
-                )
-              )
-            : h("p", { className: "row-note" }, "No training runs yet."),
+                        ),
+                        run.modelAvailable
+                          ? h(
+                              "button",
+                              {
+                                className: "ghost danger",
+                                type: "button",
+                                disabled: activeRun,
+                                onClick: () => confirmDeleteFineTunedModel(run),
+                                title: activeRun ? "Wait for this run to finish before deleting model artifacts." : "Delete checkpoint/model files for this fine-tuned version while keeping logs.",
+                              },
+                              "Delete Model"
+                            )
+                          : null
+                      )
+                    : null
+                );
+              })
+            )
+          : h("p", { className: "row-note" }, "No training runs yet."),
           project.warnings?.length ? h("ul", null, project.warnings.map((warning, index) => h("li", { key: index }, warning))) : h("p", { className: "row-note" }, "No preparation warnings.")
         )
       ),
@@ -6235,7 +6297,33 @@
     const backend = selected.getAttribute("data-project-backend");
     if (backendTarget && backend) {
       backendTarget.value = backend;
+      syncFineTuneBaseModelInput(backendTarget);
     }
+  }
+
+  function syncFineTuneBaseModelInput(backendTarget, { force = false } = {}) {
+    if (!(backendTarget instanceof HTMLSelectElement)) {
+      return;
+    }
+    const form = backendTarget.closest("form") || document;
+    const baseModelInput = form.querySelector("input[data-base-model-input]");
+    if (!(baseModelInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const backend = text(backendTarget.value).toLowerCase() === "nemo" ? "nemo" : "pyannote";
+    const previousBackend = text(baseModelInput.getAttribute("data-active-backend")).toLowerCase();
+    const nextDefault = backend === "nemo"
+      ? baseModelInput.getAttribute("data-nemo-default") || ""
+      : baseModelInput.getAttribute("data-pyannote-default") || "";
+    const previousDefault = previousBackend === "nemo"
+      ? baseModelInput.getAttribute("data-nemo-default") || ""
+      : baseModelInput.getAttribute("data-pyannote-default") || "";
+    const userEdited = baseModelInput.getAttribute("data-user-edited") === "true";
+    if (force || !userEdited || !baseModelInput.value || baseModelInput.value === previousDefault) {
+      baseModelInput.value = nextDefault;
+      baseModelInput.setAttribute("data-user-edited", "false");
+    }
+    baseModelInput.setAttribute("data-active-backend", backend);
   }
 
   function showLoadingVisual(message) {
@@ -6690,12 +6778,18 @@
           if (checkboxGroup) {
             updateSelectionCounter(checkboxGroup, target.form || document);
           }
+          if (target.hasAttribute("data-base-model-input")) {
+            target.setAttribute("data-user-edited", "true");
+          }
           if (target.type === "file") {
             updateFileSummary(target);
           }
         }
         if (target instanceof HTMLSelectElement && target.hasAttribute("data-project-name-target")) {
           syncProjectSelector(target);
+        }
+        if (target instanceof HTMLSelectElement && target.hasAttribute("data-base-model-backend")) {
+          syncFineTuneBaseModelInput(target);
         }
         if (target instanceof HTMLSelectElement && target.id === "uploads_model_filter") {
           uiState.uploadsModelFilter = target.value;
@@ -6841,6 +6935,7 @@
           }
           if (backendTarget && projectBackend) {
             backendTarget.value = projectBackend;
+            syncFineTuneBaseModelInput(backendTarget);
           }
           const focusTarget = document.getElementById(fillButton.getAttribute("data-fill-focus-target") || "");
           if (focusTarget) {

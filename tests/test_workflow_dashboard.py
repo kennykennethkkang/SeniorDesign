@@ -3452,6 +3452,7 @@ class WorkflowWebTests(unittest.TestCase):
                         ("prepare_project_name", "form-submit"),
                         ("prepare_backend", "nemo"),
                         ("train_ratio", "0.7"),
+                        ("base_model", "ecapa_tdnn"),
                         ("slurm_memory", "12G"),
                         ("slurm_cpus", "2"),
                         ("slurm_time", "00:30:00"),
@@ -3483,9 +3484,50 @@ class WorkflowWebTests(unittest.TestCase):
                     / "metadata.json"
                 ).read_text(encoding="utf-8")
             )
+            self.assertEqual(metadata["speaker_model"], "ecapa_tdnn")
             self.assertEqual(metadata["slurm_memory"], "12G")
             self.assertEqual(metadata["slurm_cpus"], 2)
             self.assertEqual(metadata["slurm_time"], "00:30:00")
+
+    def test_fine_tuning_delete_run_model_removes_artifacts_but_keeps_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            (root / "audio_in").mkdir()
+            (root / "job_outputs").mkdir()
+            project_dir = root / "fine_tuning" / "projects" / "nemo" / "delete-model"
+            run_dir = project_dir / "runs" / "20260507T000000Z_delete-model"
+            experiment_dir = project_dir / "artifacts" / "experiments" / "delete-model-v1"
+            slurm_log = project_dir / "artifacts" / "slurm_logs" / "msdd_finetune_999.err"
+            run_dir.mkdir(parents=True)
+            experiment_dir.mkdir(parents=True)
+            slurm_log.parent.mkdir(parents=True)
+            (experiment_dir / "model.ckpt").write_text("checkpoint", encoding="utf-8")
+            slurm_log.write_text("historical stderr\n", encoding="utf-8")
+            (run_dir / "metadata.json").write_text(
+                json.dumps({"version_name": "delete-model-v1", "experiment_dir": str(experiment_dir)}),
+                encoding="utf-8",
+            )
+            (run_dir / "stdout.log").write_text("run stdout\n", encoding="utf-8")
+            (run_dir / "stderr.log").write_text("run stderr\n", encoding="utf-8")
+            (run_dir / "exit_code.txt").write_text("0", encoding="utf-8")
+
+            body = urlencode([("run_dir", str(run_dir.relative_to(root)))]).encode("utf-8")
+            status, headers, _ = run_wsgi(
+                workflow_web.WorkflowWebApp(root=root),
+                method="POST",
+                path="/fine-tuning/delete-run-model",
+                body=body,
+                content_type="application/x-www-form-urlencoded",
+            )
+
+            self.assertEqual(status, "303 See Other")
+            self.assertIn("status=success", headers["Location"])
+            self.assertFalse(experiment_dir.exists())
+            self.assertTrue(run_dir.exists())
+            self.assertTrue((run_dir / "stdout.log").exists())
+            self.assertTrue(slurm_log.exists())
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["model_deleted"])
 
     def test_fine_tuning_prepare_launch_uses_sampled_backend_when_form_backend_is_stale(self):
         with tempfile.TemporaryDirectory() as tmpdir:

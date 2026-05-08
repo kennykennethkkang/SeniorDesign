@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from workflow_background import utc_now_iso
@@ -37,10 +39,12 @@ def submit_sbatch_job(
     exit_code_path = run_dir / "exit_code.txt"
     metadata_path = run_dir / "metadata.json"
     command = ["sbatch", "--parsable", str(sbatch_script)]
+    command_text = shlex.join(command)
     run_metadata = {
         "runner": "slurm",
         "submission_status": "submitting",
         "command": command,
+        "command_text": command_text,
         "cwd": str(cwd),
         "sbatch_script": str(sbatch_script),
         "started_at_utc": utc_now_iso(),
@@ -51,6 +55,7 @@ def submit_sbatch_job(
     }
     metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True), encoding="utf-8")
 
+    print(f"Submitting Slurm job: {command_text}", flush=True)
     completed = subprocess.run(
         command,
         cwd=str(cwd),
@@ -59,8 +64,15 @@ def submit_sbatch_job(
         text=True,
         env={**os.environ, **export_env},
     )
+    if completed.stdout:
+        print(completed.stdout, end="", flush=True)
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr, flush=True)
     if completed.returncode != 0:
-        stdout_path.write_text(completed.stdout or "", encoding="utf-8")
+        stdout_path.write_text(
+            f"Submit command: {command_text}\n{completed.stdout or ''}",
+            encoding="utf-8",
+        )
         stderr_path.write_text(completed.stderr or "Slurm submission failed.\n", encoding="utf-8")
         exit_code_path.write_text(str(completed.returncode), encoding="utf-8")
         run_metadata.update(
@@ -78,6 +90,7 @@ def submit_sbatch_job(
     raw_job_id = output_lines[-1] if output_lines else ""
     job_id = raw_job_id.split(";", 1)[0]
     stdout_path.write_text(
+        f"Submit command: {command_text}\n"
         f"Submitted Slurm job {job_id} for {job_label}.\n"
         f"Slurm script: {sbatch_script}\n",
         encoding="utf-8",

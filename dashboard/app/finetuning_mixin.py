@@ -64,6 +64,7 @@ from fine_tuning_manager import (
     DEFAULT_SLURM_MEMORY,
     DEFAULT_SLURM_PARTITION,
     DEFAULT_SLURM_TIME,
+    delete_run_model_artifacts,
     ensure_project_structure,
     launch_training,
     build_sample,
@@ -168,6 +169,7 @@ class FineTuningMixin:
         "base_shift",
         "step_count",
         "config_name",
+        "base_model",
         "speaker_model",
         "devices",
         "max_epochs",
@@ -227,13 +229,19 @@ class FineTuningMixin:
         preferences = self.model_preferences()
         pyannote_defaults = preferences["pyannote_fine_tuning"]
         nemo_defaults = preferences["nemo_fine_tuning"]
+        base_model = (form.getfirst("base_model") or "").strip()
         return {
             "train_ratio": self.parse_float(form.getfirst("train_ratio"), float(nemo_defaults.get("train_ratio", DEFAULT_TRAIN_RATIO)), "train_ratio"),
             "base_window": self.parse_float(form.getfirst("base_window"), float(nemo_defaults.get("base_window", DEFAULT_BASE_WINDOW)), "base_window"),
             "base_shift": self.parse_float(form.getfirst("base_shift"), float(nemo_defaults.get("base_shift", DEFAULT_BASE_SHIFT)), "base_shift"),
             "step_count": self.parse_int(form.getfirst("step_count"), int(nemo_defaults.get("step_count", DEFAULT_STEP_COUNT)), "step_count"),
             "config_name": form.getfirst("config_name") or str(nemo_defaults.get("config_name", DEFAULT_CONFIG_NAME)),
-            "speaker_model": form.getfirst("speaker_model") or str(nemo_defaults.get("speaker_model", DEFAULT_SPEAKER_MODEL)),
+            "speaker_model": (
+                base_model
+                if backend == "nemo" and base_model
+                else form.getfirst("speaker_model")
+                or str(nemo_defaults.get("speaker_model", DEFAULT_SPEAKER_MODEL))
+            ),
             "devices": self.parse_int(
                 form.getfirst("devices"),
                 int(
@@ -258,7 +266,12 @@ class FineTuningMixin:
             "slurm_cpus": self.parse_int(form.getfirst("slurm_cpus"), DEFAULT_SLURM_CPUS, "slurm_cpus"),
             "slurm_gpus": self.parse_int(form.getfirst("slurm_gpus"), DEFAULT_SLURM_GPUS, "slurm_gpus"),
             "nemo_root": self.resolve_local_path(form.getfirst("nemo_root")) if (form.getfirst("nemo_root") or "").strip() else None,
-            "pyannote_pretrained_model": form.getfirst("pyannote_pretrained_model") or str(pyannote_defaults.get("pretrained_model", DEFAULT_PYANNOTE_PRETRAINED_MODEL)),
+            "pyannote_pretrained_model": (
+                base_model
+                if backend == "pyannote" and base_model
+                else form.getfirst("pyannote_pretrained_model")
+                or str(pyannote_defaults.get("pretrained_model", DEFAULT_PYANNOTE_PRETRAINED_MODEL))
+            ),
             "pyannote_duration": self.parse_float(form.getfirst("pyannote_duration"), float(pyannote_defaults.get("duration", DEFAULT_PYANNOTE_DURATION)), "pyannote_duration"),
             "pyannote_max_speakers_per_chunk": self.parse_int(form.getfirst("pyannote_max_speakers_per_chunk"), int(pyannote_defaults.get("max_speakers_per_chunk", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_CHUNK)), "pyannote_max_speakers_per_chunk"),
             "pyannote_max_speakers_per_frame": self.parse_int(form.getfirst("pyannote_max_speakers_per_frame"), int(pyannote_defaults.get("max_speakers_per_frame", DEFAULT_PYANNOTE_MAX_SPEAKERS_PER_FRAME)), "pyannote_max_speakers_per_frame"),
@@ -1247,12 +1260,39 @@ class FineTuningMixin:
             status="success",
         )
 
+    def handle_finetune_delete_run_model(self, environ):
+        """Remove one fine-tuned model's checkpoint artifacts while preserving run logs."""
+
+        form = self.parse_form(environ)
+        run_dir_value = (form.getfirst("run_dir") or "").strip()
+        if not run_dir_value:
+            return self.redirect(environ, "/fine-tuning", message="Pick a fine-tuned model to delete.", status="error")
+        run_dir = self.resolve_local_path(run_dir_value)
+        runs_root = (self.root / "fine_tuning" / "projects").resolve()
+        try:
+            resolved = run_dir.resolve()
+            resolved.relative_to(runs_root)
+        except (OSError, ValueError):
+            return self.redirect(environ, "/fine-tuning", message="Run path is outside the fine-tuning workspace.", status="error")
+        try:
+            result = delete_run_model_artifacts(resolved)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            return self.redirect(environ, "/fine-tuning", message=str(exc), status="error")
+        self.invalidate_dashboard_cache()
+        verb = "Deleted" if result.get("removed") else "Marked deleted"
+        return self.redirect(
+            environ,
+            "/fine-tuning",
+            message=f"{verb} fine-tuned model artifacts for {resolved.name}. Run logs were kept.",
+            status="success",
+        )
+
     def training_source_files(self) -> dict[str, list[Path]]:
         """Return server-side label and transcript files that can be paired for training."""
 
         return self.cached_value(
             "training_source_files",
-            ttl_seconds=3.0,
+            ttl_seconds=20.0,
             builder=lambda: {
                 # audio_in is included so RTTMs that ship next to a WAV
                 # (e.g. the JIBO Kids corpus, future pre-labeled sets) get

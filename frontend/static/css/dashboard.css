@@ -1755,6 +1755,21 @@ code {
   padding-left: 18px;
 }
 
+.run-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.run-inline-actions button {
+  width: auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
 .table-scroll {
   overflow-x: auto;
   max-width: 100%;
@@ -3397,9 +3412,10 @@ dialog.dashboard-dialog {
   gap: var(--space-2);
   margin: var(--space-3) 0 var(--space-4);
   padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--line);
+  border: 1px solid rgba(17, 93, 111, 0.32);
   border-radius: var(--radius);
-  background: var(--fog-light);
+  background: linear-gradient(180deg, #ffffff, #f3f8fa);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.65);
 }
 
 .label-audio audio {
@@ -3429,8 +3445,8 @@ dialog.dashboard-dialog {
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--white);
-  color: var(--slate-dark);
+  background: var(--panel-solid);
+  color: var(--bg-ink);
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
 }
@@ -3447,7 +3463,7 @@ dialog.dashboard-dialog {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--agave-dark);
 }
 
 .label-audio-title {
@@ -3466,13 +3482,167 @@ dialog.dashboard-dialog {
 .label-training-target {
   margin: var(--space-3) 0 var(--space-4);
   padding: var(--space-3);
-  border: 1px solid var(--line);
+  border: 1px solid rgba(140, 28, 46, 0.25);
   border-radius: var(--radius-sm);
-  background: var(--white);
+  background: linear-gradient(180deg, #ffffff, #fbf6f7);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.label-training-target-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid rgba(140, 28, 46, 0.16);
+}
+
+.label-training-target-head h3,
+.label-training-target-head p {
+  margin: 0;
+}
+
+.label-training-target-head h3 {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.label-training-target-head p {
+  margin-top: 2px;
+  color: var(--slate-dark);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.target-backend-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid rgba(140, 28, 46, 0.22);
+  border-radius: 999px;
+  background: rgba(140, 28, 46, 0.08);
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .label-training-target .inline {
   align-items: flex-end;
+}
+
+.fine-tune-file-section {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #ffffff, #f7f9fb);
+}
+
+.fine-tune-file-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.fine-tune-file-section-head h3,
+.fine-tune-file-section-head p {
+  margin: 0;
+}
+
+.fine-tune-file-section-head h3 {
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.fine-tune-file-section-head p {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.fine-tune-file-section .selection-toolbar {
+  margin: 0;
+}
+
+.workspace-file-picker-audio,
+.workspace-file-picker-rttm {
+  max-height: 320px;
+  background: #f8fafb;
+}
+
+.fine-tune-file-section .file-choice {
+  border: 1px solid var(--line);
+  background: var(--panel-solid);
+}
+
+.file-choice-name {
+  color: var(--bg-ink);
+  font-weight: 800;
+}
+
+.file-choice-path {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+:root[data-theme="dark"] .label-audio,
+:root[data-theme="dark"] .fine-tune-file-section {
+  border-color: #4c7180;
+  background: linear-gradient(180deg, #1a2631, #131d27);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .label-audio-caption {
+  color: #8fc6d4;
+}
+
+:root[data-theme="dark"] .label-current-time,
+:root[data-theme="dark"] .workspace-file-picker-audio,
+:root[data-theme="dark"] .workspace-file-picker-rttm {
+  background: #111a23;
+  color: var(--bg-ink);
+}
+
+:root[data-theme="dark"] .label-training-target {
+  border-color: rgba(255, 154, 172, 0.32);
+  background: linear-gradient(180deg, #221b25, #171d25);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .label-training-target-head {
+  border-bottom-color: rgba(255, 154, 172, 0.22);
+}
+
+:root[data-theme="dark"] .label-training-target-head p {
+  color: #f0dce1;
+}
+
+:root[data-theme="dark"] .target-backend-pill {
+  border-color: rgba(255, 154, 172, 0.36);
+  background: rgba(255, 154, 172, 0.15);
+  color: var(--accent);
+}
+
+:root[data-theme="dark"] .fine-tune-file-section .file-choice {
+  border-color: #3d5161;
+  background: #182230;
+}
+
+:root[data-theme="dark"] .file-choice-name {
+  color: var(--bg-ink);
+}
+
+:root[data-theme="dark"] .training-labels-toggle {
+  background: #182230;
+  color: var(--bg-ink);
+  border-color: var(--border);
 }
 
 .label-queue-toggle {
@@ -3662,7 +3832,9 @@ dialog.dashboard-dialog {
   border-radius: var(--radius-sm);
   background: var(--white);
   border: 1px solid var(--border);
+  color: var(--bg-ink);
   font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
 }
 
@@ -3682,6 +3854,14 @@ dialog.dashboard-dialog {
   .label-editor-head {
     flex-direction: column;
     align-items: stretch;
+  }
+  .label-training-target-head,
+  .fine-tune-file-section-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .fine-tune-file-section-head p {
+    white-space: normal;
   }
   .label-editor-head button {
     align-self: flex-start;

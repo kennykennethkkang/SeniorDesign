@@ -670,6 +670,11 @@ class RenderingMixin:
                 if not isinstance(run, dict):
                     continue
                 version_name = str(run.get("version_name") or Path(str(run.get("run_dir", ""))).name)
+                experiment_dir = Path(str(run.get("experiment_dir") or ""))
+                model_available = bool(
+                    experiment_dir.is_dir()
+                    and not bool(run.get("model_deleted"))
+                )
                 # display_name was set by list_runs; fall back to version_name
                 # so a renamed run shows the friendly label here too.
                 recent_runs.append(
@@ -680,6 +685,9 @@ class RenderingMixin:
                         "versionNumber": run.get("version_number", ""),
                         "runName": Path(str(run.get("run_dir", ""))).name,
                         "runDir": str(run.get("run_dir", "")),
+                        "experimentDir": str(run.get("experiment_dir") or ""),
+                        "modelAvailable": model_available,
+                        "modelDeleted": bool(run.get("model_deleted")),
                         "startedAt": str(run.get("started_at_utc") or ""),
                         # Surface the snapshotted base/pretrained model so the user
                         # can tell at a glance which checkpoint each fine-tuned run
@@ -1031,6 +1039,7 @@ class RenderingMixin:
                 "fineTuneLaunch": self.frontend_route("/fine-tuning/launch", script_name),
                 "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
                 "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),
+                "fineTuneDeleteRunModel": self.frontend_route("/fine-tuning/delete-run-model", script_name),
                 "fineTuneScoreRun": self.frontend_route("/api/fine-tuning/score-run", script_name),
                 "fineTuneCompareRuns": self.frontend_route("/api/fine-tuning/compare-runs", script_name),
                 "fineTuneAutoTrain": self.frontend_route("/fine-tuning/auto-train", script_name),
@@ -1061,6 +1070,7 @@ class RenderingMixin:
                 "stepCount": DEFAULT_STEP_COUNT,
                 "configName": DEFAULT_CONFIG_NAME,
                 "speakerModel": DEFAULT_SPEAKER_MODEL,
+                "pyannotePretrainedModel": DEFAULT_PYANNOTE_PRETRAINED_MODEL,
                 "maxEpochs": DEFAULT_MAX_EPOCHS,
                 "slurmPartition": DEFAULT_SLURM_PARTITION,
                 "slurmTime": DEFAULT_SLURM_TIME,

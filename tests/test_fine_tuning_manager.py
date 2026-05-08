@@ -280,6 +280,7 @@ class FineTuningTests(unittest.TestCase):
             self.assertIn("sbatch_runtime_env.sh", sbatch_text)
             self.assertIn("expose_venv_native_libraries", sbatch_text)
             self.assertIn("/sbatch_runtime/.venv", sbatch_text)
+            self.assertIn("Running fine-tuning launch command", sbatch_text)
 
             train_session_rows = artifacts.session_manifest_train.read_text(encoding="utf-8").strip().splitlines()
             validation_session_rows = artifacts.session_manifest_validation.read_text(encoding="utf-8").strip().splitlines()
@@ -353,6 +354,7 @@ class FineTuningTests(unittest.TestCase):
             # frozen TitaNet has params that don't participate in the loss.
             # Without find_unused_parameters=True, training crashes mid-step.
             self.assertIn("trainer.strategy=ddp_find_unused_parameters_true", launch_text)
+            self.assertIn("Running NeMo fine-tuning command", launch_text)
             # Lightning saves both a "best" and a "last" checkpoint by default.
             # On the WAVE cluster the last checkpoint is saved via an atomic
             # temp→dest shutil.move that crosses the /local/scratch → /WAVE
@@ -378,6 +380,18 @@ class FineTuningTests(unittest.TestCase):
                 transcript_text="pyannote sample",
                 root=root,
             )
+            old_slurm_log = (
+                root
+                / "fine_tuning"
+                / "projects"
+                / "pyannote"
+                / "pyannote-project"
+                / "artifacts"
+                / "slurm_logs"
+                / "pyannote_finetune_1.err"
+            )
+            old_slurm_log.parent.mkdir(parents=True, exist_ok=True)
+            old_slurm_log.write_text("keep historical slurm stderr\n", encoding="utf-8")
 
             artifacts = fine_tuning.prepare_project(
                 project_name="Pyannote Project",
@@ -392,6 +406,7 @@ class FineTuningTests(unittest.TestCase):
             self.assertTrue(db_yml_path.exists())
             self.assertTrue(train_lst_path.exists())
             self.assertTrue(train_py_path.exists())
+            self.assertTrue(old_slurm_log.exists())
             self.assertTrue(artifacts.launch_script_path.exists())
             self.assertTrue(artifacts.sbatch_script_path.exists())
             self.assert_default_slurm_resources(artifacts.sbatch_script_path)
@@ -408,6 +423,15 @@ class FineTuningTests(unittest.TestCase):
             train_py_text = train_py_path.read_text(encoding="utf-8")
             self.assertIn("_patch_torchaudio_compatibility", train_py_text)
             self.assertIn("AudioMetaData", train_py_text)
+            self.assertIn("PyannoteProgressLogger", train_py_text)
+            self.assertIn("log_every_n_steps=1", train_py_text)
+            self.assertIn('final_checkpoint = checkpoint_dir / "last.ckpt"', train_py_text)
+            self.assertIn("trainer.save_checkpoint(str(final_checkpoint))", train_py_text)
+            self.assertIn("saved_checkpoint", train_py_text)
+            self.assertIn("get_torchaudio_info", train_py_text)
+            self.assertIn("Identity(output_type=\"dict\", target_rate=target_rate)", train_py_text)
+            self.assertIn("PYANNOTE_NUM_WORKERS", train_py_text)
+            self.assertIn("num_workers=PYANNOTE_NUM_WORKERS", train_py_text)
             # PyTorch 2.6 made torch.load default to weights_only=True, which
             # rejects the TorchVersion / dataclass payloads in pyannote
             # checkpoints. The training script needs the same trusted-load
@@ -493,6 +517,7 @@ class FineTuningTests(unittest.TestCase):
             self.assertIn("sbatch_runtime_env.sh", sbatch_text)
             self.assertIn("expose_venv_native_libraries", sbatch_text)
             self.assertIn(".venv_pyannote", sbatch_text)
+            self.assertIn("Running fine-tuning launch command", sbatch_text)
 
     def test_launch_training_runs_generated_script_in_background(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -569,6 +594,42 @@ class FineTuningTests(unittest.TestCase):
             self.assertEqual(metadata["version_name"], "Clean Speaker Version")
             self.assertEqual(metadata["version_number"], 2)
             self.assertTrue(pathlib.Path(metadata["experiment_dir"]).name.startswith("clean-speaker-version"))
+
+    def test_delete_run_model_artifacts_preserves_run_history_and_slurm_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            paths = fine_tuning.ensure_project_structure("Delete Model", backend="nemo", root=root)
+            run_dir = paths["runs_dir"] / "20260507T000000Z_delete-model"
+            run_dir.mkdir(parents=True)
+            experiment_dir = paths["experiments_dir"] / "delete-model-v1"
+            experiment_dir.mkdir(parents=True)
+            (experiment_dir / "model.ckpt").write_text("checkpoint", encoding="utf-8")
+            old_slurm_log = paths["slurm_logs_dir"] / "msdd_finetune_123.err"
+            old_slurm_log.write_text("historical stderr\n", encoding="utf-8")
+            metadata_path = run_dir / "metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "version_name": "delete-model-v1",
+                        "experiment_dir": str(experiment_dir),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "stdout.log").write_text("training stdout\n", encoding="utf-8")
+            (run_dir / "stderr.log").write_text("training stderr\n", encoding="utf-8")
+            (run_dir / "exit_code.txt").write_text("0", encoding="utf-8")
+
+            result = fine_tuning.delete_run_model_artifacts(run_dir)
+
+            self.assertTrue(result["removed"])
+            self.assertFalse(experiment_dir.exists())
+            self.assertTrue(run_dir.exists())
+            self.assertTrue((run_dir / "stdout.log").exists())
+            self.assertTrue(old_slurm_log.exists())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata["model_deleted"])
+            self.assertEqual(metadata["deleted_experiment_dir"], str(experiment_dir.resolve()))
 
     def test_set_project_display_name_persists_in_sidecar_and_list(self):
         # The sidecar lives next to the (regen-on-prepare) metadata.json so a

@@ -330,6 +330,8 @@ class CoreMixin:
                 status, headers, body = self.handle_finetune_rename_project(environ)
             elif routed_method == "POST" and path == "/fine-tuning/rename-run":
                 status, headers, body = self.handle_finetune_rename_run(environ)
+            elif routed_method == "POST" and path == "/fine-tuning/delete-run-model":
+                status, headers, body = self.handle_finetune_delete_run_model(environ)
             elif routed_method == "POST" and path == "/fine-tuning/auto-train":
                 status, headers, body = self.handle_finetune_auto_train(environ)
             else:

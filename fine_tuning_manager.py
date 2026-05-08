@@ -349,6 +349,65 @@ def set_run_display_name(run_dir: Path, *, display_name: str) -> dict[str, objec
     return _write_display_sidecar(run_dir / "display.json", updates={"display_name": cleaned})
 
 
+def delete_run_model_artifacts(run_dir: Path) -> dict[str, object]:
+    """Delete one trained model's experiment artifacts while keeping run logs/history."""
+
+    resolved_run_dir = run_dir.resolve()
+    if not resolved_run_dir.is_dir():
+        raise FileNotFoundError(f"Unknown fine-tuning run: {run_dir}")
+    status = run_status(resolved_run_dir)
+    if status in {"running", "submitted"}:
+        raise ValueError(f"Cannot delete model artifacts while the run is {status}.")
+
+    metadata_path = resolved_run_dir / "metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Run metadata not found: {metadata_path}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Run metadata is not valid JSON: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Run metadata must be a JSON object: {metadata_path}")
+
+    experiment_dir_value = str(metadata.get("experiment_dir") or "").strip()
+    if not experiment_dir_value:
+        raise ValueError("This run does not record a model artifact directory.")
+    experiment_dir = Path(experiment_dir_value).expanduser()
+    if not experiment_dir.is_absolute():
+        experiment_dir = (resolved_run_dir / experiment_dir).resolve()
+    resolved_experiment_dir = experiment_dir.resolve()
+
+    project_root = resolved_run_dir.parent.parent
+    experiments_root = (project_root / "artifacts" / "experiments").resolve()
+    try:
+        resolved_experiment_dir.relative_to(experiments_root)
+    except ValueError as exc:
+        raise ValueError("Refusing to delete a model path outside this fine-tuning project's experiments directory.") from exc
+
+    removed = False
+    if resolved_experiment_dir.is_dir():
+        shutil.rmtree(resolved_experiment_dir)
+        removed = True
+    elif resolved_experiment_dir.exists():
+        resolved_experiment_dir.unlink()
+        removed = True
+
+    metadata.update(
+        {
+            "model_deleted": True,
+            "model_deleted_at_utc": utc_now_iso(),
+            "deleted_experiment_dir": str(resolved_experiment_dir),
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "run_dir": str(resolved_run_dir),
+        "experiment_dir": str(resolved_experiment_dir),
+        "removed": removed,
+        "status": status,
+    }
+
+
 def project_dir(
     project_name: str,
     *,
@@ -596,22 +655,19 @@ def probe_media_duration(media_path: Path) -> float:
 
     if media_path.suffix.lower() == ".wav":
         try:
+            return probe_wav_duration_from_header(media_path)
+        except (OSError, ValueError, struct.error):
+            pass
+        try:
             with wave.open(str(media_path), "rb") as wav_file:
                 frame_rate = wav_file.getframerate()
                 frame_count = wav_file.getnframes()
             if frame_rate > 0 and frame_count > 0:
                 return frame_count / frame_rate
-            try:
-                return probe_wav_duration_from_header(media_path)
-            except (OSError, ValueError, struct.error):
-                pass
         except (OSError, wave.Error):
             # Python 3.9's wave module rejects valid WAV variants such as IEEE
             # float WAVs. Read RIFF chunks directly before requiring ffprobe.
-            try:
-                return probe_wav_duration_from_header(media_path)
-            except (OSError, ValueError, struct.error):
-                pass
+            pass
 
     ffprobe_bin = shutil.which("ffprobe")
     if ffprobe_bin:
@@ -661,6 +717,7 @@ def probe_wav_duration_from_header(media_path: Path) -> float:
         byte_rate = 0
         block_align = 0
         data_size = 0
+        file_size = media_path.stat().st_size
 
         while True:
             chunk_header = handle.read(8)
@@ -676,7 +733,8 @@ def probe_wav_duration_from_header(media_path: Path) -> float:
                         fmt_data[:16],
                     )
             elif chunk_id == b"data":
-                data_size = chunk_size
+                data_start = handle.tell()
+                data_size = min(chunk_size, max(0, file_size - data_start))
                 handle.seek(chunk_size, os.SEEK_CUR)
             else:
                 handle.seek(chunk_size, os.SEEK_CUR)
@@ -1075,7 +1133,24 @@ def write_pyannote_training_script(
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings(
+    "ignore",
+    message='Existing precomputed key "annotation" has been modified by a preprocessor.',
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Your `IterableDataset` has `__len__` defined.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+    category=UserWarning,
+)
 
 # Compatibility shim for torchaudio 2.10 — `AudioMetaData`, `info`, `load`,
 # and `list_audio_backends` were all removed/renamed, but pyannote.audio 3.4
@@ -1170,23 +1245,84 @@ torch.load = _trusted_torch_load
 
 import pytorch_lightning as pl
 from pyannote.audio import Model
+from pyannote.audio.core.io import get_torchaudio_info
 from pyannote.audio.tasks import SpeakerDiarization
 from pyannote.database import FileFinder, registry
+from torch_audiomentations import Identity
 
 DATABASE_CONFIG = Path({json.dumps(str(database_config_path))})
 PROTOCOL_NAME = {json.dumps(protocol_name)}
 PRETRAINED_MODEL = os.environ.get("PYANNOTE_PRETRAINED_MODEL", {json.dumps(pretrained_model)})
 HF_TOKEN = os.environ.get("HF_TOKEN") or True
 EXPERIMENTS_DIR = Path(os.environ.get("TRAINING_EXPERIMENT_DIR", {json.dumps(str(experiments_dir))}))
+PYANNOTE_NUM_WORKERS = max(0, int(os.environ.get("PYANNOTE_NUM_WORKERS", "4")))
+
+class PyannoteProgressLogger(pl.Callback):
+    def _total_batches(self, trainer):
+        total = getattr(trainer, "num_training_batches", None)
+        try:
+            return str(int(total)) if total and total != float("inf") else "unknown"
+        except (OverflowError, TypeError, ValueError):
+            return "unknown"
+
+    def _loss_fragment(self, outputs):
+        loss = outputs.get("loss") if isinstance(outputs, dict) else outputs
+        if hasattr(loss, "detach"):
+            try:
+                return f" loss={{float(loss.detach().cpu()):.6f}}"
+            except (TypeError, ValueError):
+                return ""
+        return ""
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        print(
+            f"[pyannote-train] epoch={{trainer.current_epoch + 1}}/{{trainer.max_epochs}} "
+            f"step={{trainer.global_step}} batches={{self._total_batches(trainer)}} status=start",
+            flush=True,
+        )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        completed = batch_idx + 1
+        total = self._total_batches(trainer)
+        should_print = completed == 1 or total == str(completed) or completed % 10 == 0
+        if should_print:
+            print(
+                f"[pyannote-train] epoch={{trainer.current_epoch + 1}}/{{trainer.max_epochs}} "
+                f"step={{trainer.global_step}} batch={{completed}}/{{total}}"
+                f"{{self._loss_fragment(outputs)}}",
+                flush=True,
+            )
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        print(
+            f"[pyannote-train] epoch={{trainer.current_epoch + 1}}/{{trainer.max_epochs}} "
+            f"step={{trainer.global_step}} status=end",
+            flush=True,
+        )
+
 
 registry.load_database(str(DATABASE_CONFIG))
-protocol = registry.get_protocol(PROTOCOL_NAME, preprocessors={{"audio": FileFinder()}})
+protocol = registry.get_protocol(
+    PROTOCOL_NAME,
+    preprocessors={{"audio": FileFinder(), "torchaudio.info": get_torchaudio_info}},
+)
 model = Model.from_pretrained(PRETRAINED_MODEL, token=HF_TOKEN)
+duration = float({duration})
+num_samples = max(1, round(duration * int(model.hparams.sample_rate)))
+num_frames = max(1, int(model.num_frames(num_samples)))
+target_rate = max(1, round(int(model.hparams.sample_rate) * num_frames / num_samples))
+print(
+    f"[pyannote-train] model={{PRETRAINED_MODEL}} epochs={max_epochs} devices={devices} "
+    f"duration={{duration}}s target_rate={{target_rate}} num_workers={{PYANNOTE_NUM_WORKERS}}",
+    flush=True,
+)
 model.task = SpeakerDiarization(
     protocol,
-    duration={duration},
+    duration=duration,
     max_speakers_per_chunk={max_speakers_per_chunk},
     max_speakers_per_frame={max_speakers_per_frame},
+    num_workers=PYANNOTE_NUM_WORKERS,
+    augmentation=Identity(output_type="dict", target_rate=target_rate),
 )
 
 accelerator = "gpu" if int({devices}) > 0 else "cpu"
@@ -1195,8 +1331,15 @@ trainer = pl.Trainer(
     max_epochs={max_epochs},
     accelerator=accelerator,
     default_root_dir=str(EXPERIMENTS_DIR),
+    callbacks=[PyannoteProgressLogger()],
+    log_every_n_steps=1,
 )
 trainer.fit(model)
+checkpoint_dir = EXPERIMENTS_DIR / "checkpoints"
+checkpoint_dir.mkdir(parents=True, exist_ok=True)
+final_checkpoint = checkpoint_dir / "last.ckpt"
+trainer.save_checkpoint(str(final_checkpoint))
+print(f"[pyannote-train] saved_checkpoint={{final_checkpoint}}", flush=True)
 """
     training_script_path.parent.mkdir(parents=True, exist_ok=True)
     training_script_path.write_text(script, encoding="utf-8")
@@ -1267,25 +1410,31 @@ cd "$NEURAL_DIR"
 # without `find_unused_parameters=True`, DDP raises mid-training with
 # "It looks like your LightningModule has parameters that were not used in
 # producing the loss returned by training_step."
-exec "$PYTHON_BIN" multiscale_diar_decoder.py \\
-  --config-path="../conf/neural_diarizer" \\
-  --config-name="{config_name}" \\
-  trainer.devices={devices} \\
-  trainer.max_epochs={max_epochs} \\
-  trainer.strategy=ddp_find_unused_parameters_true \\
-  model.diarizer.speaker_embeddings.model_path="{speaker_model}" \\
-  model.train_ds.manifest_filepath="$TRAIN_MANIFEST" \\
-  model.validation_ds.manifest_filepath="$VAL_MANIFEST" \\
-  model.train_ds.emb_dir="$TRAIN_EMB_DIR" \\
-  model.validation_ds.emb_dir="$VAL_EMB_DIR" \\
-  exp_manager.name="$EXP_NAME" \\
-  exp_manager.exp_dir="$EXP_DIR" \\
+command=(
+  "$PYTHON_BIN" multiscale_diar_decoder.py
+  --config-path="../conf/neural_diarizer"
+  --config-name="{config_name}"
+  trainer.devices={devices}
+  trainer.max_epochs={max_epochs}
+  trainer.strategy=ddp_find_unused_parameters_true
+  model.diarizer.speaker_embeddings.model_path="{speaker_model}"
+  model.train_ds.manifest_filepath="$TRAIN_MANIFEST"
+  model.validation_ds.manifest_filepath="$VAL_MANIFEST"
+  model.train_ds.emb_dir="$TRAIN_EMB_DIR"
+  model.validation_ds.emb_dir="$VAL_EMB_DIR"
+  exp_manager.name="$EXP_NAME"
+  exp_manager.exp_dir="$EXP_DIR"
   +exp_manager.checkpoint_callback_params.save_last=false
+)
+
+echo "Running NeMo fine-tuning command:"
+printf "  %q" "${{command[@]}}"
+printf "\\n"
+exec "${{command[@]}}"
 """
     launch_script_path.parent.mkdir(parents=True, exist_ok=True)
     launch_script_path.write_text(script, encoding="utf-8")
     launch_script_path.chmod(0o755)
-
 
 # WAVE module + venv shared across the diarization pipeline.
 # Loaded modules + LD_LIBRARY_PATH need to be set the same way the production
@@ -1330,18 +1479,21 @@ def _runtime_env_block(*, backend: str) -> str:
 
     backend_key = normalize_backend(backend)
     default_venv = _BACKEND_VENV[backend_key]
-    other_venv = _BACKEND_VENV["pyannote" if backend_key == "nemo" else "nemo"]
     return "\n".join(
         [
             f"module load {_PYTHON_MODULE}",
             f"_FT_DEFAULT_VENV={json.dumps(str(default_venv))}",
-            f"_FT_OTHER_VENV={json.dumps(str(other_venv))}",
             f"_FT_RUNTIME_ENV_SCRIPT={json.dumps(str(_RUNTIME_ENV_SCRIPT))}",
             'PYTHON_BIN="${PYTHON_BIN:-$_FT_DEFAULT_VENV/bin/python3}"',
-            # Steer away from the wrong-backend venv when the caller forwarded
-            # the dashboard's own interpreter (the common case from the web UI).
+            # The dashboard forwards its own sys.executable as PYTHON_BIN, which
+            # on WAVE is /usr/bin/python3 — that interpreter has no lightning,
+            # nemo, or pyannote installed and the GPU job dies on import. Force
+            # PYTHON_BIN back to the backend venv unless the caller already
+            # picked an interpreter inside it.
             'case "$PYTHON_BIN" in',
-            '  "$_FT_OTHER_VENV/bin/"*)',
+            '  "$_FT_DEFAULT_VENV/bin/"*)',
+            "    ;;",
+            "  *)",
             '    PYTHON_BIN="$_FT_DEFAULT_VENV/bin/python3"',
             "    ;;",
             "esac",
@@ -1401,7 +1553,11 @@ def write_sbatch_script(
             f"mkdir -p {json.dumps(str(slurm_logs_dir))}",
             f'export NEMO_ROOT="${{NEMO_ROOT:-{suggested_nemo_root}}}"',
             runtime_block,
-            f"bash {json.dumps(str(launch_script_path))}",
+            f"command=(bash {json.dumps(str(launch_script_path))})",
+            'echo "Running fine-tuning launch command:"',
+            'printf "  %q" "${command[@]}"',
+            'printf "\\n"',
+            '"${command[@]}"',
             "",
         ]
     )
@@ -1423,7 +1579,11 @@ set -euo pipefail
 PYTHON_BIN="${{PYTHON_BIN:-python3}}"
 export HF_TOKEN="${{HF_TOKEN:-${{HUGGINGFACE_TOKEN:-}}}}"
 
-exec "$PYTHON_BIN" {json.dumps(str(training_script_path))}
+command=("$PYTHON_BIN" {json.dumps(str(training_script_path))})
+echo "Running pyannote fine-tuning command:"
+printf "  %q" "${{command[@]}}"
+printf "\\n"
+exec "${{command[@]}}"
 """
     launch_script_path.parent.mkdir(parents=True, exist_ok=True)
     launch_script_path.write_text(script, encoding="utf-8")
@@ -1466,7 +1626,11 @@ def write_pyannote_sbatch_script(
             "set -euo pipefail",
             f"mkdir -p {json.dumps(str(slurm_logs_dir))}",
             runtime_block,
-            f"bash {json.dumps(str(launch_script_path))}",
+            f"command=(bash {json.dumps(str(launch_script_path))})",
+            'echo "Running fine-tuning launch command:"',
+            'printf "  %q" "${command[@]}"',
+            'printf "\\n"',
+            '"${command[@]}"',
             "",
         ]
     )
@@ -1536,7 +1700,6 @@ def prepare_project(
         paths["pairwise_validation_dir"],
         paths["emb_train_dir"],
         paths["emb_validation_dir"],
-        paths["database_config_path"].parent,
         paths["train_list_path"].parent,
         paths["train_rttm_path"].parent,
         paths["train_uem_path"].parent,
@@ -2163,8 +2326,11 @@ def launch_training(
     # The WAVE documentation emphasizes scheduler-backed execution for shared GPU
     # workloads, so Slurm submission is preferred whenever the command is available.
     if prefer_sbatch and sbatch_bin and sbatch_script_path.is_file():
+        submit_command = [sbatch_bin, str(sbatch_script_path)]
+        submit_command_text = shlex.join(submit_command)
+        print(f"Submitting Slurm training job: {submit_command_text}", flush=True)
         completed = subprocess.run(
-            [sbatch_bin, str(sbatch_script_path)],
+            submit_command,
             cwd=str(paths["project_dir"]),
             check=False,
             capture_output=True,
@@ -2183,7 +2349,14 @@ def launch_training(
                 ),
             },
         )
-        stdout_path.write_text(completed.stdout or "", encoding="utf-8")
+        if completed.stdout:
+            print(completed.stdout, end="", flush=True)
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr, flush=True)
+        stdout_path.write_text(
+            f"Submit command: {submit_command_text}\n{completed.stdout or ''}",
+            encoding="utf-8",
+        )
         stderr_path.write_text(completed.stderr or "", encoding="utf-8")
         job_id = ""
         for token in (completed.stdout or "").split():
@@ -2204,6 +2377,8 @@ def launch_training(
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "exit_code_path": str(exit_code_path),
+            "submit_command": submit_command,
+            "submit_command_text": submit_command_text,
             "sbatch_script_path": str(sbatch_script_path),
             "nemo_root": str(nemo_root.resolve()) if nemo_root else "",
             "python_bin": python_bin,
