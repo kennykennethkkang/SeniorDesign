@@ -32,7 +32,14 @@ DEFAULT_AUDIO_DIR = pathlib.Path(__file__).resolve().parent / "audio_in"
 def is_audio_file(path: pathlib.Path) -> bool:
     """Accept project media files while excluding generated helper inputs."""
 
-    if not path.is_file():
+    # Some uploaded corpora carry filenames long enough to trip ENAMETOOLONG
+    # when the kernel tries to stat them. Treat those as "not a file we can
+    # process" and keep walking — otherwise a single bad name aborts the
+    # whole walk and breaks unrelated pages like /training-labels save.
+    try:
+        if not path.is_file():
+            return False
+    except OSError:
         return False
     if path.suffix.lower() not in AUDIO_EXTENSIONS:
         return False
@@ -87,13 +94,20 @@ def normalize_audio_dir(audio_dir: pathlib.Path) -> list[tuple[pathlib.Path, pat
 
             prefix_num = next_available_number(used_numbers)
             target_path = audio_path.with_name(f"{prefix_num:03d}_{audio_path.name}")
-            while target_path.exists():
-                prefix_num += 1
-                while prefix_num in used_numbers:
+            # ``exists()`` calls ``stat()`` and crashes with ENAMETOOLONG on
+            # corpus filenames that already exceed the kernel's name limit
+            # (KaggleBabyNoises, etc.). One bad file used to abort the whole
+            # walk and 500-out unrelated pages — skip the prefix step for
+            # any file we can't physically rename and keep going.
+            try:
+                while target_path.exists():
                     prefix_num += 1
-                target_path = audio_path.with_name(f"{prefix_num:03d}_{audio_path.name}")
-
-            audio_path.rename(target_path)
+                    while prefix_num in used_numbers:
+                        prefix_num += 1
+                    target_path = audio_path.with_name(f"{prefix_num:03d}_{audio_path.name}")
+                audio_path.rename(target_path)
+            except OSError:
+                continue
             used_numbers.add(prefix_num)
             renamed_paths.append((audio_path, target_path.resolve()))
 

@@ -61,8 +61,11 @@ class GzipMiddleware:
         if not _accepts_gzip(environ):
             return self.application(environ, start_response)
 
-        # Capture the inner app's headers/status until we know the body length
-        # and content type — only then can we decide whether to compress.
+        # We need to inspect the inner app's Content-Type before deciding what
+        # to do, but we must NOT buffer the body for non-gzippable responses —
+        # otherwise large media downloads (audio_in/*.wav, 70+ MB) get slurped
+        # into memory and break range/streaming behavior. Capture status +
+        # headers via a wrapped start_response, then branch.
         captured: dict[str, object] = {}
 
         def capture_start(status, headers, exc_info=None):
@@ -72,6 +75,21 @@ class GzipMiddleware:
             return lambda chunk: None  # discard write() escape hatch
 
         body_iter = self.application(environ, capture_start)
+
+        headers = captured.get("headers") or []
+        header_map = {name.lower(): value for name, value in headers}
+        content_type = header_map.get("content-type", "")
+        already_encoded = header_map.get("content-encoding", "")
+        status = captured.get("status", "200 OK")
+        exc_info = captured.get("exc_info")
+
+        if already_encoded or not _is_gzippable(content_type):
+            # Pass through untouched — preserves chunked streaming and range
+            # responses (Content-Range / 206) for audio + binary assets.
+            start_response(status, headers, exc_info)
+            return body_iter
+
+        # Gzippable: buffer the (small) text/JSON body so we can compress.
         try:
             chunks = list(body_iter)
         finally:
@@ -80,19 +98,10 @@ class GzipMiddleware:
                 close()
         body = b"".join(chunks)
 
-        headers = captured.get("headers") or []
-        header_map = {name.lower(): value for name, value in headers}
-        content_type = header_map.get("content-type", "")
-        already_encoded = header_map.get("content-encoding", "")
-
-        if (
-            already_encoded
-            or len(body) < _GZIP_MIN_BYTES
-            or not _is_gzippable(content_type)
-        ):
+        if len(body) < _GZIP_MIN_BYTES:
             new_headers = [(name, value) for name, value in headers if name.lower() != "content-length"]
             new_headers.append(("Content-Length", str(len(body))))
-            start_response(captured["status"], new_headers, captured.get("exc_info"))
+            start_response(status, new_headers, exc_info)
             return [body]
 
         buffer = io.BytesIO()
@@ -111,7 +120,7 @@ class GzipMiddleware:
         # variants without serving the wrong one to a non-gzip client.
         if not any(name.lower() == "vary" for name, _ in new_headers):
             new_headers.append(("Vary", "Accept-Encoding"))
-        start_response(captured["status"], new_headers, captured.get("exc_info"))
+        start_response(status, new_headers, exc_info)
         return [compressed]
 
 

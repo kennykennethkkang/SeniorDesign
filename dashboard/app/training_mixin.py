@@ -357,13 +357,18 @@ class TrainingLabelsMixin:
             "needs_review": 0,
             "completed": 0,
         }
+        # Pre-index sidecar/label_work RTTMs so the per-audio synthetic check
+        # is a set lookup instead of ~5 stat() calls per file. Index builder
+        # walks each directory once.
+        rttm_index_lookup = getattr(self, "synthetic_rttm_index", None)
+        rttm_index = rttm_index_lookup() if callable(rttm_index_lookup) else None
+        synthetic_lookup = getattr(self, "synthetic_rttm_for_audio_via_index", None)
         for path in audio_paths:
             audio_name = self.audio_relative_path(path)
             record = records.get(audio_name) or records.get(path.name)
             status = self.training_label_status(record)
-            if status == "not_started":
-                rttm_lookup = getattr(self, "validated_training_rttm_for_audio", None)
-                if callable(rttm_lookup) and rttm_lookup(path) is not None:
+            if status == "not_started" and rttm_index is not None and callable(synthetic_lookup):
+                if synthetic_lookup(path, rttm_index) is not None:
                     status = "completed"
             summary[status] = summary.get(status, 0) + 1
         return summary

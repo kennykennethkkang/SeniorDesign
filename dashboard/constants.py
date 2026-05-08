@@ -97,8 +97,12 @@ UPLOAD_AUDIO_ACCEPT = ",".join(UPLOAD_AUDIO_SUFFIXES)
 DIARIZATION_COMPLETED_STATUSES = {"ok", "no_speech"}
 DIARIZATION_ACTIVE_STATUSES = {"running", "submitted", "pending", "waiting"}
 DASHBOARD_REFRESH_STATUSES = {"running", "submitted", "pending", "waiting", "configuring"}
-LIVE_TRACKING_INTERVAL_MS = 1000
-IDLE_TRACKING_INTERVAL_MS = 5000
+# Polling cadence the frontend uses for /api/tracking. Bumped from 1 s / 5 s
+# because the per-second cadence was burning most of the server's threadpool
+# and starving page navigations. The frontend kicks an immediate poll on
+# visibilitychange, so a longer idle interval doesn't feel stale.
+LIVE_TRACKING_INTERVAL_MS = 3000
+IDLE_TRACKING_INTERVAL_MS = 15000
 DEFAULT_SERVER_MODE = "auto"
 DEFAULT_SERVER_THREADS = 8
 SECURITY_RESPONSE_HEADERS = (

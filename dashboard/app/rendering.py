@@ -837,13 +837,17 @@ class RenderingMixin:
     ) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         diarization_records = self.diarization_model_history_lookup()
+        # Same single-walk index trick as the summary path. Per-audio check
+        # is now an O(1) set membership instead of a fistful of stat()s.
+        rttm_index_lookup = getattr(self, "synthetic_rttm_index", None)
+        rttm_index = rttm_index_lookup() if callable(rttm_index_lookup) else None
+        synthetic_lookup = getattr(self, "synthetic_rttm_for_audio_via_index", None)
         for index, path in enumerate(audio_paths, start=1):
             audio_name = self.audio_relative_path(path)
             record = records.get(audio_name) or records.get(path.name) or {}
-            if not record:
-                rttm_lookup = getattr(self, "validated_training_rttm_for_audio", None)
-                rttm_path = rttm_lookup(path) if callable(rttm_lookup) else None
-                if isinstance(rttm_path, Path) and rttm_path.is_file():
+            if not record and rttm_index is not None and callable(synthetic_lookup):
+                rttm_path = synthetic_lookup(path, rttm_index)
+                if isinstance(rttm_path, Path):
                     source = "audio_stitching" if "/audioStitching/" in f"/{audio_name}" else "rttm_pair"
                     record = {
                         "status": "completed",
@@ -1226,13 +1230,22 @@ class RenderingMixin:
                         {
                             "name": row.get("name", ""),
                             "fileName": row.get("fileName", ""),
-                            "referenceRttm": str(training_label_records.get(row.get("name", ""), {}).get("training_rttm_path") or ""),
+                            "referenceRttm": str(row.get("trainingRttmPath") or ""),
                         }
                         for row in training_label_rows
                         if current_path == "/fine-tuning"
                         and isinstance(row, dict)
                         and row.get("status") == "completed"
-                        and str(training_label_records.get(row.get("name", ""), {}).get("training_rttm_path") or "")
+                        # Read the RTTM path off the row itself rather than
+                        # the raw label_status records. The row builder
+                        # already merges synthetic-completion paths
+                        # (audioStitching sidecars, raw RTTM pairs, etc.) and
+                        # handles the audio_in/<file>.wav vs renumbered
+                        # 001_<file>.wav mismatch where the persistent record
+                        # was keyed before normalize_audio_dir ran. Using the
+                        # row makes every "completed" entry — including
+                        # stitched conversations — eligible for DER.
+                        and str(row.get("trainingRttmPath") or "")
                     ],
                 },
             },

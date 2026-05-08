@@ -1340,6 +1340,88 @@ class FineTuningMixin:
                 candidates.append(candidate)
         return candidates
 
+    def synthetic_rttm_index(self) -> dict[str, object]:
+        """One-shot index of where synthetic-completion RTTMs live on disk.
+
+        Building the index costs two directory walks (audio_in for sidecars,
+        label_work for in-progress drafts). Per-audio lookups against the
+        index are pure set membership — O(1) and zero syscalls. The previous
+        path called ``Path.is_file()`` ~5 times per audio and ate ~24 s of
+        wall time per page render with 6 k+ audio files on the cluster's
+        networked filesystem. Cached for 60 s; mutations call
+        ``invalidate_dashboard_cache``.
+        """
+
+        return self.cached_value(
+            "synthetic_rttm_index",
+            ttl_seconds=60.0,
+            builder=self._build_synthetic_rttm_index,
+        )
+
+    def _build_synthetic_rttm_index(self) -> dict[str, object]:
+        sidecar_rttm_paths: set[Path] = set()
+        if self.audio_dir.is_dir():
+            try:
+                for rttm in self.audio_dir.rglob("*.rttm"):
+                    sidecar_rttm_paths.add(rttm)
+            except OSError:
+                pass
+        label_work_rttm_stems: set[str] = set()
+        label_work_dir = self.training_label_work_dir
+        if label_work_dir.is_dir():
+            try:
+                for rttm in label_work_dir.glob("*.rttm"):
+                    label_work_rttm_stems.add(rttm.stem)
+            except OSError:
+                pass
+        return {
+            "sidecar_rttm_paths": sidecar_rttm_paths,
+            "label_work_rttm_stems": label_work_rttm_stems,
+        }
+
+    def synthetic_rttm_for_audio_via_index(
+        self,
+        audio_path: Path,
+        index: dict[str, object] | None = None,
+    ) -> Path | None:
+        """Indexed variant of ``validated_training_rttm_for_audio``.
+
+        Uses the cached ``synthetic_rttm_index`` so summary + row builders
+        can answer "does this audio have a synthetic completion?" without
+        per-audio stat calls. Skips ``build_sample`` validation — callers
+        that ship the result to the user (e.g. the file picker) keep using
+        ``validated_training_rttm_for_audio`` so a malformed RTTM doesn't
+        slip through.
+        """
+
+        if index is None:
+            index = self.synthetic_rttm_index()
+        sidecar_paths = index.get("sidecar_rttm_paths")
+        if isinstance(sidecar_paths, set):
+            for stem in self.training_audio_pair_stems(audio_path):
+                candidate = audio_path.with_name(f"{stem}.rttm")
+                if candidate in sidecar_paths:
+                    return candidate
+        label_work_stems = index.get("label_work_rttm_stems")
+        if isinstance(label_work_stems, set) and label_work_stems:
+            stems_to_check: list[str] = []
+            try:
+                relative_audio = self.audio_relative_path(audio_path)
+            except ValueError:
+                relative_audio = ""
+            if relative_audio:
+                flattened = self.diarization_output_base(relative_audio)
+                if flattened:
+                    stems_to_check.append(flattened)
+                if "/" not in relative_audio and audio_path.stem not in stems_to_check:
+                    stems_to_check.append(audio_path.stem)
+            else:
+                stems_to_check.append(audio_path.stem)
+            for stem in stems_to_check:
+                if stem in label_work_stems:
+                    return self.training_label_work_dir / f"{stem}.rttm"
+        return None
+
     def validated_training_rttm_for_audio(self, audio_path: Path) -> Path | None:
         """Return the RTTM that makes one audio file ready for fine-tuning."""
 

@@ -29,8 +29,12 @@
   const h = React.createElement;
   const initialState = JSON.parse(document.getElementById("dashboard-state").textContent);
   const APP_TITLE = "ML Speech Diarization";
-  const LIVE_TRACKING_INTERVAL_MS = 1000;
-  const IDLE_TRACKING_INTERVAL_MS = 5000;
+  // Bumped from 1 s / 5 s — the per-second cadence was eating most of the
+  // server's threadpool and starving page navigations on the single-process
+  // built-in WSGI runtime. 3 s during an active run is still well inside
+  // human "live feel"; 15 s idle catches up immediately on visibilitychange.
+  const LIVE_TRACKING_INTERVAL_MS = 3000;
+  const IDLE_TRACKING_INTERVAL_MS = 15000;
   const ACTIVE_RUN_STATUSES = ["running", "submitted", "pending", "waiting", "configuring"];
   const THEME_STORAGE_KEY = "ml-speech-diarization-theme";
   const AUDIO_CACHE_DB_NAME = "ml-speech-audio-cache";
@@ -3512,6 +3516,51 @@
     const selectedModelKey = diarization.selectedModelKey || preferences.default_diarization_model_key || preferences.default_backend || "nemo";
     const [folderFilter, setFolderFilter] = React.useState("all");
     const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    // Selected audio names live in React state so the picker survives folder
+    // filters + row-limit slicing. Without this, switching the filter dropped
+    // un-rendered checkboxes from the DOM and the form silently submitted
+    // only the currently visible selections — exactly the "I picked 3 and
+    // only 1 ran" symptom. Hidden inputs below carry the full set into the
+    // form post regardless of what's currently rendered.
+    const [selectedAudio, setSelectedAudio] = React.useState(() => new Set());
+    const toggleSelectedAudio = React.useCallback((name, checked) => {
+      setSelectedAudio((previous) => {
+        const next = new Set(previous);
+        if (checked) next.add(name); else next.delete(name);
+        return next;
+      });
+    }, []);
+    // Model picker is rendered as a horizontally-scrollable chip strip
+    // (see diarization-model-strip CSS) so long fine-tuned labels stay
+    // fully visible and the user scrolls right-to-left to browse the rest
+    // instead of fighting a vertical multi-select.
+    const modelOptionList = React.useMemo(() => diarizationModelOptions(), []);
+    const [selectedModelKeys, setSelectedModelKeys] = React.useState(() => {
+      const initial = new Set();
+      const seed = selectedModelKey ? [selectedModelKey] : [];
+      for (const key of seed) {
+        if (modelOptionList.some((option) => option.key === key)) {
+          initial.add(key);
+        }
+      }
+      if (!initial.size && modelOptionList.length) {
+        initial.add(modelOptionList[0].key);
+      }
+      return initial;
+    });
+    const toggleModelKey = React.useCallback((key) => {
+      setSelectedModelKeys((previous) => {
+        const next = new Set(previous);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        return next;
+      });
+    }, []);
+    const setAllModelKeys = React.useCallback(() => {
+      setSelectedModelKeys(new Set(modelOptionList.map((option) => option.key)));
+    }, [modelOptionList]);
+    const clearModelKeys = React.useCallback(() => {
+      setSelectedModelKeys(new Set());
+    }, []);
     const sortedFiles = React.useMemo(
       () => sortFileRowsByFolder(files, fileViewFolderLabel, (row) => row.fileName || row.name),
       [files]
@@ -3545,33 +3594,96 @@
         h(
           "form",
           { method: "post", action: routes.runDiarization, "data-loading-message": "Submitting diarization job to Slurm..." },
+          // Diarization models picker lives on its own row so the chip
+          // strip gets the full panel width. When chips total wider than
+          // the panel, the strip scrolls horizontally; chip text is never
+          // truncated. Squeezing it into the 1/3 grid below caused the
+          // long fine-tuned labels to overlap the next column.
           h(
-            "div",
-            { className: "inline-3" },
+            Field,
+            {
+              id: "diarization_model_keys",
+              label: "Diarization models",
+              note: "Click a chip to toggle. Strip scrolls horizontally for long fine-tuned names. Each selected model launches its own run; sibling runs share a batch id.",
+            },
+            Array.from(selectedModelKeys).map((key) =>
+              h("input", { key: `mk-${key}`, type: "hidden", name: "diarization_model_keys", value: key, readOnly: true })
+            ),
             h(
-              Field,
+              "div",
               {
                 id: "diarization_model_keys",
-                label: "Diarization models",
-                note: "Hold Ctrl or Shift to multi-select. Each selected model launches its own run; sibling runs share a batch id.",
-              },
-              h(
-                SelectInput,
-                {
-                  id: "diarization_model_keys",
-                  name: "diarization_model_keys",
-                  defaultValue: [selectedModelKey],
-                  extra: { multiple: true, size: Math.min(8, Math.max(3, diarizationModelOptions().length)) },
+                className: "diarization-model-strip",
+                role: "listbox",
+                "aria-label": "Diarization models",
+                "aria-multiselectable": "true",
+                style: {
+                  display: "flex",
+                  flexDirection: "row",
+                  flexWrap: "nowrap",
+                  gap: "0.5rem",
+                  overflowX: "auto",
+                  overflowY: "hidden",
+                  padding: "0.5rem 0.25rem",
+                  width: "100%",
+                  maxWidth: "100%",
+                  minWidth: 0,
+                  boxSizing: "border-box",
+                  scrollSnapType: "x proximity",
+                  WebkitOverflowScrolling: "touch",
                 },
-                diarizationModelChoiceOptions()
-              ),
-              h(
-                "div",
-                { className: "selection-toolbar compact-toolbar" },
-                h("button", { className: "secondary", type: "button", "data-multiselect-target": "diarization_model_keys", "data-multiselect-mode": "all" }, "All models"),
-                h("button", { className: "ghost", type: "button", "data-multiselect-target": "diarization_model_keys", "data-multiselect-mode": "none" }, "Clear")
-              )
+              },
+              modelOptionList.length
+                ? modelOptionList.map((option) => {
+                    const checked = selectedModelKeys.has(option.key);
+                    return h(
+                      "button",
+                      {
+                        key: option.key,
+                        type: "button",
+                        role: "option",
+                        "aria-selected": checked ? "true" : "false",
+                        className: `diarization-model-chip${checked ? " is-selected" : ""}`,
+                        title: option.description || option.label || option.key,
+                        onClick: () => toggleModelKey(option.key),
+                        style: {
+                          flex: "0 0 auto",
+                          scrollSnapAlign: "start",
+                          whiteSpace: "nowrap",
+                          padding: "0.55rem 0.95rem",
+                          borderRadius: "999px",
+                          border: checked
+                            ? "1px solid var(--accent, #2b7cff)"
+                            : "1px solid var(--border, rgba(127,127,127,0.4))",
+                          background: checked
+                            ? "var(--accent-soft, rgba(43,124,255,0.16))"
+                            : "transparent",
+                          color: "inherit",
+                          cursor: "pointer",
+                          fontWeight: checked ? "600" : "400",
+                          lineHeight: "1.2",
+                        },
+                      },
+                      option.label || option.key
+                    );
+                  })
+                : h("p", { className: "field-status" }, "No diarization models registered yet.")
             ),
+            h(
+              "div",
+              { className: "selection-toolbar compact-toolbar" },
+              h("button", { className: "secondary", type: "button", onClick: setAllModelKeys }, "All models"),
+              h("button", { className: "ghost", type: "button", onClick: clearModelKeys }, "Clear"),
+              h(
+                "span",
+                { className: "field-status" },
+                `${selectedModelKeys.size} of ${modelOptionList.length} selected`
+              )
+            )
+          ),
+          h(
+            "div",
+            { className: "inline-2" },
             h(Field, { id: "diarization_whisper_model", label: "Speech-to-text model" }, h(TextInput, { id: "diarization_whisper_model", defaultValue: preferences.whisper_model || "" })),
             h(Field, { id: "diarization_language", label: "Language hint", note: "Optional. Leave blank when you are unsure." }, h(TextInput, { id: "diarization_language", placeholder: "example: en" }))
           ),
@@ -3593,7 +3705,13 @@
               onLimitChange: setRowLimit,
             })
           ),
-          h(DataTable, { className: "compact-table diarization-audio-table dense-file-table file-view-table", headers: ["Select", "#", "Selected Model Status", "Audio File", "Folder", "Model Coverage", "Last Result"], rows: renderedFiles, emptyText: h("div", { className: "empty-state" }, h("strong", null, files.length ? "No audio files match this folder." : "No audio files to diarize yet."), files.length ? "Choose another folder or switch back to All folders." : "Upload audio in Media Library or convert a YouTube URL first; this tracker fills in once files land in audio_in/."), renderRow: (row, index) => h("tr", { key: row.name }, h("td", null, h("input", { type: "checkbox", name: "selected_audio", value: row.name, "data-check-group": "diarization-audio", "data-ready": row.selection_ready || "yes", "data-ready-by-model": row.selectionByModelJson || JSON.stringify(row.selectionByModel || {}) })), h("td", null, row.index || index + 1), h("td", null, h("span", { className: `queue-state ${row.state_class || "ready"}` }, row.queue_state || "ready"), h("p", { className: "row-note" }, row.targetModelLabel || row.targetBackendLabel || row.targetBackend || "selected model")), h("td", { title: row.name }, h("strong", { className: "file-name" }, row.fileName || row.name), row.name !== (row.fileName || row.name) ? h("p", { className: "row-note" }, row.name) : null), h("td", null, fileViewFolderLabel(row)), h("td", null, h(ModelCoverage, { statuses: row.modelStatuses || [] })), h("td", null, h("span", { className: "detail-text" }, row.detail || "No previous run."), row.lastRun ? h("p", { className: "row-note" }, row.lastRun) : null)) }),
+          // Hidden inputs carry the full selection (incl. rows currently
+          // hidden by folder filter / row-limit slicing) so the form post
+          // contains every checked file, not just the ones React rendered.
+          Array.from(selectedAudio).map((name) =>
+            h("input", { key: `sel-${name}`, type: "hidden", name: "selected_audio", value: name, readOnly: true })
+          ),
+          h(DataTable, { className: "compact-table diarization-audio-table dense-file-table file-view-table", headers: ["Select", "#", "Selected Model Status", "Audio File", "Folder", "Model Coverage", "Last Result"], rows: renderedFiles, emptyText: h("div", { className: "empty-state" }, h("strong", null, files.length ? "No audio files match this folder." : "No audio files to diarize yet."), files.length ? "Choose another folder or switch back to All folders." : "Upload audio in Media Library or convert a YouTube URL first; this tracker fills in once files land in audio_in/."), renderRow: (row, index) => h("tr", { key: row.name }, h("td", null, h("input", { type: "checkbox", checked: selectedAudio.has(row.name), onChange: (event) => toggleSelectedAudio(row.name, event.target.checked), "data-check-group": "diarization-audio", "data-audio-name": row.name, "data-ready": row.selection_ready || "yes", "data-ready-by-model": row.selectionByModelJson || JSON.stringify(row.selectionByModel || {}) })), h("td", null, row.index || index + 1), h("td", null, h("span", { className: `queue-state ${row.state_class || "ready"}` }, row.queue_state || "ready"), h("p", { className: "row-note" }, row.targetModelLabel || row.targetBackendLabel || row.targetBackend || "selected model")), h("td", { title: row.name }, h("strong", { className: "file-name" }, row.fileName || row.name), row.name !== (row.fileName || row.name) ? h("p", { className: "row-note" }, row.name) : null), h("td", null, fileViewFolderLabel(row)), h("td", null, h(ModelCoverage, { statuses: row.modelStatuses || [] })), h("td", null, h("span", { className: "detail-text" }, row.detail || "No previous run."), row.lastRun ? h("p", { className: "row-note" }, row.lastRun) : null)) }),
           h("p", { className: "field-status" }, h("span", { "data-selection-count": "diarization-audio" }, "0"), " file(s) selected for the next diarization run. ", h(RuntimeEstimateBadge, { group: "diarization-audio", backend: (selectedModelKey || "nemo").split("/")[0] })),
           h("div", { className: "button-row" }, h("button", { type: "submit", name: "diarization_mode", value: "selected", "data-loading-message": "Submitting selected files to Slurm...", "data-selection-submit": "diarization-audio" }, "Run selected"), h("button", { className: "secondary", type: "submit", name: "diarization_mode", value: "all", "data-loading-message": "Submitting the full library to Slurm..." }, "Run all"))
         )
@@ -6624,6 +6742,43 @@
     if (submitter && submitter.name) {
       formData.set(submitter.name, submitter.value || "");
     }
+    // Training-label saves run inline: re-navigating to the redirect target
+    // forces the browser to reload the labeling page, which re-mounts the
+    // <audio> element and re-pulls the 70+ MB WAV every time the user clicks
+    // Save Draft. Submit via fetch with the autosave flag so the server
+    // returns a JSON ack instead of a 303, and stay on the page so the audio
+    // session is preserved. Other replace-submit forms (uploads, etc.) still
+    // navigate to their result page.
+    const isTrainingLabelSave = form.hasAttribute("data-training-label-editor");
+    if (isTrainingLabelSave && method === "POST") {
+      // ``label_auto_save=1`` flips the success path to a JSON ack instead of
+      // a 303 redirect, so the page (and the audio element) stays put.
+      // Validation failures still redirect with an error message; in that
+      // case we DO follow the navigation so the user sees what went wrong.
+      formData.set("label_auto_save", "1");
+      return window
+        .fetch(action, {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+          redirect: "follow",
+          headers: { Accept: "application/json,text/html,*/*" },
+        })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Form submit failed with ${response.status}`);
+          }
+          const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
+          if (contentType.includes("application/json")) {
+            return response.text().then(() => undefined);
+          }
+          // HTML means the server sent a redirect with a notification
+          // (validation error or legacy fallback). Navigate so the user
+          // sees the error banner.
+          window.location.replace(response.url || action);
+          return undefined;
+        });
+    }
     return window
       .fetch(action, {
         method,
@@ -7050,12 +7205,22 @@
             if (!(box instanceof HTMLInputElement)) {
               return;
             }
+            let nextChecked;
             if (mode === "none") {
-              box.checked = false;
+              nextChecked = false;
             } else if (mode === "ready") {
-              box.checked = readyValueForSelection(box, activeSelection) === "yes";
+              nextChecked = readyValueForSelection(box, activeSelection) === "yes";
             } else {
-              box.checked = true;
+              nextChecked = true;
+            }
+            if (box.checked !== nextChecked) {
+              box.checked = nextChecked;
+              // React-controlled checkboxes track their state in component
+              // state, not on the DOM node. Programmatic .checked writes
+              // bypass React, so the visible UI updates but the underlying
+              // selection set doesn't. Dispatching a native change event
+              // makes React's onChange fire and sync the state.
+              box.dispatchEvent(new Event("change", { bubbles: true }));
             }
           });
           updateSelectionCounter(group, scope);

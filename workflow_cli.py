@@ -499,25 +499,35 @@ def iter_audio_files(audio_dir: Path) -> list[Path]:
     if not audio_dir.is_dir():
         return []
     resolved_audio_dir = audio_dir.resolve()
+    audio_suffixes = {
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".flac",
+        ".ogg",
+        ".opus",
+        ".aac",
+        ".wma",
+        ".mp4",
+        ".mkv",
+        ".webm",
+    }
+
+    # KaggleBabyNoises (and any future corpus drop) can contain filenames that
+    # exceed the filesystem path limit. A single ENAMETOOLONG from is_file()
+    # would otherwise abort the whole walk and break every page that calls us
+    # (training labels save, fine-tune picker, media library...). Skip the
+    # offending entry and keep going so the rest of the inventory still lists.
+    def _is_audio_file(path: Path) -> bool:
+        try:
+            if not path.is_file():
+                return False
+        except OSError:
+            return False
+        return path.suffix.lower() in audio_suffixes and "_whisper_input" not in path.stem
+
     return sorted(
-        (
-            path
-            for path in resolved_audio_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in {
-                ".wav",
-                ".mp3",
-                ".m4a",
-                ".flac",
-                ".ogg",
-                ".opus",
-                ".aac",
-                ".wma",
-                ".mp4",
-                ".mkv",
-                ".webm",
-            }
-            and "_whisper_input" not in path.stem
-        ),
+        (path for path in resolved_audio_dir.rglob("*") if _is_audio_file(path)),
         key=lambda item: str(item.relative_to(resolved_audio_dir)).lower(),
     )
 
