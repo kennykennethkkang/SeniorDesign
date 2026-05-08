@@ -2195,8 +2195,15 @@ class WorkflowWebTests(unittest.TestCase):
             output_dir.mkdir(parents=True)
             (root / "job_outputs").mkdir()
             (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            (audio_dir / "002_unlabeled.wav").write_bytes(wav_bytes())
             (label_dir / "001_clip.rttm").write_text(
                 "SPEAKER 001_clip 1 0.000 0.500 <NA> <NA> speaker_0 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+            project_rttm = root / "fine_tuning" / "projects" / "pyannote" / "other" / "rttm"
+            project_rttm.mkdir(parents=True)
+            (project_rttm / "002_unlabeled.rttm").write_text(
+                "SPEAKER 002_unlabeled 1 0.000 0.500 <NA> <NA> speaker_0 <NA> <NA>\n",
                 encoding="utf-8",
             )
             (output_dir / "001_clip.txt").write_text("short transcript\n", encoding="utf-8")
@@ -2207,20 +2214,84 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(status, "200 OK")
             self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
             context = page_state(body)["context"]
-            self.assertEqual(context["trainingLabels"]["summary"]["total"], 1)
-            self.assertEqual(context["trainingLabels"]["rows"][0]["status"], "not_started")
-            self.assertEqual(
-                [row["path"] for row in context["trainingSources"]["audioFiles"]],
-                ["audio_in/001_clip.wav"],
-            )
-            self.assertEqual(
-                [row["path"] for row in context["trainingSources"]["rttmFiles"]],
-                ["fine_tuning/label_work/001_clip.rttm"],
-            )
+            self.assertEqual(context["trainingLabels"]["summary"]["total"], 2)
+            self.assertEqual(context["trainingLabels"]["summary"]["completed"], 1)
+            self.assertEqual(context["trainingLabels"]["summary"]["not_started"], 1)
+            # /fine-tuning intentionally ships an empty rows array — the row
+            # list is only rendered on /training-labels, so we keep the state
+            # blob lean here.
+            self.assertEqual(context["trainingLabels"]["rows"], [])
+            # Strict picker: only audio with a completed-label record in
+            # label_status.json shows up. 001_clip has a label_work draft but
+            # no completed record, so neither audio appears here even though
+            # the training-labels page still shows 001_clip via synthetic
+            # display rules.
+            self.assertEqual(context["trainingSources"]["audioFiles"], [])
+            self.assertEqual(context["trainingSources"]["rttmFiles"], [])
             self.assertEqual(
                 [row["path"] for row in context["trainingSources"]["transcriptFiles"]],
                 ["outputs/diarization_runs/pyannote/run-01/001_clip.txt"],
             )
+
+    def test_fine_tuning_page_uses_flattened_label_work_for_nested_audio(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            audio_dir = root / "audio_in" / "calls" / "session-a"
+            label_dir = root / "fine_tuning" / "label_work"
+            audio_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (audio_dir / "001_clip.wav").write_bytes(wav_bytes())
+            (audio_dir / "002_clip.wav").write_bytes(wav_bytes())
+            (label_dir / "calls__session-a__001_clip.rttm").write_text(
+                "SPEAKER calls__session-a__001_clip 1 0.000 0.500 <NA> <NA> speaker_0 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+            (label_dir / "002_clip.rttm").write_text(
+                "SPEAKER 002_clip 1 0.000 0.500 <NA> <NA> speaker_0 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            status, _, body = run_wsgi(app, method="GET", path="/fine-tuning")
+
+            self.assertEqual(status, "200 OK")
+            context = page_state(body)["context"]
+            # Strict picker: label_work drafts alone are not enough — without
+            # a completed-label record in label_status.json, nothing appears.
+            self.assertEqual(context["trainingSources"]["audioFiles"], [])
+            self.assertEqual(context["trainingSources"]["rttmFiles"], [])
+
+    def test_fine_tuning_page_treats_stitched_sidecar_rttm_as_completed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            stitched_media = root / "audio_in" / "audioStitching" / "run-01"
+            stitched_media.mkdir(parents=True)
+            (root / "job_outputs").mkdir()
+            (stitched_media / "001_synthetic.wav").write_bytes(wav_bytes())
+            (stitched_media / "synthetic.rttm").write_text(
+                "SPEAKER synthetic 1 0.000 0.500 <NA> <NA> speaker_0 <NA> <NA>\n",
+                encoding="utf-8",
+            )
+
+            app = workflow_web.WorkflowWebApp(root=root)
+            status, _, body = run_wsgi(app, method="GET", path="/fine-tuning")
+
+            self.assertEqual(status, "200 OK")
+            context = page_state(body)["context"]
+            # Strict picker: a raw stitched sidecar without a completed-label
+            # record is excluded. Real stitched runs flow through
+            # mirror_stitched_into_media which writes the record; this test
+            # bypasses that by dropping files directly.
+            self.assertEqual(context["trainingSources"]["audioFiles"], [])
+            self.assertEqual(context["trainingSources"]["rttmFiles"], [])
+
+            status, _, body = run_wsgi(app, method="GET", path="/training-labels")
+            self.assertEqual(status, "200 OK")
+            label_context = page_state(body)["context"]["trainingLabels"]
+            self.assertEqual(label_context["summary"]["completed"], 1)
+            self.assertEqual(label_context["rows"][0]["status"], "completed")
+            self.assertEqual(label_context["rows"][0]["source"], "audio_stitching")
 
     def test_training_labels_page_lists_uploaded_audio(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2359,10 +2430,22 @@ class WorkflowWebTests(unittest.TestCase):
 
             status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path="/fine-tuning")
             self.assertEqual(status, "200 OK")
-            project = page_state(body)["context"]["projects"][0]
+            fine_tuning_context = page_state(body)["context"]
+            project = fine_tuning_context["projects"][0]
             self.assertEqual(project["backend"], "pyannote")
             self.assertEqual(project["slug"], "speaker-lab")
             self.assertEqual(project["sampleCount"], 1)
+            self.assertEqual(
+                [row["path"] for row in fine_tuning_context["trainingSources"]["audioFiles"]],
+                ["audio_in/001_clip.wav"],
+            )
+            # Strict picker uses the recorded completed-label RTTM, which
+            # for a fresh training-label save lands in the project's rttm/
+            # folder (the label_work copy is just an intermediate draft).
+            self.assertEqual(
+                [row["path"] for row in fine_tuning_context["trainingSources"]["rttmFiles"]],
+                ["fine_tuning/projects/pyannote/speaker-lab/rttm/001_clip.rttm"],
+            )
 
             status, _, body = run_wsgi(workflow_web.WorkflowWebApp(root=root), method="GET", path="/training-labels")
             self.assertEqual(status, "200 OK")
@@ -3660,6 +3743,8 @@ class WorkflowWebTests(unittest.TestCase):
             )
             model_path = project_dir / "artifacts" / "experiments" / "checkpoints" / "final.nemo"
             model_path.write_text("nemo-model\n", encoding="utf-8")
+            raw_ckpt_path = project_dir / "artifacts" / "experiments" / "checkpoints" / "newer.ckpt"
+            raw_ckpt_path.write_text("lightning-checkpoint\n", encoding="utf-8")
 
             captured = {}
             original = workflow_web.submit_sbatch_job

@@ -1,1 +1,0 @@
-run_bulk_diarization.sbatch

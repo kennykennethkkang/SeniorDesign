@@ -1240,26 +1240,48 @@
     });
   }
 
+  // Wait for the txn to commit (oncomplete) before resolving — a parallel
+  // write that aborts can still take this read down with it, and we don't
+  // want to hand back data that never actually persisted.
   function audioCacheRead(db, key) {
     return new Promise((resolve) => {
       try {
         const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
         const request = tx.objectStore(AUDIO_CACHE_STORE).get(key);
-        request.onsuccess = () => resolve(request.result || null);
-        request.onerror = () => resolve(null);
+        let result = null;
+        request.onsuccess = () => {
+          result = request.result || null;
+        };
+        request.onerror = () => {
+          result = null;
+        };
+        tx.oncomplete = () => resolve(result);
+        tx.onerror = () => resolve(null);
+        tx.onabort = () => resolve(null);
       } catch (_error) {
         resolve(null);
       }
     });
   }
 
+  // Same idea on writes — wait for tx.oncomplete. Resolving on request.onsuccess
+  // let aborted transactions look successful, so "Cache All Audio" silently
+  // dropped writes and reported 0 cached on the next run.
   function audioCacheWrite(db, key, value) {
     return new Promise((resolve) => {
       try {
         const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
         const request = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
-        request.onsuccess = () => resolve(true);
-        request.onerror = () => resolve(false);
+        let putOk = false;
+        request.onsuccess = () => {
+          putOk = true;
+        };
+        request.onerror = () => {
+          putOk = false;
+        };
+        tx.oncomplete = () => resolve(putOk);
+        tx.onerror = () => resolve(false);
+        tx.onabort = () => resolve(false);
       } catch (_error) {
         resolve(false);
       }
@@ -1542,6 +1564,38 @@
     // to announce them correctly. The h2 inside the head supplies the label;
     // we reference it by a stable id derived from the dialog id.
     const titleId = `${id}-title`;
+    // Lazy-render the body. Diarization tables and training-label tables put a
+    // dialog under every row; without this the page eagerly mounts hundreds of
+    // ArtifactPreviewBrowsers / TrainingLabelDialog forms on first load — each
+    // one firing its own /api/artifact-preview fetch the second it mounts.
+    // We only build the body once the dialog has actually been shown; after
+    // that we keep it mounted so re-opens are instant.
+    const dialogRef = React.useRef(null);
+    const [hasOpened, setHasOpened] = React.useState(false);
+    React.useEffect(() => {
+      const node = dialogRef.current;
+      if (!node) {
+        return undefined;
+      }
+      if (node.open) {
+        setHasOpened(true);
+        return undefined;
+      }
+      if (typeof MutationObserver !== "function") {
+        // Old browsers we don't really expect — render eagerly so nothing
+        // breaks.
+        setHasOpened(true);
+        return undefined;
+      }
+      const observer = new MutationObserver(() => {
+        if (node.open) {
+          setHasOpened(true);
+          observer.disconnect();
+        }
+      });
+      observer.observe(node, { attributes: true, attributeFilter: ["open"] });
+      return () => observer.disconnect();
+    }, []);
     return h(
       "dialog",
       {
@@ -1549,6 +1603,7 @@
         className: "dashboard-dialog",
         "aria-modal": "true",
         "aria-labelledby": titleId,
+        ref: dialogRef,
       },
       h(
         "div",
@@ -1568,7 +1623,7 @@
             "Close"
           )
         ),
-        children
+        hasOpened ? children : null
       )
     );
   }
@@ -2777,8 +2832,7 @@
         { className: "panel" },
         h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Stitched Outputs"), h("p", null, "Open Inspect to verify segment start/end times against the stitched WAV and review page."))),
         h(StitchedRunsTable, { rows: stitchedRows })
-      ),
-      h(ClusterQueuePanel, { title: "Cluster Queue" })
+      )
     );
   }
 
@@ -3340,8 +3394,7 @@
           h("div", { className: "button-row" }, h("button", { type: "submit", name: "youtube_mode", value: "selected", "data-selection-submit": "youtube-queue" }, "Convert selected"), h("button", { className: "secondary", type: "submit", name: "youtube_mode", value: "all" }, "Convert all"))
         )
       ),
-      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "More Details"), h("p", null, "Open logs, history, and queue exceptions only when needed."))), h("div", { className: "button-row" }, h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-run-dialog" }, "Latest run"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-history-dialog" }, "History"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-issues-dialog" }, "Queue issues")), h(Dialog, { id: "youtube-run-dialog", title: "Latest Audio Conversion Run", detail: "Newest result counts, artifact files, and log previews." }, h(YoutubeRunPanel, { latestRun })), h(Dialog, { id: "youtube-history-dialog", title: "Recent Conversion History", detail: "Confirm whether a link already produced audio or needs another attempt." }, h(DataTable, { headers: ["Status", "Title / Video", "Audio File", "Note", "Last Attempt"], rows: youtube.history || [], emptyText: "No conversion history yet.", renderRow: (row, index) => h("tr", { key: `${row.title}-${index}` }, h("td", null, row.status), h("td", null, row.title), h("td", null, row.audioHref ? h("a", { href: row.audioHref }, row.audioFile || "Open audio") : row.audioFile), h("td", null, row.note), h("td", null, row.lastAttempt)) })), h(Dialog, { id: "youtube-issues-dialog", title: "Queue Issues", detail: "Retryable downloader errors stay available. No-data links are separated." }, h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.retryRows || [], emptyText: "No retry-needed URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "kept"), h("td", null, row.when)) }), h("h3", null, "URLs With No Public Audio Data"), h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.noDataRows || [], emptyText: "No no-data URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "removed"), h("td", null, row.when)) }))),
-      h(ClusterQueuePanel, { title: "Cluster Queue" })
+      h("article", { className: "panel" }, h("div", { className: "panel-head" }, h("div", null, h("h2", null, "More Details"), h("p", null, "Open logs, history, and queue exceptions only when needed."))), h("div", { className: "button-row" }, h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-run-dialog" }, "Latest run"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-history-dialog" }, "History"), h("button", { className: "secondary", type: "button", "data-open-dialog": "youtube-issues-dialog" }, "Queue issues")), h(Dialog, { id: "youtube-run-dialog", title: "Latest Audio Conversion Run", detail: "Newest result counts, artifact files, and log previews." }, h(YoutubeRunPanel, { latestRun })), h(Dialog, { id: "youtube-history-dialog", title: "Recent Conversion History", detail: "Confirm whether a link already produced audio or needs another attempt." }, h(DataTable, { headers: ["Status", "Title / Video", "Audio File", "Note", "Last Attempt"], rows: youtube.history || [], emptyText: "No conversion history yet.", renderRow: (row, index) => h("tr", { key: `${row.title}-${index}` }, h("td", null, row.status), h("td", null, row.title), h("td", null, row.audioHref ? h("a", { href: row.audioHref }, row.audioFile || "Open audio") : row.audioFile), h("td", null, row.note), h("td", null, row.lastAttempt)) })), h(Dialog, { id: "youtube-issues-dialog", title: "Queue Issues", detail: "Retryable downloader errors stay available. No-data links are separated." }, h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.retryRows || [], emptyText: "No retry-needed URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "kept"), h("td", null, row.when)) }), h("h3", null, "URLs With No Public Audio Data"), h(DataTable, { headers: ["URL", "Summary", "Queue Result", "Last Attempt"], rows: youtube.noDataRows || [], emptyText: "No no-data URLs are recorded right now.", renderRow: (row, index) => h("tr", { key: `${row.url}-${index}` }, h("td", null, row.url), h("td", null, row.summary), h("td", null, row.queue_result || "removed"), h("td", null, row.when)) })))
     );
   }
 
@@ -4919,6 +4972,68 @@
     );
   }
 
+  // Tiny SVG sparkline + summary row for the per-run val_loss series. The
+  // points come straight from the parsed pyannote .out file, so this draws
+  // whatever the trainer has emitted so far — empty until the first
+  // validation epoch lands, then updated by the regular polling loop.
+  function RunValLossSpark({ run }) {
+    const points = Array.isArray(run?.valLoss) ? run.valLoss : [];
+    if (!points.length) {
+      return null;
+    }
+    const values = points
+      .map((point) => Number(point && point.val_loss))
+      .filter((value) => Number.isFinite(value));
+    if (!values.length) {
+      return null;
+    }
+    const minVal = Math.min(...values);
+    const maxVal = Math.max(...values);
+    const span = maxVal - minVal || 1;
+    const width = 140;
+    const height = 28;
+    const pad = 1.5;
+    const stepX = values.length > 1 ? (width - pad * 2) / (values.length - 1) : 0;
+    const polyline = values
+      .map((value, index) => {
+        const x = pad + index * stepX;
+        const y = height - pad - ((value - minVal) / span) * (height - pad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    const last = points[points.length - 1] || {};
+    const epochsSeen = new Set();
+    points.forEach((point) => {
+      const epoch = Number(point && point.epoch);
+      if (Number.isFinite(epoch)) {
+        epochsSeen.add(epoch);
+      }
+    });
+    const latestText = `epoch ${last.epoch || "?"}/${last.max_epochs || "?"}: ${formatNumber(values[values.length - 1], 4)}`;
+    const minText = `min ${formatNumber(minVal, 4)}`;
+    return h(
+      "div",
+      { className: "run-val-loss" },
+      h(
+        "svg",
+        {
+          className: "run-val-loss-spark",
+          width,
+          height,
+          viewBox: `0 0 ${width} ${height}`,
+          role: "img",
+          "aria-label": `val_loss across ${values.length} validation point(s)`,
+        },
+        h("polyline", { points: polyline, fill: "none", stroke: "currentColor", strokeWidth: 1.4 })
+      ),
+      h(
+        "span",
+        { className: "row-note" },
+        ` val_loss · ${latestText} · ${minText} · ${epochsSeen.size} epoch(s) · ${values.length} pts`
+      )
+    );
+  }
+
   function FineTuneProjectCard({ project }) {
     const metrics = project.metrics || {};
     const splitText =
@@ -5043,7 +5158,8 @@
                             )
                           : null
                       )
-                    : null
+                    : null,
+                  h(RunValLossSpark, { run })
                 );
               })
             )
@@ -5249,8 +5365,7 @@
           h("p", null, h("strong", null, "Absolute DER reduction: "), absoluteReduction === null ? "n/a" : `${formatNumber(absoluteReduction, 2)} points`),
           h("p", null, h("strong", null, "Relative DER reduction: "), relativeReduction === null ? "n/a" : formatPercent(relativeReduction, 2))
         )
-      ),
-      h(ClusterQueuePanel, { title: "Cluster Queue" })
+      )
     );
   }
 
@@ -5296,10 +5411,11 @@
       });
       return initial;
     });
-    const [selectedAudio, setSelectedAudio] = React.useState(() => new Set());
     const [fileFilter, setFileFilter] = React.useState("");
     const [folderFilter, setFolderFilter] = React.useState("all");
-    const [hideUnavailable, setHideUnavailable] = React.useState(false);
+    // Default off because the matched list is the headline output now;
+    // toggling this on is for "what's missing diarization?" debugging.
+    const [showSkipped, setShowSkipped] = React.useState(false);
     const [status, setStatus] = React.useState({ state: "idle", error: "", payload: null });
 
     const usingLabelsReference = referenceSource === "labels";
@@ -5338,7 +5454,6 @@
 
     const selectedModelRuns = eligibleModelRuns.filter((run) => selectedModelPaths.has(run.path));
     const referenceRunFiles = !usingLabelsReference && referenceRun ? new Set(referenceRun.audioFiles || []) : null;
-    const labelFileNames = new Set(evaluable.map((entry) => entry.name));
 
     // Candidate files = all completed-label audios (labels mode) OR every
     // audio that the reference run has an SRT for (model-as-reference mode).
@@ -5381,28 +5496,15 @@
 
     const matchesFolder = (entry) =>
       folderFilter === "all" || fileViewFolderLabel(entry) === folderFilter;
-    const matchesAvailability = (entry) =>
-      !hideUnavailable || entry.modelHits > 0;
 
     const visibleEntries = candidateEntries
       .filter(matchesFilter)
-      .filter(matchesFolder)
-      .filter(matchesAvailability);
+      .filter(matchesFolder);
     const availableCount = candidateEntries.filter((entry) => entry.modelHits > 0).length;
-
-    React.useEffect(() => {
-      // Clean up audio selections that no longer apply when the reference
-      // source / reference run / model picks change.
-      setSelectedAudio((current) => {
-        const allowed = new Set(candidateEntries.map((entry) => entry.name));
-        const next = new Set();
-        current.forEach((name) => {
-          if (allowed.has(name)) next.add(name);
-        });
-        return next;
-      });
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [referenceSource, referenceRunPath, selectedModelPaths.size]);
+    // Scoring auto-targets any matched file inside the active filter scope.
+    // The user picks reference + model(s) once and the panel does the
+    // pairing; no more checkbox-per-file ritual every time.
+    const scoreableInScope = visibleEntries.filter((entry) => entry.modelHits > 0);
 
     function toggleModel(path) {
       setSelectedModelPaths((current) => {
@@ -5424,32 +5526,6 @@
       setSelectedModelPaths(new Set());
     }
 
-    function toggleAudio(name) {
-      setSelectedAudio((current) => {
-        const next = new Set(current);
-        if (next.has(name)) {
-          next.delete(name);
-        } else {
-          next.add(name);
-        }
-        return next;
-      });
-    }
-
-    function selectAvailableAudio() {
-      setSelectedAudio((current) => {
-        const next = new Set(current);
-        visibleEntries.forEach((entry) => {
-          if (entry.modelHits > 0) next.add(entry.name);
-        });
-        return next;
-      });
-    }
-
-    function clearAudioSelection() {
-      setSelectedAudio(new Set());
-    }
-
     function runScoring() {
       if (!routes.fineTuneCompareRuns) {
         setStatus({ state: "error", error: "Compare endpoint isn't configured for this build.", payload: null });
@@ -5463,15 +5539,19 @@
         setStatus({ state: "error", error: "Pick at least one model run to compare against the reference.", payload: null });
         return;
       }
-      if (selectedAudio.size === 0) {
-        setStatus({ state: "error", error: "Pick at least one audio file to score.", payload: null });
+      if (scoreableInScope.length === 0) {
+        setStatus({
+          state: "error",
+          error: "No matched files in scope. Run diarization on these audios with the picked model(s) first, or widen the file/folder filter.",
+          payload: null,
+        });
         return;
       }
       const params = new URLSearchParams();
       params.set("reference_source", referenceSource);
       if (!usingLabelsReference) params.set("reference_run", referenceRunPath);
       Array.from(selectedModelPaths).forEach((path) => params.append("model", path));
-      Array.from(selectedAudio).forEach((name) => params.append("audio", name));
+      scoreableInScope.forEach((entry) => params.append("audio", entry.name));
       setStatus({ state: "loading", error: "", payload: null });
       window
         .fetch(`${routes.fineTuneCompareRuns}?${params.toString()}`, {
@@ -5810,7 +5890,12 @@
                       })
                 )
               ),
-              // ---- FILES section ----
+              // ---- MATCHES section ----
+              // The panel auto-pairs the reference with whatever each picked
+              // model has already diarized — no per-file checkbox needed.
+              // Rows are read-only so the user can verify the matches before
+              // hitting Score, and skipped-files can be expanded for a
+              // sanity check.
               h(
                 "section",
                 { className: "subpanel" },
@@ -5820,18 +5905,12 @@
                   h(
                     "div",
                     null,
-                    h("h3", null, "Files"),
+                    h("h3", null, "Matched files"),
                     h(
                       "p",
                       { className: "row-note" },
-                      `${selectedAudio.size} selected · ${availableCount} scorable · ${candidateEntries.length - availableCount} not in any picked run`
+                      `${scoreableInScope.length} ready to score in current filter · ${availableCount} matched in total · ${candidateEntries.length - availableCount} still need diarization on at least one picked model`
                     )
-                  ),
-                  h(
-                    "div",
-                    { className: "button-row" },
-                    h("button", { className: "secondary", type: "button", onClick: selectAvailableAudio }, "Select All Available"),
-                    h("button", { className: "ghost", type: "button", onClick: clearAudioSelection }, "Clear")
                   )
                 ),
                 // Hint banner: when none of the files in scope are present in
@@ -5841,7 +5920,7 @@
                   ? h(
                       "p",
                       { className: "field-status der-no-runs-hint" },
-                      "None of these files have been scored by the selected run(s). ",
+                      "None of these files have been diarized by the selected run(s). ",
                       h("a", { href: "/diarization" }, "Run diarization first"),
                       ", then come back."
                     )
@@ -5862,10 +5941,10 @@
                     { className: "checkbox-row compact-checkbox" },
                     h("input", {
                       type: "checkbox",
-                      checked: hideUnavailable,
-                      onChange: (event) => setHideUnavailable(event.target.checked),
+                      checked: showSkipped,
+                      onChange: (event) => setShowSkipped(event.target.checked),
                     }),
-                    " Hide files not in any selected run"
+                    " Show files still missing diarization"
                   )
                 ),
                 h(
@@ -5886,44 +5965,37 @@
                     ? h(
                         "li",
                         { className: "der-file-empty" },
-                        hideUnavailable && availableCount === 0
-                          ? "No files are scorable yet — uncheck the filter or run diarization on this folder first."
-                          : usingLabelsReference
-                            ? "No completed-label files match the current filters."
-                            : "No files match — pick a reference run with files and at least one comparison model."
+                        usingLabelsReference
+                          ? "No completed-label files match the current filters."
+                          : "No files match — pick a reference run with files and at least one comparison model."
                       )
-                    : visibleEntries.map((entry) => {
-                        const inReference = usingLabelsReference || (referenceRunFiles ? referenceRunFiles.has(entry.name) : false);
-                        const available = entry.modelHits > 0 && (usingLabelsReference || inReference);
-                        const checked = selectedAudio.has(entry.name);
-                        // One short status, color-coded. Goal: read the row in
-                        // a glance — green = scorable, amber = partial coverage
-                        // across compared models, red = blocked. The detailed
-                        // counts live in the panel header so we don't repeat
-                        // them on every row.
-                        let statusKind = "ok";
-                        let statusText = "Scorable";
-                        if (!available) {
-                          statusKind = "blocked";
-                          if (!inReference && !usingLabelsReference) statusText = "Not in reference";
-                          else if (usingLabelsReference && !labelFileNames.has(entry.name)) statusText = "No hand label";
-                          else statusText = "Not in any model";
-                        } else if (entry.modelTotal > 1 && entry.modelHits < entry.modelTotal) {
-                          statusKind = "partial";
-                          statusText = `${entry.modelHits}/${entry.modelTotal} models`;
-                        }
-                        return h(
-                          "li",
-                          { key: entry.name, className: classNames("der-file-row", !available && "is-missing", `der-file-row--${statusKind}`) },
-                          h(
-                            "label",
-                            { className: "checkbox-row" },
-                            h("input", { type: "checkbox", checked, disabled: !available, onChange: () => toggleAudio(entry.name) }),
-                            h("span", { className: "der-file-name" }, entry.fileName || entry.name),
-                            h("span", { className: classNames("der-file-status", `der-file-status--${statusKind}`) }, statusText)
-                          )
-                        );
-                      })
+                    : visibleEntries
+                        .filter((entry) => showSkipped || entry.modelHits > 0)
+                        .map((entry) => {
+                          const inReference = usingLabelsReference || (referenceRunFiles ? referenceRunFiles.has(entry.name) : false);
+                          const available = entry.modelHits > 0 && (usingLabelsReference || inReference);
+                          // Status colour-coded so coverage reads at a glance:
+                          // green = matched, amber = partial across multiple
+                          // compared models, red = blocked / needs diarization.
+                          let statusKind = "ok";
+                          let statusText = entry.modelTotal > 1 ? `${entry.modelHits}/${entry.modelTotal} models` : "Matched";
+                          if (!available) {
+                            statusKind = "blocked";
+                            statusText = !inReference && !usingLabelsReference ? "Not in reference" : "No diarization yet";
+                          } else if (entry.modelTotal > 1 && entry.modelHits < entry.modelTotal) {
+                            statusKind = "partial";
+                          }
+                          return h(
+                            "li",
+                            { key: entry.name, className: classNames("der-file-row", !available && "is-missing", `der-file-row--${statusKind}`) },
+                            h(
+                              "div",
+                              { className: "der-file-row-info" },
+                              h("span", { className: "der-file-name" }, entry.fileName || entry.name),
+                              h("span", { className: classNames("der-file-status", `der-file-status--${statusKind}`) }, statusText)
+                            )
+                          );
+                        })
                 )
               ),
               // ---- ACTION row ----
@@ -5932,12 +6004,17 @@
                 { className: "button-row" },
                 h(
                   "button",
-                  { className: "primary", type: "button", onClick: runScoring, disabled: status.state === "loading" },
+                  {
+                    className: "primary",
+                    type: "button",
+                    onClick: runScoring,
+                    disabled: status.state === "loading" || scoreableInScope.length === 0 || selectedModelPaths.size === 0,
+                  },
                   status.state === "loading"
                     ? "Scoring…"
                     : selectedModelPaths.size === 1
-                      ? "Calculate DER"
-                      : `Compare ${selectedModelPaths.size} Models`
+                      ? `Calculate DER (${scoreableInScope.length} file${scoreableInScope.length === 1 ? "" : "s"})`
+                      : `Compare ${selectedModelPaths.size} models (${scoreableInScope.length} file${scoreableInScope.length === 1 ? "" : "s"})`
                 ),
                 status.state === "error" ? h("span", { className: "form-status error" }, status.error) : null,
                 status.state === "success" ? h("span", { className: "form-status success" }, `Scored ${filesRows.length} file(s).`) : null
@@ -6106,8 +6183,7 @@
                 h("p", { className: "row-note" }, "Use the Training Workflow cards above to upload, prepare, and launch.")
               )
         )
-      ),
-      h(ClusterQueuePanel, { title: "Cluster Queue" })
+      )
     );
   }
 
@@ -6172,13 +6248,33 @@
     return box.getAttribute("data-ready") || "yes";
   }
 
+  // Same answer as closest("form"), but `node.form` is the native handle
+  // and skips the tree walk on every input/select/textarea we visit.
   function formIdentityForControl(node) {
     const form = node.form || node.closest("form");
+    return formIdentityForForm(form);
+  }
+
+  function formIdentityForForm(form) {
     return text(form?.getAttribute("data-form-key") || form?.id || form?.getAttribute("action") || "", "").trim();
   }
 
-  function formControlKey(node) {
-    const formKey = formIdentityForControl(node);
+  // Snapshot/restore call this once per control per refresh — memoize the
+  // per-form key so a page with hundreds of inputs doesn't pay it each time.
+  function formControlKey(node, formKeyCache) {
+    let formKey;
+    if (formKeyCache) {
+      const form = node.form || node.closest("form") || null;
+      const cached = form ? formKeyCache.get(form) : formKeyCache.get(null);
+      if (cached !== undefined) {
+        formKey = cached;
+      } else {
+        formKey = formIdentityForForm(form);
+        formKeyCache.set(form, formKey);
+      }
+    } else {
+      formKey = formIdentityForControl(node);
+    }
     if (node.id) {
       return `${formKey}:id:${node.id}`;
     }
@@ -6198,70 +6294,89 @@
     return `${formKey}:name:${name}`;
   }
 
+  // Grabs every control's value before a re-render so we can put it back
+  // afterward. Inner loop avoids forEach overhead and reuses the form-key
+  // memo since this fires on every poll fingerprint change.
   function snapshotFormState() {
     const snapshot = {};
-    document.querySelectorAll("input, select, textarea").forEach((node) => {
+    const formKeyCache = new Map();
+    const nodes = document.querySelectorAll("input, select, textarea");
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
       if (!(node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)) {
-        return;
+        continue;
       }
       if (node instanceof HTMLInputElement && node.type === "file") {
-        return;
+        continue;
       }
-      const key = formControlKey(node);
+      const key = formControlKey(node, formKeyCache);
       if (!key) {
-        return;
+        continue;
       }
       if (node instanceof HTMLInputElement && (node.type === "checkbox" || node.type === "radio")) {
         snapshot[key] = { checked: node.checked };
-        return;
+        continue;
       }
       if (node instanceof HTMLSelectElement && node.multiple) {
         snapshot[key] = {
           values: Array.from(node.selectedOptions || []).map((option) => option.value),
         };
-        return;
+        continue;
       }
       snapshot[key] = { value: node.value };
-    });
+    }
     return snapshot;
   }
 
+  // Pair of snapshotFormState — pushes saved values back into the new DOM
+  // after React reconciles. Same memo trick to keep the hot path quiet.
   function restoreFormState(snapshot) {
     if (!snapshot) {
       return;
     }
-    document.querySelectorAll("input, select, textarea").forEach((node) => {
+    const formKeyCache = new Map();
+    const nodes = document.querySelectorAll("input, select, textarea");
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
       if (!(node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)) {
-        return;
+        continue;
       }
       if (node instanceof HTMLInputElement && node.type === "file") {
-        return;
+        continue;
       }
-      const saved = snapshot[formControlKey(node)];
+      const saved = snapshot[formControlKey(node, formKeyCache)];
       if (!saved) {
-        return;
+        continue;
       }
       if (node instanceof HTMLInputElement && (node.type === "checkbox" || node.type === "radio")) {
         node.checked = Boolean(saved.checked);
-        return;
+        continue;
       }
       if (node instanceof HTMLSelectElement && node.multiple) {
         const selectedValues = new Set(saved.values || []);
-        Array.from(node.options || []).forEach((option) => {
-          option.selected = selectedValues.has(option.value);
-        });
-        return;
+        const options = node.options || [];
+        for (let j = 0; j < options.length; j += 1) {
+          options[j].selected = selectedValues.has(options[j].value);
+        }
+        continue;
       }
       if (Object.prototype.hasOwnProperty.call(saved, "value")) {
         if (node instanceof HTMLSelectElement) {
-          const hasOption = Array.from(node.options || []).some((option) => option.value === saved.value);
+          let hasOption = false;
+          const options = node.options || [];
+          for (let j = 0; j < options.length; j += 1) {
+            if (options[j].value === saved.value) {
+              hasOption = true;
+              break;
+            }
+          }
           if (!hasOption) {
-            return;
+            continue;
           }
         }
         node.value = saved.value;
       }
-    });
+    }
   }
 
   function updateFileSummary(input) {
@@ -6525,23 +6640,46 @@
       });
   }
 
+  // Runs once after every full re-render. Three small DOM sync passes —
+  // file summaries, selection counters, project-name selects.
   function postRenderSync() {
-    document.querySelectorAll("input[type='file'][data-file-summary]").forEach((input) => {
+    const fileInputs = document.querySelectorAll("input[type='file'][data-file-summary]");
+    for (let i = 0; i < fileInputs.length; i += 1) {
+      const input = fileInputs[i];
       if (input instanceof HTMLInputElement) {
         updateFileSummary(input);
       }
-    });
-    document.querySelectorAll("[data-selection-count]").forEach((node) => {
+    }
+    // updateSelectionCounter rescans the form for the group, so calling it
+    // once per (form, group) is enough — even when several counter nodes
+    // share the group within one form.
+    const selectionNodes = document.querySelectorAll("[data-selection-count]");
+    const seenScopes = new WeakMap();
+    for (let i = 0; i < selectionNodes.length; i += 1) {
+      const node = selectionNodes[i];
       const group = node.getAttribute("data-selection-count");
-      if (group) {
-        updateSelectionCounter(group, node.closest("form") || document);
+      if (!group) {
+        continue;
       }
-    });
-    document.querySelectorAll("select[data-project-name-target]").forEach((select) => {
+      const scope = node.closest("form") || document;
+      let groupsForScope = seenScopes.get(scope);
+      if (groupsForScope && groupsForScope.has(group)) {
+        continue;
+      }
+      if (!groupsForScope) {
+        groupsForScope = new Set();
+        seenScopes.set(scope, groupsForScope);
+      }
+      groupsForScope.add(group);
+      updateSelectionCounter(group, scope);
+    }
+    const projectSelects = document.querySelectorAll("select[data-project-name-target]");
+    for (let i = 0; i < projectSelects.length; i += 1) {
+      const select = projectSelects[i];
       if (select instanceof HTMLSelectElement) {
         syncProjectSelector(select);
       }
-    });
+    }
   }
 
   function snapshotOpenDialogs() {

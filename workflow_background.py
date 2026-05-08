@@ -128,11 +128,16 @@ def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:
 
 
 def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
-    """Return queue-position and resource details for a SLURM job, including partition-aware position.
+    """Return live state + resource details for *one* SLURM job we submitted.
 
-    We show partition-specific position because "30 jobs ahead globally" is
-    misleading when most of them are on a different partition — the gpu queue
-    might only have 2 jobs ahead of ours.
+    Asks ``squeue -j <jobid>`` and parses just that one row. We deliberately
+    do not scan the rest of the cluster here — the dashboard does not need
+    to know how many of someone else's jobs are ahead of ours, and the
+    cluster-wide scan that used to live here was expensive enough to show up
+    in the per-second polling lag.
+
+    "queue_position" / "jobs_ahead" fields are intentionally absent. The
+    SlurmQueueTracker UI tolerates that and just hides those rows.
     """
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
@@ -146,7 +151,14 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
         }
     try:
         completed = subprocess.run(
-            ["squeue", "-h", "-t", "PD,R,CG", "-o", "%i|%T|%R|%S|%P|%j|%u|%M|%L|%D|%C|%b"],
+            [
+                "squeue",
+                "-h",
+                "-j",
+                normalized_job_id,
+                "-o",
+                "%i|%T|%R|%S|%P|%j|%u|%M|%L|%D|%C|%b",
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -158,82 +170,59 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
             "available": False,
             "message": "Unable to query squeue right now.",
         }
-    if completed.returncode != 0:
-        return {
-            "job_id": normalized_job_id,
-            "available": False,
-            "message": (completed.stderr or completed.stdout or "squeue returned an error.").strip(),
-        }
-
-    pending_position = 0
-    pending_by_partition: dict[str, int] = {}
-    for line in completed.stdout.splitlines():
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) < 4:
-            continue
-        row_job_id = parts[0]
-        state = parts[1]
-        reason = parts[2]
-        start_time = parts[3]
-        partition = parts[4] if len(parts) > 4 else ""
-        name = parts[5] if len(parts) > 5 else ""
-        user = parts[6] if len(parts) > 6 else ""
-        time_used = parts[7] if len(parts) > 7 else ""
-        time_left = parts[8] if len(parts) > 8 else ""
-        nodes = parts[9] if len(parts) > 9 else ""
-        cpus = parts[10] if len(parts) > 10 else ""
-        gres = parts[11] if len(parts) > 11 else ""
-        base_row_job_id = row_job_id.split(".", 1)[0]
-        state_key = state.lower()
-        if state_key in {"pending", "pd"}:
-            pending_position += 1
-            pending_by_partition[partition] = pending_by_partition.get(partition, 0) + 1
-        if base_row_job_id != normalized_job_id:
-            continue
-        details = {
-            "job_id": normalized_job_id,
-            "available": True,
-            "state": state,
-            "reason": reason,
-            "estimated_start": start_time,
-            "partition": partition,
-            "name": name,
-            "user": user,
-            "time_used": time_used,
-            "time_left": time_left,
-            "nodes": nodes,
-            "cpus": cpus,
-            "gres": gres,
-            "fetched_at_utc": utc_now_iso(),
-            "state_source": "squeue",
-        }
-        if state_key in {"running", "r", "completing", "cg"}:
-            return {
-                **details,
-                "queue_position": 0,
-                "jobs_ahead": 0,
-                "jobs_ahead_same_partition": 0,
-                "queue_position_same_partition": 0,
-                "message": "Running now.",
+    # Note: when a job has already left the queue, squeue exits non-zero with
+    # "Invalid job id specified". That is the normal terminal path — we fall
+    # through to sacct below instead of treating it as an error.
+    stdout = (completed.stdout or "").strip()
+    if completed.returncode == 0 and stdout:
+        for line in stdout.splitlines():
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) < 2:
+                continue
+            row_job_id = parts[0].split(".", 1)[0]
+            if row_job_id != normalized_job_id:
+                continue
+            state = parts[1]
+            reason = parts[2] if len(parts) > 2 else ""
+            start_time = parts[3] if len(parts) > 3 else ""
+            partition = parts[4] if len(parts) > 4 else ""
+            name = parts[5] if len(parts) > 5 else ""
+            user = parts[6] if len(parts) > 6 else ""
+            time_used = parts[7] if len(parts) > 7 else ""
+            time_left = parts[8] if len(parts) > 8 else ""
+            nodes = parts[9] if len(parts) > 9 else ""
+            cpus = parts[10] if len(parts) > 10 else ""
+            gres = parts[11] if len(parts) > 11 else ""
+            details = {
+                "job_id": normalized_job_id,
+                "available": True,
+                "state": state,
+                "reason": reason,
+                "estimated_start": start_time,
+                "partition": partition,
+                "name": name,
+                "user": user,
+                "time_used": time_used,
+                "time_left": time_left,
+                "nodes": nodes,
+                "cpus": cpus,
+                "gres": gres,
+                "fetched_at_utc": utc_now_iso(),
+                "state_source": "squeue",
             }
-        same_partition_position = pending_by_partition.get(partition, pending_position)
-        return {
-            **details,
-            "queue_position": pending_position,
-            "jobs_ahead": max(pending_position - 1, 0),
-            "jobs_ahead_same_partition": max(same_partition_position - 1, 0),
-            "queue_position_same_partition": same_partition_position,
-            "message": f"Pending position {pending_position}.",
-        }
+            state_key = state.lower()
+            if state_key in {"running", "r", "completing", "cg"}:
+                details["message"] = "Running now."
+            elif state_key in {"pending", "pd"}:
+                details["message"] = "Pending in queue."
+            else:
+                details["message"] = state or "In queue."
+            return details
 
     accounting = slurm_accounting_snapshot(normalized_job_id)
     if accounting:
         return {
             **accounting,
-            "queue_position": None,
-            "jobs_ahead": None,
-            "jobs_ahead_same_partition": None,
-            "queue_position_same_partition": None,
             "reason": "",
             "estimated_start": accounting.get("started_at", ""),
             "fetched_at_utc": utc_now_iso(),
@@ -244,10 +233,6 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
         "job_id": normalized_job_id,
         "available": True,
         "state": "not in queue",
-        "queue_position": None,
-        "jobs_ahead": None,
-        "jobs_ahead_same_partition": None,
-        "queue_position_same_partition": None,
         "reason": "",
         "estimated_start": "",
         "fetched_at_utc": utc_now_iso(),

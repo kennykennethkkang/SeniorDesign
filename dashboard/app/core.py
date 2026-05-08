@@ -577,7 +577,19 @@ class CoreMixin:
 
         content_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
         body = asset_path.read_bytes()
-        return "200 OK", self.response_headers(content_type=content_type, body_length=len(body)), [body]
+        # Vendored React + the hand-written dashboard_app.js change rarely.
+        # A short browser cache + must-revalidate cuts re-downloads on every
+        # page navigation while still letting an edit ship without a hard
+        # reload (the browser revalidates after the TTL).
+        return (
+            "200 OK",
+            self.response_headers(
+                content_type=content_type,
+                body_length=len(body),
+                cache_control="public, max-age=300, must-revalidate",
+            ),
+            [body],
+        )
 
     # 64 KB per chunk — big enough that the per-yield Python overhead is amortized,
     # small enough that the browser starts decoding audio almost immediately
@@ -1099,23 +1111,29 @@ class CoreMixin:
         very long after uploads or submissions.
         """
 
-        now = time.monotonic()
         with self._dashboard_cache_lock:
             cached = self._dashboard_cache.get(key)
         if cached is not None:
             expires_at, value = cached
-            if now < expires_at:
+            if time.monotonic() < expires_at:
                 return value
         value = builder()
+        # Anchor the TTL window to *after* the build finishes. Anchoring to
+        # before-build silently breaks the cache for builders that take
+        # longer than ttl_seconds — by the time we'd write the entry, the
+        # entry would already be stale and the next caller would rebuild
+        # from scratch. (training_label_summary at 24 s with a 10 s TTL hit
+        # this exactly.)
         with self._dashboard_cache_lock:
-            self._dashboard_cache[key] = (now + ttl_seconds, value)
+            self._dashboard_cache[key] = (time.monotonic() + ttl_seconds, value)
         return value
 
     def cached_slurm_queue(self, slurm_job_id: str, status: str) -> dict[str, object]:
-        """Return a cached squeue snapshot for active jobs; returns {} immediately for finished ones.
+        """Cached single-job squeue snapshot; empty for finished jobs.
 
-        We only query squeue while the job is live — once it's terminal the queue
-        snapshot is no longer useful and the overhead of calling squeue is wasted.
+        TTL is 5 s — the user's job state changes coarsely (PD → R → done),
+        so refreshing every poll is wasted work. Tests still see a snapshot
+        on first call because cached_value invokes the builder synchronously.
         """
 
         if not slurm_job_id or status not in {"submitted", "running"}:
@@ -1123,13 +1141,26 @@ class CoreMixin:
         import workflow_dashboard as _wd  # lazy: honor monkey-patches in tests
         return self.cached_value(
             f"slurm_queue::{slurm_job_id}",
-            ttl_seconds=2.0,
+            ttl_seconds=5.0,
             builder=lambda: _wd.slurm_queue_snapshot(slurm_job_id),
         )
 
     def active_tracking_summary(self) -> dict[str, object]:
-        """Summarize runs that should keep the dashboard refreshing."""
+        """Summarize runs that should keep the dashboard refreshing.
 
+        Cached for ~1 s so the per-second tracking poll doesn't re-walk the
+        runs/youtube/stitched/fine_tuning trees on every hit. The TTL matches
+        the live polling cadence — fingerprint comparison still drives real
+        refreshes when something actually changes on disk.
+        """
+
+        return self.cached_value(
+            "active_tracking_summary",
+            ttl_seconds=1.0,
+            builder=self._build_active_tracking_summary,
+        )
+
+    def _build_active_tracking_summary(self) -> dict[str, object]:
         diarization_runs = sorted(self.active_diarization_run_directories(), key=lambda path: str(path))
         youtube_runs = sorted(self.active_run_directories(self.youtube_runs_root), key=lambda path: str(path))
         stitched_runs = sorted(self.active_stitched_run_directories(), key=lambda path: str(path))
@@ -1433,11 +1464,34 @@ class CoreMixin:
         return rows
 
     def tail_text(self, path: Path, *, line_count: int = 12) -> str:
-        """Return the last few log lines for a dashboard preview."""
+        """Return the last few log lines for a dashboard preview.
+
+        Reads the tail of the file by seeking from the end instead of slurping
+        the whole thing. A long-running NeMo run can stream tens of MB of
+        stdout, and that path used to read all of it on every poll just to
+        keep 12 lines.
+        """
 
         if not path.is_file():
             return ""
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # 16 KB is plenty for ~12 short log lines and stays well under any
+        # reasonable line length the trainers emit. Falls back gracefully on
+        # files smaller than the budget.
+        budget = 16 * 1024
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                if size > budget:
+                    fh.seek(-budget, os.SEEK_END)
+                tail_bytes = fh.read()
+        except OSError:
+            return ""
+        text = tail_bytes.decode("utf-8", errors="replace")
+        # Drop the first (potentially partial) line when we seeked past the
+        # start; otherwise the preview leads with a half-truncated line.
+        lines = text.splitlines()
+        if size > budget and lines:
+            lines = lines[1:]
         return "\n".join(lines[-line_count:]).strip()
 
     def error_summary(self, path: Path) -> str:

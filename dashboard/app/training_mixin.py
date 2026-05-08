@@ -322,8 +322,34 @@ class TrainingLabelsMixin:
         audio_paths: list[Path],
         records: dict[str, dict[str, object]],
     ) -> dict[str, int]:
-        """Count queue states for the labeling page summary."""
+        """Count queue states for the labeling page summary.
 
+        Cached for 10 s — the inner ``rttm_lookup`` does ~5 stat() calls per
+        audio file to find sidecars and label_work drafts, which on a
+        networked filesystem with 6k+ files turns into 30s+ per render.
+        Saving a label or completing one calls ``invalidate_dashboard_cache``,
+        so the cache is never stale after a real edit.
+        """
+
+        if not audio_paths:
+            return {
+                "total": 0,
+                "not_started": 0,
+                "draft": 0,
+                "needs_review": 0,
+                "completed": 0,
+            }
+        return self.cached_value(
+            "training_label_summary",
+            ttl_seconds=60.0,
+            builder=lambda: self._build_training_label_summary(audio_paths, records),
+        )
+
+    def _build_training_label_summary(
+        self,
+        audio_paths: list[Path],
+        records: dict[str, dict[str, object]],
+    ) -> dict[str, int]:
         summary = {
             "total": len(audio_paths),
             "not_started": 0,
@@ -333,7 +359,12 @@ class TrainingLabelsMixin:
         }
         for path in audio_paths:
             audio_name = self.audio_relative_path(path)
-            status = self.training_label_status(records.get(audio_name) or records.get(path.name))
+            record = records.get(audio_name) or records.get(path.name)
+            status = self.training_label_status(record)
+            if status == "not_started":
+                rttm_lookup = getattr(self, "validated_training_rttm_for_audio", None)
+                if callable(rttm_lookup) and rttm_lookup(path) is not None:
+                    status = "completed"
             summary[status] = summary.get(status, 0) + 1
         return summary
 

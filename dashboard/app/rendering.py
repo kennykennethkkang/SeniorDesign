@@ -64,8 +64,10 @@ from fine_tuning_manager import (
     DEFAULT_SLURM_TIME,
     launch_training,
     build_sample,
+    find_pyannote_run_out_log,
     list_projects,
     normalize_backend,
+    parse_pyannote_val_loss,
     parse_rttm,
     probe_media_duration,
     prepare_project,
@@ -217,7 +219,10 @@ class RenderingMixin:
         if effective_path in MODEL_SELECTION_PAGES:
             context["preferences"] = self.model_preferences()
         if effective_path in {"/uploads", "/training-labels", "/fine-tuning"}:
-            context["diarization_history"] = self.diarization_history_rows(limit=100)
+            # Capped at 25 — the frontend filter dropdown only displays recent
+            # runs; 100 was bloating the state blob to multi-MB. Older runs
+            # remain accessible from the diarization tab's run history.
+            context["diarization_history"] = self.diarization_history_rows(limit=25)
             context["diarization_latest_run"] = self.diarization_run_details(context["latest_site_diarization"])
             context["diarization_active_runs"] = self.active_diarization_runs_detailed()
         if effective_path in {"/training-labels", "/fine-tuning"}:
@@ -666,6 +671,7 @@ class RenderingMixin:
                     f"({Path(str(latest_run.get('run_dir', ''))).name})"
                 )
             recent_runs = []
+            project_backend = str(project.get("backend", "")).lower()
             for run in (project.get("recent_runs") or [])[:5]:
                 if not isinstance(run, dict):
                     continue
@@ -677,6 +683,16 @@ class RenderingMixin:
                 )
                 # display_name was set by list_runs; fall back to version_name
                 # so a renamed run shows the friendly label here too.
+                # Pyannote runs get their .out scanned for val_loss points so
+                # the project card can show the validation curve. NeMo logs
+                # val_loss elsewhere, so we leave it empty for that backend.
+                val_loss_series: list[dict[str, object]] = []
+                val_loss_log_path = ""
+                if project_backend == "pyannote":
+                    out_log = find_pyannote_run_out_log(run, project_path)
+                    if out_log is not None:
+                        val_loss_series = parse_pyannote_val_loss(out_log)
+                        val_loss_log_path = str(out_log)
                 recent_runs.append(
                     {
                         "status": str(run.get("status", "unknown")),
@@ -695,6 +711,11 @@ class RenderingMixin:
                         # the metadata snapshot — UI just hides the row.
                         "baseModel": str(run.get("base_model") or "").strip(),
                         "baseModelKind": str(run.get("base_model_kind") or "").strip(),
+                        # val_loss points parsed live from the pyannote .out file;
+                        # empty for nemo or for runs where validation hasn't
+                        # produced any val_loss lines yet.
+                        "valLoss": val_loss_series,
+                        "valLossLogPath": val_loss_log_path,
                     }
                 )
             serialized.append(
@@ -792,13 +813,50 @@ class RenderingMixin:
         records: dict[str, dict[str, object]],
         script_name: str,
     ) -> list[dict[str, object]]:
-        """Combine audio-file metadata with label_status records so the training-labels page shows everything in one row."""
+        """Combine audio-file metadata with label_status records so the training-labels page shows everything in one row.
 
+        Cached for 10 s — same reason as ``training_label_summary``: the
+        per-audio rttm_lookup does ~5 stat() calls per file on a networked
+        filesystem and dominated cold-cache page renders. Mutations
+        (label saves, completions, deletes) call ``invalidate_dashboard_cache``.
+        """
+
+        if not audio_paths:
+            return []
+        return self.cached_value(
+            f"frontend_training_label_rows::{script_name}",
+            ttl_seconds=60.0,
+            builder=lambda: self._build_frontend_training_label_rows(audio_paths, records, script_name),
+        )
+
+    def _build_frontend_training_label_rows(
+        self,
+        audio_paths: list[Path],
+        records: dict[str, dict[str, object]],
+        script_name: str,
+    ) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         diarization_records = self.diarization_model_history_lookup()
         for index, path in enumerate(audio_paths, start=1):
             audio_name = self.audio_relative_path(path)
             record = records.get(audio_name) or records.get(path.name) or {}
+            if not record:
+                rttm_lookup = getattr(self, "validated_training_rttm_for_audio", None)
+                rttm_path = rttm_lookup(path) if callable(rttm_lookup) else None
+                if isinstance(rttm_path, Path) and rttm_path.is_file():
+                    source = "audio_stitching" if "/audioStitching/" in f"/{audio_name}" else "rttm_pair"
+                    record = {
+                        "status": "completed",
+                        "source": source,
+                        "backend": "both",
+                        "target_backends": ["nemo", "pyannote"],
+                        "target_projects": [],
+                        "training_projects": [],
+                        "training_usage": [],
+                        "training_audio_path": self.describe_path(path),
+                        "training_rttm_path": self.describe_path(rttm_path),
+                        "project_name": "",
+                    }
             review_record = self.preferred_review_record(diarization_records.get(audio_name, {}))
             status = self.training_label_status(record)
             review_path_value = str(record.get("review_path") or "")
@@ -861,7 +919,8 @@ class RenderingMixin:
                 for item in (record.get("training_usage") or [])
                 if isinstance(item, dict)
             ]
-            if status == "completed" and not completed_training_projects:
+            source = str(record.get("source") or "")
+            if status == "completed" and not completed_training_projects and source not in {"audio_stitching", "rttm_pair"}:
                 completed_training_projects = target_projects
             detail = "Ready to label for training."
             if status == "draft":
@@ -869,7 +928,11 @@ class RenderingMixin:
             elif status == "needs_review":
                 detail = system_questions[0] if system_questions else (issue_questions or "Needs an answer before training.")
             elif status == "completed":
-                detail = f"Training sample available in {', '.join(completed_training_projects)}."
+                detail = (
+                    f"Training sample available in {', '.join(completed_training_projects)}."
+                    if completed_training_projects
+                    else "RTTM pair is ready for fine-tuning."
+                )
                 if queued_training_projects:
                     detail += f" Auto-train requested for {', '.join(queued_training_projects)}."
             rows.append(
@@ -959,14 +1022,37 @@ class RenderingMixin:
         raw_training_sources = context.get("training_source_files") or {}
         if not isinstance(raw_training_sources, dict):
             raw_training_sources = {}
+        raw_training_audio_paths = list(raw_training_sources.get("audio_files", []))
+        # No fallback to the full audio_in/ inventory: if validation returned no
+        # paired audio, the picker stays empty so the audio and RTTM lists can
+        # never drift apart. The earlier fallback caused a mismatch where the
+        # audio side showed every file in audio_in/ while the RTTM side was 0.
+        training_audio_paths = [
+            path for path in raw_training_audio_paths if isinstance(path, Path)
+        ]
+        raw_rttm_audio_map = raw_training_sources.get("rttm_audio_map") or {}
+        if not isinstance(raw_rttm_audio_map, dict):
+            raw_rttm_audio_map = {}
+
+        def training_rttm_record(path: Path) -> dict[str, str]:
+            record = self.frontend_file_record(path, script_name)
+            audio_match = raw_rttm_audio_map.get(str(path.resolve()))
+            if isinstance(audio_match, Path):
+                try:
+                    record["audioFile"] = f"audio_in/{self.audio_relative_path(audio_match)}"
+                    record["name"] = f"{audio_match.stem}.rttm"
+                except ValueError:
+                    pass
+            return record
+
         training_sources = {
             "audioFiles": [
                 self.frontend_file_record(path, script_name)
-                for path in raw_audio_paths
+                for path in training_audio_paths
                 if isinstance(path, Path)
             ],
             "rttmFiles": [
-                self.frontend_file_record(path, script_name)
+                training_rttm_record(path)
                 for path in list(raw_training_sources.get("rttm_files", []))
                 if isinstance(path, Path)
             ],
@@ -1094,7 +1180,11 @@ class RenderingMixin:
                 "fineTuningSummary": context.get("fine_tuning_summary", self.fine_tuning_summary(list(context.get("projects", [])))),
                 "tracking": live_tracking,
                 "trainingLabels": {
-                    "rows": training_label_rows,
+                    # The full row list is only rendered by /training-labels.
+                    # Other pages (especially /fine-tuning) just need the
+                    # summary + defaults for headers and dropdowns, so we
+                    # skip the multi-MB row payload elsewhere.
+                    "rows": training_label_rows if current_path == "/training-labels" else [],
                     "summary": context.get("training_label_summary", self.training_label_summary([], {})),
                     "defaultProjectName": DEFAULT_TRAINING_LABEL_PROJECT,
                 },

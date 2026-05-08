@@ -4026,13 +4026,23 @@ def build_html(
         request.onblocked = function () {{ resolve(null); }};
       }});
     }}
+    // Resolve only when the IDB transaction commits (oncomplete), not when
+    // the request finishes. This was the bug behind "local cache inside
+    // diarization review not working" — request.onsuccess fired even when
+    // the surrounding txn later aborted (quota / page hide / overlapping
+    // writes), so writes silently dropped and reads handed back data that
+    // was never actually persisted.
     function audioCacheRead(db, key) {{
       return new Promise(function (resolve) {{
         try {{
           const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
           const get = tx.objectStore(AUDIO_CACHE_STORE).get(key);
-          get.onsuccess = function () {{ resolve(get.result || null); }};
-          get.onerror = function () {{ resolve(null); }};
+          let result = null;
+          get.onsuccess = function () {{ result = get.result || null; }};
+          get.onerror = function () {{ result = null; }};
+          tx.oncomplete = function () {{ resolve(result); }};
+          tx.onerror = function () {{ resolve(null); }};
+          tx.onabort = function () {{ resolve(null); }};
         }} catch (_err) {{ resolve(null); }}
       }});
     }}
@@ -4041,8 +4051,12 @@ def build_html(
         try {{
           const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
           const put = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
-          put.onsuccess = function () {{ resolve(true); }};
-          put.onerror = function () {{ resolve(false); }};
+          let putOk = false;
+          put.onsuccess = function () {{ putOk = true; }};
+          put.onerror = function () {{ putOk = false; }};
+          tx.oncomplete = function () {{ resolve(putOk); }};
+          tx.onerror = function () {{ resolve(false); }};
+          tx.onabort = function () {{ resolve(false); }};
         }} catch (_err) {{ resolve(false); }}
       }});
     }}
@@ -4051,8 +4065,12 @@ def build_html(
         try {{
           const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
           const del = tx.objectStore(AUDIO_CACHE_STORE).delete(key);
-          del.onsuccess = function () {{ resolve(true); }};
-          del.onerror = function () {{ resolve(false); }};
+          let delOk = false;
+          del.onsuccess = function () {{ delOk = true; }};
+          del.onerror = function () {{ delOk = false; }};
+          tx.oncomplete = function () {{ resolve(delOk); }};
+          tx.onerror = function () {{ resolve(false); }};
+          tx.onabort = function () {{ resolve(false); }};
         }} catch (_err) {{ resolve(false); }}
       }});
     }}

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import pathlib
 import struct
 import tempfile
@@ -142,6 +143,46 @@ class FineTuningTests(unittest.TestCase):
                     "SPEAKER stream_clip 1 1.250 0.500 <NA> <NA> Speaker_B <NA> <NA>",
                 ],
             )
+
+    def test_save_project_sample_replaces_existing_hardlink_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            original_audio = wav_bytes(1.0)
+            replacement_audio = wav_bytes(2.0)
+            fine_tuning.save_project_sample(
+                project_name="Linked Storage",
+                backend="nemo",
+                audio_name="linked.wav",
+                audio_bytes=original_audio,
+                rttm_name="linked.rttm",
+                rttm_bytes=b"SPEAKER linked 1 0.000 0.500 <NA> <NA> Speaker_A <NA> <NA>\n",
+                root=root,
+            )
+            audio_path = (
+                root
+                / "fine_tuning"
+                / "projects"
+                / "nemo"
+                / "linked-storage"
+                / "audio"
+                / "linked.wav"
+            )
+            linked_copy = root / "linked-copy.wav"
+            os.link(audio_path, linked_copy)
+
+            fine_tuning.save_project_sample(
+                project_name="Linked Storage",
+                backend="nemo",
+                audio_name="linked.wav",
+                audio_bytes=replacement_audio,
+                rttm_name="linked.rttm",
+                rttm_bytes=b"SPEAKER linked 1 0.000 1.500 <NA> <NA> Speaker_A <NA> <NA>\n",
+                root=root,
+            )
+
+            self.assertEqual(linked_copy.read_bytes(), original_audio)
+            self.assertEqual(audio_path.read_bytes(), replacement_audio)
+            self.assertNotEqual(audio_path.stat().st_ino, linked_copy.stat().st_ino)
 
     def test_prepare_project_accepts_legacy_default_backend_project_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:

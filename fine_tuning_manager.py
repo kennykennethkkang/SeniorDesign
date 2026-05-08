@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import shlex
 import struct
@@ -227,10 +228,56 @@ def canonicalize_rttm_text(raw_text: str, *, session_id: str) -> str:
 def write_canonical_rttm_text(path: Path, raw_text: str, *, session_id: str) -> None:
     """Write RTTM content in the canonical format consumed by the training jobs."""
 
-    path.write_text(
+    write_text_replacing_existing(
+        path,
         canonicalize_rttm_text(raw_text, session_id=session_id),
         encoding="utf-8",
     )
+
+
+def sibling_temp_path(path: Path) -> Path:
+    """Return an unused temp path next to the final target for atomic replacement."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for index in range(1000):
+        candidate = path.with_name(f".{path.name}.tmp-{os.getpid()}-{index}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"Unable to allocate temporary path for {path}")
+
+
+def write_bytes_replacing_existing(path: Path, payload: bytes) -> None:
+    """Write bytes without truncating an existing hardlinked target in place."""
+
+    tmp_path = sibling_temp_path(path)
+    try:
+        tmp_path.write_bytes(payload)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def write_text_replacing_existing(path: Path, payload: str, *, encoding: str = "utf-8") -> None:
+    """Write text without mutating other hardlinks to the previous file."""
+
+    tmp_path = sibling_temp_path(path)
+    try:
+        tmp_path.write_text(payload, encoding=encoding)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def copy_stream_replacing_existing(path: Path, source_stream) -> None:
+    """Stream an upload to disk without mutating an existing hardlinked target."""
+
+    tmp_path = sibling_temp_path(path)
+    try:
+        with tmp_path.open("wb") as handle:
+            shutil.copyfileobj(source_stream, handle)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _has_audio_samples(audio_dir: Path) -> bool:
@@ -527,7 +574,7 @@ def save_project_sample(
 
     audio_path = paths["audio_dir"] / f"{stem}{audio_suffix}"
     rttm_path = paths["rttm_dir"] / f"{stem}.rttm"
-    audio_path.write_bytes(audio_bytes)
+    write_bytes_replacing_existing(audio_path, audio_bytes)
     try:
         rttm_text = rttm_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -539,10 +586,10 @@ def save_project_sample(
         transcript_filename = sanitize_filename(transcript_name or f"{stem}.txt")
         transcript_suffix = Path(transcript_filename).suffix or ".txt"
         transcript_path = paths["text_dir"] / f"{stem}{transcript_suffix}"
-        transcript_path.write_bytes(transcript_bytes)
+        write_bytes_replacing_existing(transcript_path, transcript_bytes)
     elif transcript_text and transcript_text.strip():
         transcript_path = paths["text_dir"] / f"{stem}.txt"
-        transcript_path.write_text(transcript_text.strip() + "\n", encoding="utf-8")
+        write_text_replacing_existing(transcript_path, transcript_text.strip() + "\n", encoding="utf-8")
 
     return build_sample(audio_path, rttm_path, transcript_path)
 
@@ -580,10 +627,8 @@ def save_project_sample_streams(
 
     audio_path = paths["audio_dir"] / f"{stem}{audio_suffix}"
     rttm_path = paths["rttm_dir"] / f"{stem}.rttm"
-    with audio_path.open("wb") as handle:
-        shutil.copyfileobj(audio_stream, handle)
-    with rttm_path.open("wb") as handle:
-        shutil.copyfileobj(rttm_stream, handle)
+    copy_stream_replacing_existing(audio_path, audio_stream)
+    copy_stream_replacing_existing(rttm_path, rttm_stream)
 
     if audio_path.stat().st_size == 0:
         raise ValueError("Audio upload is empty.")
@@ -600,14 +645,13 @@ def save_project_sample_streams(
         transcript_filename = sanitize_filename(transcript_name or f"{stem}.txt")
         transcript_suffix = Path(transcript_filename).suffix or ".txt"
         transcript_path = paths["text_dir"] / f"{stem}{transcript_suffix}"
-        with transcript_path.open("wb") as handle:
-            shutil.copyfileobj(transcript_stream, handle)
+        copy_stream_replacing_existing(transcript_path, transcript_stream)
         if transcript_path.stat().st_size == 0:
             transcript_path.unlink(missing_ok=True)
             transcript_path = None
     elif transcript_text and transcript_text.strip():
         transcript_path = paths["text_dir"] / f"{stem}.txt"
-        transcript_path.write_text(transcript_text.strip() + "\n", encoding="utf-8")
+        write_text_replacing_existing(transcript_path, transcript_text.strip() + "\n", encoding="utf-8")
 
     return build_sample(audio_path, rttm_path, transcript_path)
 
@@ -642,20 +686,39 @@ def parse_rttm(rttm_path: Path) -> list[RttmSegment]:
     return segments
 
 
+# Memo for probe_media_duration. Per-process, keyed by (path, mtime, size) so
+# replacing a file invalidates automatically. Bounded to avoid runaway growth
+# when a long-lived dashboard process scans many distinct projects over time.
+_PROBE_MEDIA_DURATION_CACHE: dict[tuple[str, float, int], float] = {}
+_PROBE_MEDIA_DURATION_LIMIT = 4096
+
+
 def probe_media_duration(media_path: Path) -> float:
     """Read media duration cheaply when possible and fall back to ffprobe.
 
-    The original implementation always shelled out to ffprobe first, which
-    burns ~10-50 ms per file. For a 1700-file stitch run that's a 30-60 s tax
-    in subprocess overhead alone, even though most inputs are PCM WAV that
-    can be answered from the header in microseconds. So we now try the WAV
-    fast path first and only spawn ffprobe for non-WAV (or malformed WAV)
-    inputs.
+    Originally shelled out to ffprobe first, which burns ~10-50 ms per file.
+    For a 1700-file stitch run that's a 30-60 s tax in subprocess overhead
+    alone, even though most inputs are PCM WAV. Fast paths now: an in-process
+    memo keyed by (path, mtime, size); WAV header read; then ffprobe.
     """
+
+    cache_key: tuple[str, float, int] | None = None
+    try:
+        stat = media_path.stat()
+        cache_key = (str(media_path), stat.st_mtime, stat.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _PROBE_MEDIA_DURATION_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
     if media_path.suffix.lower() == ".wav":
         try:
-            return probe_wav_duration_from_header(media_path)
+            value = probe_wav_duration_from_header(media_path)
+            if cache_key is not None:
+                _store_probe_duration(cache_key, value)
+            return value
         except (OSError, ValueError, struct.error):
             pass
         try:
@@ -663,7 +726,10 @@ def probe_media_duration(media_path: Path) -> float:
                 frame_rate = wav_file.getframerate()
                 frame_count = wav_file.getnframes()
             if frame_rate > 0 and frame_count > 0:
-                return frame_count / frame_rate
+                value = frame_count / frame_rate
+                if cache_key is not None:
+                    _store_probe_duration(cache_key, value)
+                return value
         except (OSError, wave.Error):
             # Python 3.9's wave module rejects valid WAV variants such as IEEE
             # float WAVs. Read RIFF chunks directly before requiring ffprobe.
@@ -692,11 +758,21 @@ def probe_media_duration(media_path: Path) -> float:
             except ValueError:
                 duration = 0.0
             if duration > 0:
+                if cache_key is not None:
+                    _store_probe_duration(cache_key, duration)
                 return duration
 
     raise RuntimeError(
         f"Unable to determine duration for {media_path}. Install ffprobe or use WAV files."
     )
+
+
+def _store_probe_duration(cache_key: tuple[str, float, int], value: float) -> None:
+    """Insert into the probe cache with a soft size cap."""
+
+    if len(_PROBE_MEDIA_DURATION_CACHE) >= _PROBE_MEDIA_DURATION_LIMIT:
+        _PROBE_MEDIA_DURATION_CACHE.pop(next(iter(_PROBE_MEDIA_DURATION_CACHE)), None)
+    _PROBE_MEDIA_DURATION_CACHE[cache_key] = value
 
 
 def probe_wav_duration_from_header(media_path: Path) -> float:
@@ -1299,6 +1375,62 @@ class PyannoteProgressLogger(pl.Callback):
             f"step={{trainer.global_step}} status=end",
             flush=True,
         )
+
+    # Validation hooks below are observation-only — they don't change how the
+    # task validates or what it computes. They just dump a val_loss line when
+    # PL hands one to us, so the dashboard can plot the curve from the .out.
+    def _val_loss_value(self, source):
+        if isinstance(source, dict):
+            for key in ("val_loss", "validation_loss", "loss"):
+                value = source.get(key)
+                if value is None:
+                    continue
+                try:
+                    if hasattr(value, "detach"):
+                        value = value.detach().cpu()
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        elif source is not None:
+            try:
+                if hasattr(source, "detach"):
+                    source = source.detach().cpu()
+                return float(source)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        val = self._val_loss_value(outputs)
+        if val is None:
+            return
+        print(
+            f"[pyannote-train] epoch={{trainer.current_epoch + 1}}/{{trainer.max_epochs}} "
+            f"step={{trainer.global_step}} val_batch={{batch_idx + 1}} val_loss={{val:.6f}}",
+            flush=True,
+        )
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        metrics = getattr(trainer, "callback_metrics", None) or {{}}
+        # Try the common Lightning keys that different pyannote versions log
+        # validation loss under. First hit wins; nothing prints if none exist.
+        for key in (
+            "val_loss",
+            "validation_loss",
+            "val_loss_epoch",
+            "validation_loss_epoch",
+            "loss/val",
+            "loss/validation",
+        ):
+            val = self._val_loss_value(metrics.get(key))
+            if val is None:
+                continue
+            print(
+                f"[pyannote-train] epoch={{trainer.current_epoch + 1}}/{{trainer.max_epochs}} "
+                f"step={{trainer.global_step}} val_loss={{val:.6f}} status=val-end",
+                flush=True,
+            )
+            return
 
 
 registry.load_database(str(DATABASE_CONFIG))
@@ -1973,6 +2105,111 @@ def process_is_running(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+# Read-only — does not touch the training process. Pulls val_loss values out
+# of an existing pyannote .out file so the dashboard can render them as a
+# small per-epoch series. Tolerates missing files and partial logs.
+_PYANNOTE_VAL_LOSS_LINE_RE = re.compile(
+    r"\[pyannote-train\][^\n]*?epoch=(\d+)/(\d+)[^\n]*?"
+    r"(?:step=(\d+)[^\n]*?)?"
+    r"(?:val_batch=(\d+)[^\n]*?)?"
+    r"val_loss=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
+)
+
+# Bounded in-process memo keyed by (path, mtime, size). The fine-tuning page
+# can re-render every poll while training is active; without this we'd read
+# every .out file end-to-end on every render. Capped so a wild test run with
+# thousands of distinct files cannot blow up RAM.
+_PYANNOTE_VAL_LOSS_CACHE: dict[tuple[str, float, int], list[dict[str, object]]] = {}
+_PYANNOTE_VAL_LOSS_CACHE_LIMIT = 64
+
+
+def parse_pyannote_val_loss(out_path: Path, *, max_points: int = 200) -> list[dict[str, object]]:
+    """Scan a pyannote training .out file and return val_loss data points.
+
+    Each entry is ``{"epoch", "max_epochs", "step", "val_batch", "val_loss",
+    "stage"}``. ``stage`` is ``"epoch"`` for end-of-validation summaries and
+    ``"batch"`` for per-batch points. Newest points come last so the UI can
+    plot them in chronological order.
+
+    Cached by (path, mtime, size); a still-growing .out file invalidates the
+    cache automatically because its size keeps changing, while idle/finished
+    runs read from the memo for free.
+    """
+
+    if not isinstance(out_path, Path):
+        out_path = Path(str(out_path))
+    try:
+        stat = out_path.stat()
+    except OSError:
+        return []
+    if not out_path.is_file():
+        return []
+    cache_key = (str(out_path), stat.st_mtime, stat.st_size)
+    cached = _PYANNOTE_VAL_LOSS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        text_blob = out_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    points: list[dict[str, object]] = []
+    for match in _PYANNOTE_VAL_LOSS_LINE_RE.finditer(text_blob):
+        try:
+            epoch = int(match.group(1))
+            max_epochs = int(match.group(2))
+            val_loss = float(match.group(5))
+        except (TypeError, ValueError):
+            continue
+        step_raw = match.group(3)
+        batch_raw = match.group(4)
+        try:
+            step = int(step_raw) if step_raw is not None else None
+        except (TypeError, ValueError):
+            step = None
+        try:
+            val_batch = int(batch_raw) if batch_raw is not None else None
+        except (TypeError, ValueError):
+            val_batch = None
+        points.append(
+            {
+                "epoch": epoch,
+                "max_epochs": max_epochs,
+                "step": step,
+                "val_batch": val_batch,
+                "val_loss": val_loss,
+                "stage": "batch" if val_batch is not None else "epoch",
+            }
+        )
+    if len(points) > max_points:
+        points = points[-max_points:]
+    if len(_PYANNOTE_VAL_LOSS_CACHE) >= _PYANNOTE_VAL_LOSS_CACHE_LIMIT:
+        # Drop one arbitrary entry — process-local cache, no need for LRU.
+        _PYANNOTE_VAL_LOSS_CACHE.pop(next(iter(_PYANNOTE_VAL_LOSS_CACHE)), None)
+    _PYANNOTE_VAL_LOSS_CACHE[cache_key] = points
+    return points
+
+
+def find_pyannote_run_out_log(run_metadata: dict[str, object], project_dir: Path) -> Path | None:
+    """Locate the pyannote .out file for a run, sbatch or local fallback.
+
+    sbatch jobs land in ``<project>/artifacts/slurm_logs/pyannote_finetune_<jobid>.out``;
+    the local-fallback wrapper writes plain ``stdout.log`` inside the run
+    directory. Either layout works for parse_pyannote_val_loss.
+    """
+
+    job_id = str(run_metadata.get("job_id", "") or "").strip()
+    if job_id:
+        slurm_logs = project_dir / "artifacts" / "slurm_logs" / f"pyannote_finetune_{job_id}.out"
+        if slurm_logs.is_file():
+            return slurm_logs
+    stdout_path = run_metadata.get("stdout_path")
+    if stdout_path:
+        candidate = Path(str(stdout_path))
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 SLURM_ACTIVE_STATES = {

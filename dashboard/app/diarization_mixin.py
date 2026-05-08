@@ -205,6 +205,14 @@ class DiarizationMixin:
                     newest_mtime = modified
         return newest_path
 
+    def newest_nemo_model_artifact(self, experiments_dir: Path) -> Path | None:
+        """Return the newest reusable NeMo package, with checkpoints as a fallback."""
+
+        nemo_package = self.newest_model_artifact(experiments_dir, suffixes={".nemo"})
+        if nemo_package:
+            return nemo_package
+        return self.newest_model_artifact(experiments_dir, suffixes={".ckpt"})
+
     def newest_pyannote_artifact(self, experiments_dir: Path) -> Path | None:
         """Return the newest reusable pyannote artifact from a fine-tuning project."""
 
@@ -255,10 +263,7 @@ class DiarizationMixin:
 
                 def append_option(*, key_suffix: str, display_name: str, description: str, artifact_root: Path) -> bool:
                     if backend_raw == "nemo":
-                        model_artifact = self.newest_model_artifact(
-                            artifact_root,
-                            suffixes={".ckpt", ".nemo"},
-                        )
+                        model_artifact = self.newest_nemo_model_artifact(artifact_root)
                     else:
                         model_artifact = self.newest_pyannote_artifact(artifact_root)
                     if not model_artifact:

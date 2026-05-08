@@ -1,6 +1,0 @@
-Output directory: /WAVE/users2/unix/kkang/SeniorDesign/job_outputs/bulk_diarization/bulk_diarization_job_182578
-Job log directory: /WAVE/users2/unix/kkang/SeniorDesign/job_logs/bulk_diarization_job_182578
-Diarization backend: nemo
-Slurm stdout/stderr: /WAVE/users2/unix/kkang/SeniorDesign/job_logs/slurm/bulk_diarization_182578.out | /WAVE/users2/unix/kkang/SeniorDesign/job_logs/slurm/bulk_diarization_182578.err
-Installing/updating Python dependencies...
-Diarizing 001_Kids Give Adults Advice on Dating_B08UvVwjpG4.wav ...

@@ -13,8 +13,106 @@ patched binding. Moving them here would require the tests to also patch
 from __future__ import annotations
 
 import errno
+import gzip
+import io
 from pathlib import Path
 from socketserver import ThreadingMixIn
+
+
+# Content types that compress well. Audio/video/images are already compressed
+# so we skip them — gzip would just burn CPU for ~0% savings.
+_GZIP_MIN_BYTES = 1024
+_GZIP_CONTENT_TYPES = (
+    "text/",
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/x-yaml",
+    "image/svg+xml",
+)
+
+
+def _accepts_gzip(environ) -> bool:
+    accept = environ.get("HTTP_ACCEPT_ENCODING", "")
+    return "gzip" in accept.lower()
+
+
+def _is_gzippable(content_type: str) -> bool:
+    if not content_type:
+        return False
+    lowered = content_type.lower()
+    return any(lowered.startswith(prefix) for prefix in _GZIP_CONTENT_TYPES)
+
+
+class GzipMiddleware:
+    """WSGI middleware that compresses text/JSON responses with gzip.
+
+    The dashboard ships a multi-megabyte JSON state blob inside the page HTML —
+    on a slow link the browser stalls waiting for it before LCP can fire.
+    Most of that blob is repetitive text, so gzip cuts it ~10x. We skip
+    binary/already-compressed content types and very small responses to avoid
+    wasting CPU on cases where compression doesn't pay off.
+    """
+
+    def __init__(self, application):
+        self.application = application
+
+    def __call__(self, environ, start_response):
+        if not _accepts_gzip(environ):
+            return self.application(environ, start_response)
+
+        # Capture the inner app's headers/status until we know the body length
+        # and content type — only then can we decide whether to compress.
+        captured: dict[str, object] = {}
+
+        def capture_start(status, headers, exc_info=None):
+            captured["status"] = status
+            captured["headers"] = list(headers)
+            captured["exc_info"] = exc_info
+            return lambda chunk: None  # discard write() escape hatch
+
+        body_iter = self.application(environ, capture_start)
+        try:
+            chunks = list(body_iter)
+        finally:
+            close = getattr(body_iter, "close", None)
+            if callable(close):
+                close()
+        body = b"".join(chunks)
+
+        headers = captured.get("headers") or []
+        header_map = {name.lower(): value for name, value in headers}
+        content_type = header_map.get("content-type", "")
+        already_encoded = header_map.get("content-encoding", "")
+
+        if (
+            already_encoded
+            or len(body) < _GZIP_MIN_BYTES
+            or not _is_gzippable(content_type)
+        ):
+            new_headers = [(name, value) for name, value in headers if name.lower() != "content-length"]
+            new_headers.append(("Content-Length", str(len(body))))
+            start_response(captured["status"], new_headers, captured.get("exc_info"))
+            return [body]
+
+        buffer = io.BytesIO()
+        with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=6, mtime=0) as fh:
+            fh.write(body)
+        compressed = buffer.getvalue()
+
+        new_headers = [
+            (name, value)
+            for name, value in headers
+            if name.lower() not in {"content-length", "content-encoding"}
+        ]
+        new_headers.append(("Content-Encoding", "gzip"))
+        new_headers.append(("Content-Length", str(len(compressed))))
+        # Vary: Accept-Encoding lets caches store both the gzip and identity
+        # variants without serving the wrong one to a non-gzip client.
+        if not any(name.lower() == "vary" for name, _ in new_headers):
+            new_headers.append(("Vary", "Accept-Encoding"))
+        start_response(captured["status"], new_headers, captured.get("exc_info"))
+        return [compressed]
 
 
 class ThreadedWSGIServer(ThreadingMixIn):

@@ -464,13 +464,14 @@ code {
   gap: 10px;
 }
 
+/* No backdrop-filter here — the per-node blur was forcing a fresh compositor
+   layer on every repaint, which is most of the visible lag during polling. */
 .workflow-node {
   min-width: 0;
   padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.11);
-  backdrop-filter: blur(6px);
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .workflow-node span {
@@ -1770,6 +1771,23 @@ code {
   font-size: 12px;
 }
 
+/* Compact val_loss readout under each fine-tune run row. The svg shares the
+   surrounding text color so the curve picks up theme + status accents
+   without us having to maintain a separate palette. */
+.run-val-loss {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.run-val-loss-spark {
+  flex: 0 0 auto;
+  color: var(--accent);
+  display: block;
+}
+
 .table-scroll {
   overflow-x: auto;
   max-width: 100%;
@@ -2041,9 +2059,9 @@ dialog.dashboard-dialog {
   box-shadow: 0 28px 70px rgba(24, 33, 30, 0.28);
 }
 
+/* Plain dim instead of a blurred backdrop — same effect, no GPU blur pass. */
 dialog.dashboard-dialog::backdrop {
-  background: rgba(24, 33, 30, 0.56);
-  backdrop-filter: blur(2px);
+  background: rgba(24, 33, 30, 0.66);
 }
 
 .dialog-body {
@@ -2502,25 +2520,22 @@ button.secondary.danger:hover {
   --ring: 0 0 0 3px rgba(255, 154, 172, 0.32);
 }
 
-/* --- Interactive surfaces: unify hover + focus + transition --- */
+/* Cut the five-property transition down to two. With this many buttons and
+   tabs on a page, transitioning everything was thrashing the compositor on
+   each re-render; bg + shadow keeps the hover feel for free. */
 button,
 .tab-link,
 a {
   transition:
-    background var(--transition),
-    color var(--transition),
-    border-color var(--transition),
-    box-shadow var(--transition),
-    transform var(--transition);
+    background var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 button:hover:not(:disabled) {
-  transform: var(--hover-lift);
   box-shadow: var(--shadow);
 }
 
 button:active:not(:disabled) {
-  transform: translateY(0);
   box-shadow: var(--shadow-soft);
 }
 
@@ -2644,19 +2659,20 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* --- Panels & cards: subtle hover lift for tactile feedback --- */
+/* Drop the transform-on-hover lift across cards. On the busy pages it was
+   repainting big chunks of the screen on each state poll; the shadow swap
+   alone is enough to keep cards feeling interactive. */
 .panel,
 .summary-card,
 .feature-card,
 .project-card,
 .command-card {
-  transition: transform var(--transition), box-shadow var(--transition);
+  transition: box-shadow var(--transition-fast);
 }
 
 .summary-card:hover,
 .feature-card:hover,
 .project-card:hover {
-  transform: var(--hover-lift);
   box-shadow: var(--shadow);
 }
 
@@ -2671,10 +2687,8 @@ table thead th {
   border-bottom: 1px solid var(--line);
 }
 
-table tbody tr {
-  transition: background var(--transition-fast);
-}
-
+/* No row-hover transition. Diarization / training-labels tables push hundreds
+   of rows; per-row transitions wreck the compositor. Snap the color in. */
 table tbody tr:hover {
   background: rgba(77, 135, 152, 0.06);
 }
@@ -2860,6 +2874,8 @@ body {
   box-shadow: none;
 }
 
+/* Sticky tab bar without the blur. The 10px backdrop-filter was rerasterizing
+   the area under the bar on every scroll — by far the worst offender. */
 .tab-nav {
   position: sticky;
   top: 0;
@@ -2867,8 +2883,7 @@ body {
   padding: 6px;
   margin-bottom: 12px;
   border-color: var(--line);
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(10px);
+  background: var(--panel-solid);
   box-shadow: none;
 }
 

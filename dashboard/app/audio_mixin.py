@@ -156,11 +156,20 @@ class AudioMixin:
     """Audio inventory, folder management, uploads, and reference rewrites."""
 
     def audio_inventory(self) -> list[Path]:
-        """Return the sorted input inventory for pages that need file selection."""
+        """Return the sorted input inventory for pages that need file selection.
 
-        # YouTube conversion and Slurm jobs create WAVs from separate processes,
-        # so an in-process cache can hide fresh media from the Media Library.
-        return iter_audio_files(self.audio_dir)
+        Briefly cached (~2 s). YouTube conversion and Slurm jobs land WAVs
+        from separate processes, so a long-lived cache can hide fresh media —
+        but a 2 s window matches the polling cadence and stops the Media
+        Library from re-walking ``audio_in/`` for every page-state refresh
+        within the same poll burst.
+        """
+
+        return self.cached_value(
+            "audio_inventory",
+            ttl_seconds=2.0,
+            builder=lambda: iter_audio_files(self.audio_dir),
+        )
 
     def audio_folder_rows(
         self,
@@ -222,20 +231,28 @@ class AudioMixin:
         return rows
 
     def audio_input_count(self) -> int:
-        """Count supported input media without sorting the full inventory."""
+        """Count supported input media without sorting the full inventory.
 
-        if not self.audio_dir.is_dir():
-            return 0
-        resolved_audio_dir = self.audio_dir.resolve()
-        return sum(
-            1
-            for candidate in resolved_audio_dir.rglob("*")
-            if (
-                candidate.is_file()
-                and candidate.suffix.lower() in WORKSPACE_MEDIA_SUFFIXES
-                and "_whisper_input" not in candidate.stem
+        Cached for the same window as ``audio_inventory`` so the per-second
+        tracking poll stops re-walking the whole ``audio_in/`` tree to
+        recompute a number that changes at human pace.
+        """
+
+        def _build() -> int:
+            if not self.audio_dir.is_dir():
+                return 0
+            resolved_audio_dir = self.audio_dir.resolve()
+            return sum(
+                1
+                for candidate in resolved_audio_dir.rglob("*")
+                if (
+                    candidate.is_file()
+                    and candidate.suffix.lower() in WORKSPACE_MEDIA_SUFFIXES
+                    and "_whisper_input" not in candidate.stem
+                )
             )
-        )
+
+        return self.cached_value("audio_input_count", ttl_seconds=3.0, builder=_build)
 
     def queue_size(self) -> int:
         """Count queued YouTube URLs with the same short TTL as other dashboard data."""

@@ -526,14 +526,21 @@ class FineTuningMixin:
                 used_rttm_stems: set[str] = set()
                 used_transcript_stems: set[str] = set()
                 for audio_path in server_audio_paths:
-                    audio_stem = audio_path.stem
-                    rttm_path = rttm_by_stem.get(audio_stem)
+                    audio_stems = self.training_audio_pair_stems(audio_path)
+                    audio_stem = audio_stems[0] if audio_stems else audio_path.stem
+                    rttm_path = next(
+                        (rttm_by_stem[stem] for stem in audio_stems if stem in rttm_by_stem),
+                        None,
+                    )
                     if rttm_path is None and single_pair_fallback:
                         rttm_path = server_rttm_paths[0]
                     if rttm_path is None:
                         failed_samples.append(f"{self.describe_path(audio_path)}: no RTTM file with matching stem.")
                         continue
-                    transcript_path = transcript_by_stem.get(audio_stem)
+                    transcript_path = next(
+                        (transcript_by_stem[stem] for stem in audio_stems if stem in transcript_by_stem),
+                        None,
+                    )
                     if transcript_path is None and len(server_audio_paths) == 1 and len(server_transcript_paths) == 1:
                         transcript_path = server_transcript_paths[0]
                     pair_succeeded = False
@@ -1287,31 +1294,168 @@ class FineTuningMixin:
             status="success",
         )
 
-    def training_source_files(self) -> dict[str, list[Path]]:
-        """Return server-side label and transcript files that can be paired for training."""
+    def training_audio_pair_stems(self, audio_path: Path) -> list[str]:
+        """Return filename stems that may identify labels for one audio file."""
+
+        stems = [audio_path.stem]
+        unnumbered_stem = NUMBERED_PREFIX.sub("", audio_path.stem, count=1)
+        if unnumbered_stem and unnumbered_stem not in stems:
+            stems.append(unnumbered_stem)
+        try:
+            relative_audio = self.audio_relative_path(audio_path)
+        except ValueError:
+            relative_audio = ""
+        if relative_audio:
+            flattened = self.diarization_output_base(relative_audio)
+            if flattened and flattened not in stems:
+                stems.append(flattened)
+        return stems
+
+    def completed_label_rttm_candidates_for_audio(self, audio_path: Path) -> list[Path]:
+        """Return RTTMs recorded by a completed manual label for this audio."""
+
+        try:
+            relative_audio = self.audio_relative_path(audio_path)
+        except ValueError:
+            relative_audio = ""
+        records = self.load_training_label_records()
+        record = records.get(relative_audio) or records.get(audio_path.name) or {}
+        if self.training_label_status(record) != "completed":
+            return []
+
+        candidates: list[Path] = []
+        raw_paths = [record.get("training_rttm_path")]
+        for usage in record.get("training_usage") or []:
+            if isinstance(usage, dict):
+                raw_paths.append(usage.get("sample_rttm_path"))
+        for raw_path in raw_paths:
+            value = str(raw_path or "").strip()
+            if not value:
+                continue
+            try:
+                candidate = self.resolve_under_root(value)
+            except ValueError:
+                candidate = Path(value).expanduser()
+            if candidate.is_file() and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def validated_training_rttm_for_audio(self, audio_path: Path) -> Path | None:
+        """Return the RTTM that makes one audio file ready for fine-tuning."""
+
+        # Some KaggleBabyNoises filenames blow past the filesystem's path
+        # limit when we tack on a ``.rttm`` suffix — Path.is_file() then
+        # raises ENAMETOOLONG and crashes the whole /fine-tuning render.
+        # Treating the OSError as "no sidecar" lets the caller move on.
+        def _is_file(path: Path) -> bool:
+            try:
+                return path.is_file()
+            except OSError:
+                return False
+
+        candidates: list[Path] = []
+        for stem in self.training_audio_pair_stems(audio_path):
+            sidecar = audio_path.with_name(f"{stem}.rttm")
+            if _is_file(sidecar) and sidecar not in candidates:
+                candidates.append(sidecar)
+        label_work_stems: list[str] = []
+        try:
+            relative_audio = self.audio_relative_path(audio_path)
+        except ValueError:
+            relative_audio = ""
+        if relative_audio:
+            flattened = self.diarization_output_base(relative_audio)
+            if flattened:
+                label_work_stems.append(flattened)
+            if "/" not in relative_audio and audio_path.stem not in label_work_stems:
+                label_work_stems.append(audio_path.stem)
+        else:
+            label_work_stems.append(audio_path.stem)
+        for stem in label_work_stems:
+            candidate = self.training_label_work_dir / f"{stem}.rttm"
+            if _is_file(candidate) and candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in self.completed_label_rttm_candidates_for_audio(audio_path):
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            try:
+                build_sample(audio_path, candidate, None)
+            except Exception:
+                continue
+            return candidate
+        return None
+
+    def ready_training_source_files(self) -> dict[str, object]:
+        """Return audio_in files that have a completed training-label record.
+
+        Strict filter: only audio with status="completed" in label_status.json
+        appears here, and only when its recorded RTTM still passes
+        ``build_sample`` validation. In-progress label_work drafts, raw corpus
+        sidecars, and project-internal RTTMs without a completed label are
+        intentionally excluded — the fine-tune picker should only surface
+        samples the user has finished labeling and that are ready to train on.
+
+        Stitched runs still flow in because ``mirror_stitched_into_media``
+        writes a completed-label record for every successful stitch before
+        we read the records below.
+        """
+
+        try:
+            for run_dir in self.stitched_run_directories(limit=100):
+                self.mirror_stitched_into_media(run_dir)
+        except Exception:
+            pass
+        audio_files: list[Path] = []
+        rttm_files: list[Path] = []
+        rttm_audio_map: dict[str, Path] = {}
+        records = self.load_training_label_records()
+        for relative_audio, record in records.items():
+            if not isinstance(record, dict):
+                continue
+            if self.training_label_status(record) != "completed":
+                continue
+            audio_path = self.audio_dir / relative_audio
+            if not audio_path.is_file():
+                continue
+            rttm_path: Path | None = None
+            for candidate in self.completed_label_rttm_candidates_for_audio(audio_path):
+                try:
+                    build_sample(audio_path, candidate, None)
+                except Exception:
+                    continue
+                rttm_path = candidate
+                break
+            if rttm_path is None:
+                continue
+            audio_files.append(audio_path)
+            rttm_files.append(rttm_path)
+            try:
+                rttm_audio_map[str(rttm_path.resolve())] = audio_path
+            except OSError:
+                rttm_audio_map[str(rttm_path)] = audio_path
+        # Stable order for the picker so consecutive renders don't reshuffle.
+        paired = sorted(
+            zip(audio_files, rttm_files),
+            key=lambda pair: str(pair[0]).lower(),
+        )
+        audio_files = [pair[0] for pair in paired]
+        rttm_files = [pair[1] for pair in paired]
+        return {
+            "audio_files": audio_files,
+            "rttm_files": rttm_files,
+            "rttm_audio_map": rttm_audio_map,
+        }
+
+    def training_source_files(self) -> dict[str, object]:
+        """Return server-side files that are ready to be paired for training."""
 
         return self.cached_value(
             "training_source_files",
             ttl_seconds=20.0,
             builder=lambda: {
-                # audio_in is included so RTTMs that ship next to a WAV
-                # (e.g. the JIBO Kids corpus, future pre-labeled sets) get
-                # surfaced in the SSH RTTM picker without forcing the user
-                # to copy them into a project first. Limit was bumped from
-                # 250 → 800 to leave room for label-pre-completed corpora.
-                "rttm_files": self.newest_files(
-                    search_roots=[
-                        self.audio_dir,
-                        self.stitched_dir,
-                        self.training_label_work_dir,
-                        self.root / "fine_tuning" / "projects",
-                        self.outputs_root,
-                        self.root / "job_outputs",
-                    ],
-                    suffixes=TRAINING_RTTM_SUFFIXES,
-                    limit=800,
-                    exclude_dir_names=TRAINING_SOURCE_SCAN_EXCLUDE_DIRS,
-                ),
+                **self.ready_training_source_files(),
                 "transcript_files": self.newest_files(
                     search_roots=[
                         self.audio_dir,
@@ -1328,8 +1472,38 @@ class FineTuningMixin:
         )
 
     def fine_tuning_project_metrics(self, project: dict[str, object]) -> dict[str, object]:
-        """Calculate presentation-ready dataset metrics for one fine-tuning project."""
+        """Calculate presentation-ready dataset metrics for one fine-tuning project.
 
+        Each render previously re-parsed every RTTM and ran ffprobe per audio
+        sample. We now cache by (project path, audio_dir mtime, rttm_dir
+        mtime, metadata.json mtime). Adding/removing RTTMs or audio bumps the
+        directory mtime, which invalidates the cache automatically.
+        """
+
+        project_path = Path(str(project.get("path", "")))
+        audio_dir = project_path / "audio"
+        rttm_dir = project_path / "rttm"
+
+        def _dir_mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        fingerprint = (
+            str(project_path),
+            _dir_mtime(audio_dir),
+            _dir_mtime(rttm_dir),
+            _dir_mtime(project_path / "artifacts" / "metadata.json"),
+        )
+        cache_key = f"fine_tuning_project_metrics::{fingerprint}"
+        return self.cached_value(
+            cache_key,
+            ttl_seconds=30.0,
+            builder=lambda: self._build_fine_tuning_project_metrics(project),
+        )
+
+    def _build_fine_tuning_project_metrics(self, project: dict[str, object]) -> dict[str, object]:
         project_path = Path(str(project.get("path", "")))
         audio_dir = project_path / "audio"
         rttm_dir = project_path / "rttm"

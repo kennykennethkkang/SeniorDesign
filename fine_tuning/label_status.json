@@ -1,5 +1,29 @@
 {
   "items": {
+    "ADSJinyoung/001_ad00.wav": {
+      "audio_file": "ADSJinyoung/001_ad00.wav",
+      "backend": "both",
+      "created_at_utc": "2026-05-08T14:32:15+00:00",
+      "include_transcript": false,
+      "issue_questions": "",
+      "label_segments": "21.702 23.509 Speaker_0\r\n41.653 60.803 Speaker_0\r\n61.183 79.641 Speaker_0\r\n79.826 84.447 Speaker_0",
+      "project_name": "uploaded-site-training",
+      "review_path": "outputs/diarization_runs/nemo/20260507T171843_diarization_nemo_01-items/ADSJinyoung__001_ad00_review.html",
+      "selected_training_target_label": "",
+      "source": "review_page",
+      "status": "draft",
+      "system_questions": [],
+      "target_backends": [
+        "nemo",
+        "pyannote"
+      ],
+      "target_projects": [
+        "nemo/uploaded-site-training",
+        "pyannote/uploaded-site-training"
+      ],
+      "transcript_text": "",
+      "updated_at_utc": "2026-05-08T15:48:18+00:00"
+    },
     "AdultDirectedSpeech/001_ad00.wav": {
       "audio_file": "AdultDirectedSpeech/001_ad00.wav",
       "backend": "both",
@@ -11599,6 +11623,6 @@
       "updated_at_utc": "2026-05-04T22:12:19+00:00"
     }
   },
-  "updated_at_utc": "2026-05-07T15:22:02+00:00",
+  "updated_at_utc": "2026-05-08T15:48:18+00:00",
   "version": 1
 }

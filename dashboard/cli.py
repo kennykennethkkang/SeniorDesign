@@ -13,6 +13,7 @@ import sys
 
 from dashboard.constants import DEFAULT_SERVER_MODE, DEFAULT_SERVER_THREADS
 from dashboard.servers import (
+    GzipMiddleware,
     bind_server,
     built_in_make_server,
     waitress_make_server,
@@ -92,8 +93,12 @@ def main(argv: list[str] | None = None, app=None) -> int:
     elif server_mode == "wsgiref":
         runtime_label = "standard-library WSGI"
 
+    # Wrap with gzip compression at the server boundary only — keep tests
+    # talking to the bare WSGI app so they see uncompressed responses.
+    served_app = GzipMiddleware(app)
+
     try:
-        server, actual_port = bind_server(host, requested_port, app, make_server_fn=make_server_fn)
+        server, actual_port = bind_server(host, requested_port, served_app, make_server_fn=make_server_fn)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             print(f"Error: {exc}", file=sys.stderr)
