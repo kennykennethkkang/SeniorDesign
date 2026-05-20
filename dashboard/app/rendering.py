@@ -801,6 +801,8 @@ class RenderingMixin:
                     training_label_records=self.load_training_label_records(),
                     model_comparisons=self.review_model_comparisons_for_srt(srt_path),
                     fine_tuning_projects=list_projects(root=self.root),
+                    known_speakers=self.all_known_speakers(),
+                    media_preview_url_template=self.audio_preview_url_template(),
                     quiet=True,
                 )
             except Exception:
@@ -1003,26 +1005,76 @@ class RenderingMixin:
             for key, value in raw_training_label_records.items()
             if isinstance(value, dict)
         }
-        training_label_rows = self.frontend_training_label_rows(
-            [path for path in raw_audio_paths if isinstance(path, Path)],
-            training_label_records,
-            script_name,
+        # /training-labels uses a folder-picker UI that fetches rows on
+        # demand via /api/training-labels. The initial page state still
+        # embeds rows for SMALL inventories (<= 500 files) so legacy
+        # callers + the page-not-yet-fetched view stay populated. Above
+        # the threshold we skip the build entirely; the React queue
+        # waits for a folder click. /fine-tuning always builds rows
+        # because its evaluable-files list reads them.
+        inventory_path_count = sum(1 for path in raw_audio_paths if isinstance(path, Path))
+        embed_training_rows_inline = inventory_path_count <= 500
+        needs_training_label_rows = (
+            current_path == "/fine-tuning"
+            or (current_path == "/training-labels" and embed_training_rows_inline)
         )
-        audio_files = [
-            {
-                "name": self.audio_relative_path(path) if isinstance(path, Path) else str(path),
-                "fileName": path.name,
-                "folder": (
-                    self.audio_relative_path(path).split("/", 1)[0]
-                    if isinstance(path, Path) and "/" in self.audio_relative_path(path)
-                    else "Unsorted Root"
+        # Match the API slice's diarized-first ordering for the inline
+        # embed too, so users on small inventories see the same row
+        # order as the live fetch path.
+        training_label_rows = (
+            self.frontend_training_label_rows(
+                self.sort_paths_diarized_first(
+                    [path for path in raw_audio_paths if isinstance(path, Path)]
                 ),
-                "path": self.describe_path(path) if isinstance(path, Path) else str(path),
-                "type": path.suffix.lower() or "file",
-            }
-            for path in raw_audio_paths
-            if isinstance(path, Path)
-        ]
+                training_label_records,
+                script_name,
+            )
+            if needs_training_label_rows
+            else []
+        )
+        # /training-labels and /fine-tuning no longer need the top-level
+        # ctx.audioFiles array on a large inventory — their queues/pickers
+        # fetch what they need via /api/training-labels and /api/audio-files
+        # respectively. /uploads, /stitching, /diarization still read it,
+        # so keep building for those.
+        audio_files_pages = {"/uploads", "/stitching", "/diarization"}
+        embed_audio_files_inline = (
+            current_path in audio_files_pages
+            or (current_path in {"/training-labels", "/fine-tuning"} and embed_training_rows_inline)
+        )
+        # Hoist audio_dir.resolve() and self.root out of the per-file loop —
+        # the previous comprehension called `audio_relative_path` three times
+        # per file (each one running `path.resolve()` + `audio_dir.resolve()`),
+        # plus a separate `describe_path`. With 6 k+ audio files on the
+        # networked filesystem this dominated the cold render (~4 s of 5 s
+        # spent in pathlib.resolve). Each Path here already comes back
+        # absolute from `iter_audio_files`, so we can take .relative_to()
+        # against the resolved roots directly without another stat walk.
+        audio_files: list[dict[str, object]] = []
+        if embed_audio_files_inline:
+            audio_files_root = self.audio_dir.resolve()
+            workspace_root = self.root
+            for path in raw_audio_paths:
+                if not isinstance(path, Path):
+                    continue
+                try:
+                    relative_to_audio = path.relative_to(audio_files_root).as_posix()
+                except ValueError:
+                    relative_to_audio = path.name
+                try:
+                    workspace_relative = str(path.relative_to(workspace_root))
+                except ValueError:
+                    workspace_relative = str(path)
+                folder = relative_to_audio.split("/", 1)[0] if "/" in relative_to_audio else "Unsorted Root"
+                audio_files.append(
+                    {
+                        "name": relative_to_audio,
+                        "fileName": path.name,
+                        "folder": folder,
+                        "path": workspace_relative,
+                        "type": path.suffix.lower() or "file",
+                    }
+                )
         raw_training_sources = context.get("training_source_files") or {}
         if not isinstance(raw_training_sources, dict):
             raw_training_sources = {}
@@ -1122,6 +1174,9 @@ class RenderingMixin:
                 "clusterQueue": self.frontend_route("/api/cluster-queue", script_name),
                 "runtimeEstimate": self.frontend_route("/api/runtime-estimate", script_name),
                 "fileSearch": self.frontend_route("/api/file-search", script_name),
+                "trainingFolders": self.frontend_route("/api/training-folders", script_name),
+                "trainingLabelsApi": self.frontend_route("/api/training-labels", script_name),
+                "audioFilesApi": self.frontend_route("/api/audio-files", script_name),
                 "fineTuneCreateProject": self.frontend_route("/fine-tuning/create-project", script_name),
                 "fineTuneUpload": self.frontend_route("/fine-tuning/upload-sample", script_name),
                 "fineTunePrepare": self.frontend_route("/fine-tuning/prepare", script_name),

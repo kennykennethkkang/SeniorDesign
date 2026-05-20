@@ -74,6 +74,7 @@ from fine_tuning_manager import (
     read_project_display as ftm_read_project_display,
     run_status as fine_tuning_run_status,
     sanitize_filename,
+    save_project_sample_links,
     save_project_sample_streams,
     slugify,
 )
@@ -158,13 +159,159 @@ from dashboard.cli import build_parser
 class TrainingLabelsMixin:
     """Training-label record persistence and segment parsing."""
 
-    def load_training_label_records(self) -> dict[str, dict[str, object]]:
-        """Load per-upload labeling state for the training label queue."""
+    def handle_training_folders(self, environ):
+        """Return per-folder label-status counts for the /training-labels picker.
 
-        if not self.training_label_status_path.is_file():
+        The page paints folder buckets first; rows are only fetched when the
+        user picks one. Walking the inventory + the label_status records
+        once produces all counts at once, which is far cheaper than
+        shipping ~6 k row dicts on every page load.
+        """
+
+        audio_files = self.audio_inventory()
+        records = self.load_training_label_records()
+        rttm_index_lookup = getattr(self, "synthetic_rttm_index", None)
+        rttm_index = rttm_index_lookup() if callable(rttm_index_lookup) else None
+        synthetic_lookup = getattr(self, "synthetic_rttm_for_audio_via_index", None)
+
+        empty = {"total": 0, "not_started": 0, "draft": 0, "needs_review": 0, "completed": 0}
+        folders_data: dict[str, dict[str, int]] = {}
+        totals = dict(empty)
+        audio_root = self._resolved_audio_dir()
+
+        for path in audio_files:
+            try:
+                rel = path.relative_to(audio_root).as_posix()
+            except ValueError:
+                continue
+            folder_key = rel.split("/", 1)[0] if "/" in rel else "__root__"
+            record = records.get(rel) or records.get(path.name)
+            status = self.training_label_status(record)
+            if status == "not_started" and rttm_index is not None and callable(synthetic_lookup):
+                if synthetic_lookup(path, rttm_index) is not None:
+                    status = "completed"
+            bucket = folders_data.setdefault(folder_key, dict(empty))
+            bucket["total"] += 1
+            bucket[status] = bucket.get(status, 0) + 1
+            totals["total"] += 1
+            totals[status] = totals.get(status, 0) + 1
+
+        folder_rows = []
+        for folder_key, counts in folders_data.items():
+            display_name = "Unsorted Root" if folder_key == "__root__" else folder_key
+            folder_rows.append({"value": folder_key, "name": display_name, **counts})
+        folder_rows.sort(key=lambda row: (row["value"] != "__root__", row["name"].lower()))
+
+        return self.json_response("200 OK", {"folders": folder_rows, "totals": totals})
+
+    def handle_training_labels_slice(self, environ):
+        """Return one slice of training-label rows for the chosen folder/status.
+
+        Query params:
+          folder  - folder value from /api/training-folders (``__root__`` for
+                    files directly under audio_in/). Empty = all folders.
+          status  - optional filter: ``not_started``/``draft``/``needs_review``/``completed``.
+          q       - optional case-insensitive substring filter on the audio path.
+          limit   - max rows to return (capped at 200, default 50).
+          offset  - rows to skip for pagination.
+        """
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        folder = (query.get("folder") or [""])[0].strip()
+        status_filter = (query.get("status") or [""])[0].strip().lower()
+        needle = (query.get("q") or [""])[0].strip().lower()
+        # hide_completed=1 drops completed rows on the server BEFORE counting,
+        # so the pagination total matches what the user actually sees. The
+        # frontend's "Show completed labels" toggle drives this flag — keeping
+        # the filter server-side makes 'Page 3 of 12' an honest count instead
+        # of 'showing 250 fetched but only 87 visible after client-side
+        # filter'.
+        hide_completed = (query.get("hide_completed") or [""])[0].strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            limit = max(1, min(int((query.get("limit") or ["50"])[0]), 500))
+        except ValueError:
+            limit = 50
+        try:
+            offset = max(0, int((query.get("offset") or ["0"])[0]))
+        except ValueError:
+            offset = 0
+
+        audio_files = self.audio_inventory()
+        audio_root = self._resolved_audio_dir()
+        records = self.load_training_label_records()
+        rttm_index_lookup = getattr(self, "synthetic_rttm_index", None)
+        rttm_index = rttm_index_lookup() if callable(rttm_index_lookup) else None
+        synthetic_lookup = getattr(self, "synthetic_rttm_for_audio_via_index", None)
+
+        matching: list[Path] = []
+        for path in audio_files:
+            try:
+                rel = path.relative_to(audio_root).as_posix()
+            except ValueError:
+                continue
+            if folder == "__root__":
+                if "/" in rel:
+                    continue
+            elif folder:
+                if not rel.startswith(folder + "/"):
+                    continue
+            if needle and needle not in rel.lower():
+                continue
+            if status_filter or hide_completed:
+                record = records.get(rel) or records.get(path.name)
+                row_status = self.training_label_status(record)
+                if row_status == "not_started" and rttm_index is not None and callable(synthetic_lookup):
+                    if synthetic_lookup(path, rttm_index) is not None:
+                        row_status = "completed"
+                if status_filter and row_status != status_filter:
+                    continue
+                if hide_completed and row_status == "completed":
+                    continue
+            matching.append(path)
+
+        # Surface diarized work first so the most actionable rows land on
+        # page 1 of the slice. Done before offset/limit so the ranking
+        # spans the entire folder, not just the current page.
+        matching = self.sort_paths_diarized_first(matching)
+        total = len(matching)
+        page_paths = matching[offset:offset + limit]
+        rows = self._build_frontend_training_label_rows(
+            page_paths,
+            records,
+            self.script_name(environ),
+        )
+        return self.json_response(
+            "200 OK",
+            {"rows": rows, "total": total, "offset": offset, "limit": limit},
+        )
+
+    def load_training_label_records(self) -> dict[str, dict[str, object]]:
+        """Load per-upload labeling state for the training label queue.
+
+        Caches by (mtime, size) of label_status.json — the file is ~750 KB and
+        used to be re-parsed on every page render of /training-labels and
+        /fine-tuning. Saving a label rewrites the file and bumps mtime, so
+        the cached copy is replaced on the next call automatically.
+        """
+
+        status_path = self.training_label_status_path
+        if not status_path.is_file():
             return {}
         try:
-            payload = json.loads(self.training_label_status_path.read_text(encoding="utf-8"))
+            stat = status_path.stat()
+        except OSError:
+            return {}
+        fingerprint = (str(status_path), stat.st_mtime, stat.st_size)
+        cached = getattr(self, "_training_label_records_cache", None)
+        if cached is not None and cached[0] == fingerprint:
+            # Hand back a shallow copy: upsert_training_label_record mutates
+            # the returned dict, and we don't want that bleeding into the
+            # cached snapshot. Inner records are read-only on the hot path,
+            # so a shallow copy is enough.
+            return dict(cached[1])
+
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
         raw_items = payload.get("items", payload) if isinstance(payload, dict) else {}
@@ -177,7 +324,8 @@ class TrainingLabelsMixin:
             audio_name = self.clean_audio_selection_value(str(raw_name))
             if audio_name:
                 records[audio_name] = dict(raw_record)
-        return records
+        self._training_label_records_cache = (fingerprint, records)
+        return dict(records)
 
     def save_training_label_records(self, records: dict[str, dict[str, object]]) -> None:
         """Persist the label queue as stable JSON for the dashboard."""
@@ -407,6 +555,80 @@ class TrainingLabelsMixin:
             for char in raw_value.strip()
         ).strip("_-")
         return token or fallback
+
+    def sort_paths_diarized_first(self, paths: list[Path]) -> list[Path]:
+        """Re-order audio paths so rows the user can actually act on float up.
+
+        Two-tier ordering:
+          1. Has this file ever appeared in a diarization run's summary?
+             If yes it goes in the top group; if no it stays alphabetical
+             at the bottom. ('Diarized' is liberal here — even failed runs
+             count, since a failed-and-rerun loop is part of the workflow.)
+          2. Within the diarized group, surface drafts and questions before
+             not-yet-labeled files and already-completed work. Within each
+             status tier, alphabetical.
+
+        Computes diarization + label lookups once and reuses them for every
+        key call so a 6 k-file inventory sorts in tens of milliseconds.
+        """
+
+        diarization_records = self.diarization_model_history_lookup()
+        label_records = self.load_training_label_records()
+        rttm_index_lookup = getattr(self, "synthetic_rttm_index", None)
+        rttm_index = rttm_index_lookup() if callable(rttm_index_lookup) else None
+        synthetic_lookup = getattr(self, "synthetic_rttm_for_audio_via_index", None)
+        audio_root = self._resolved_audio_dir()
+        status_rank = {"draft": 0, "needs_review": 1, "not_started": 2, "completed": 3}
+
+        def sort_key(path: Path) -> tuple:
+            try:
+                audio_name = path.relative_to(audio_root).as_posix()
+            except ValueError:
+                audio_name = path.name
+            has_diarization = bool(diarization_records.get(audio_name))
+            record = label_records.get(audio_name) or label_records.get(path.name) or {}
+            status = self.training_label_status(record)
+            if status == "not_started" and rttm_index is not None and callable(synthetic_lookup):
+                if synthetic_lookup(path, rttm_index) is not None:
+                    status = "completed"
+            # Group 0 = diarized, group 1 = not. Within group 0, status_rank
+            # decides; within group 1 we leave rank at 99 so files just sort
+            # alphabetically below the diarized block.
+            group = 0 if has_diarization else 1
+            rank = status_rank.get(status, 99) if has_diarization else 99
+            return (group, rank, audio_name.lower())
+
+        return sorted(paths, key=sort_key)
+
+    def all_known_speakers(self) -> list[str]:
+        """Return every distinct speaker name the workspace has ever recorded.
+
+        Used to populate the review HTML's speaker dropdown so a user can
+        reuse names they entered for other audios. Pulls from each label
+        record's parsed ``label_segments`` (skipping the diarizer's
+        placeholder names like SPEAKER_00) and from the explicit
+        ``known_speakers`` field if a record sets one.
+        """
+
+        records = self.load_training_label_records()
+        seen: set[str] = set()
+        for record in records.values():
+            if not isinstance(record, dict):
+                continue
+            raw_segments = str(record.get("label_segments") or "")
+            if raw_segments.strip():
+                segments, _ = self.parse_training_label_segments(raw_segments)
+                for segment in segments:
+                    speaker = str(segment.get("speaker") or "").strip()
+                    if speaker:
+                        seen.add(speaker)
+            extras = record.get("known_speakers") or []
+            if isinstance(extras, (list, tuple)):
+                for value in extras:
+                    speaker = str(value or "").strip()
+                    if speaker:
+                        seen.add(speaker)
+        return sorted(seen, key=lambda value: value.lower())
 
     def parse_training_label_segments(
         self,
@@ -1039,17 +1261,20 @@ class TrainingLabelsMixin:
                     backend=target["backend"],
                     audio_name=audio_name,
                 )
-                with audio_path.open("rb") as audio_stream:
-                    sample = save_project_sample_streams(
-                        project_name=target["project_name"],
-                        backend=target["backend"],
-                        audio_name=project_audio_filename,
-                        audio_stream=audio_stream,
-                        rttm_name=f"{label_stem}.rttm",
-                        rttm_stream=io.BytesIO(rttm_text.encode("utf-8")),
-                        transcript_text=transcript_text,
-                        root=self.root,
-                    )
+                # Symlink the audio_in source into the project rather than
+                # copying its bytes — duplicating gigabytes of stitched WAVs
+                # per project was the disk-usage cliff the user wants to
+                # avoid. RTTM is small and gets rewritten in canonical form
+                # via the label_work draft path we wrote a few lines up.
+                sample = save_project_sample_links(
+                    project_name=target["project_name"],
+                    backend=target["backend"],
+                    audio_path=audio_path,
+                    audio_name=project_audio_filename,
+                    rttm_path=review_rttm_path,
+                    transcript_text=transcript_text,
+                    root=self.root,
+                )
                 completed_targets.append({**target, "sample": sample})
         except Exception as exc:
             question = f"{exc} Should this item stay saved for later until the training sample can be written?"

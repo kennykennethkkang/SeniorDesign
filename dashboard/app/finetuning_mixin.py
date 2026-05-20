@@ -76,6 +76,7 @@ from fine_tuning_manager import (
     project_dir as fine_tune_project_dir,
     run_status as fine_tuning_run_status,
     sanitize_filename,
+    save_project_sample_links,
     save_project_sample_streams,
     set_project_auto_train,
     set_project_display_name,
@@ -286,8 +287,27 @@ class FineTuningMixin:
         rttm_path: Path,
         transcript_path: Path | None = None,
         transcript_text: str = "",
+        link_audio: bool = False,
     ):
-        """Copy a labeled audio+RTTM pair from the SSH workspace into the project's training data directory."""
+        """Bring a labeled audio+RTTM pair into a project's training data dir.
+
+        ``link_audio`` swaps the audio/transcript byte-copy for a symlink so
+        a project can reuse the original media already on disk. The RTTM
+        always gets rewritten in canonical form regardless of the link
+        choice — it's small and the trainers depend on the normalized
+        session_id.
+        """
+
+        if link_audio:
+            return save_project_sample_links(
+                project_name=project_name,
+                backend=backend,
+                audio_path=audio_path,
+                rttm_path=rttm_path,
+                transcript_path=transcript_path,
+                transcript_text=transcript_text,
+                root=self.root,
+            )
 
         audio_stream = audio_path.open("rb")
         rttm_stream = rttm_path.open("rb")
@@ -470,6 +490,10 @@ class FineTuningMixin:
         rttm_items = self.uploaded_file_items(form, "training_rttm")
         transcript_items = self.uploaded_file_items(form, "training_transcript")
         transcript_text = (form.getfirst("training_transcript_text") or "").strip()
+        # SSH-selected audio is always symlinked into the project so we don't
+        # duplicate gigabytes of media on disk. Browser uploads still copy
+        # because the source is ephemeral form data, not a stable file on disk.
+        link_existing_audio = True
 
         saved_samples = []
         failed_samples: list[str] = []
@@ -554,6 +578,7 @@ class FineTuningMixin:
                                     rttm_path=rttm_path,
                                     transcript_path=transcript_path,
                                     transcript_text=transcript_text,
+                                    link_audio=link_existing_audio,
                                 )
                             )
                             pair_succeeded = True
@@ -1336,7 +1361,15 @@ class FineTuningMixin:
                 candidate = self.resolve_under_root(value)
             except ValueError:
                 candidate = Path(value).expanduser()
-            if candidate.is_file() and candidate not in candidates:
+            # Same ENAMETOOLONG guard as validated_training_rttm_for_audio —
+            # KaggleBabyNoises stems concatenated through stitching push
+            # paths past the kernel's NAME_MAX, and a raw is_file() then
+            # crashes the whole render instead of just skipping the sample.
+            try:
+                is_present = candidate.is_file()
+            except OSError:
+                continue
+            if is_present and candidate not in candidates:
                 candidates.append(candidate)
         return candidates
 

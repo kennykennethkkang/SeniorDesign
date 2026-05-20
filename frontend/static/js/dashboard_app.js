@@ -37,12 +37,51 @@
   const IDLE_TRACKING_INTERVAL_MS = 15000;
   const ACTIVE_RUN_STATUSES = ["running", "submitted", "pending", "waiting", "configuring"];
   const THEME_STORAGE_KEY = "ml-speech-diarization-theme";
-  const AUDIO_CACHE_DB_NAME = "ml-speech-audio-cache";
-  const AUDIO_CACHE_STORE = "blobs";
-  const AUDIO_CACHE_DB_VERSION = 1;
-  const AUDIO_CACHE_ALL_CONCURRENCY = 2;
   const DEFAULT_FILE_VIEW_LIMIT = 250;
   const FILE_VIEW_LIMIT_OPTIONS = [100, 250, 500, 1000];
+  // One-shot wipe of the legacy IndexedDB audio cache. The "Cache All Audio"
+  // button has been removed from the dashboard, but the database keeps any
+  // blobs the previous version stored, and the review HTML still prefers
+  // those cached blobs over the on-disk file. Deleting the DB here lets the
+  // next review-page open stream fresh bytes from audio_in/, so changes to
+  // the underlying WAV are visible immediately. Runs once per page load
+  // (browser fast-paths the deleteDatabase call when no DB exists).
+  if (window.indexedDB && typeof window.indexedDB.deleteDatabase === "function") {
+    try { window.indexedDB.deleteDatabase("ml-speech-audio-cache"); } catch (_error) {}
+  }
+
+  // Surface uncaught JS errors and unhandled promise rejections directly
+  // into the dashboard-root element. A pure black screen leaves the user
+  // (and me, looking at the log) with nothing to act on; rendering the
+  // stack inline turns "the site is broken" into "here's the line number".
+  function showDashboardError(label, error) {
+    const target = document.getElementById("dashboard-root");
+    if (!target) return;
+    const detail = error && error.stack ? error.stack : String(error || "(no detail)");
+    target.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "max-width:900px;margin:48px auto;padding:24px;font-family:system-ui,sans-serif;color:#3d0a0a;background:#fff5f5;border:1px solid #f3b1b1;border-radius:8px;";
+    const title = document.createElement("h1");
+    title.textContent = "Dashboard failed to load";
+    title.style.cssText = "margin:0 0 8px;font-size:20px;color:#a32035;";
+    const sub = document.createElement("p");
+    sub.textContent = label + " — paste the text below if you report this.";
+    sub.style.cssText = "margin:0 0 12px;font-size:13px;color:#5a1a1a;";
+    const pre = document.createElement("pre");
+    pre.textContent = detail;
+    pre.style.cssText = "white-space:pre-wrap;font-size:12px;background:#fff;border:1px solid #f3b1b1;padding:12px;border-radius:6px;overflow:auto;";
+    wrap.appendChild(title);
+    wrap.appendChild(sub);
+    wrap.appendChild(pre);
+    target.appendChild(wrap);
+  }
+  window.addEventListener("error", function (event) {
+    showDashboardError("Uncaught error", event.error || event.message);
+  });
+  window.addEventListener("unhandledrejection", function (event) {
+    showDashboardError("Unhandled promise rejection", event.reason);
+  });
+
   const root = ReactDOM.createRoot(document.getElementById("dashboard-root"));
   let state = initialState;
   let ctx = state.context || {};
@@ -1207,142 +1246,6 @@
       return `${formatNumber(safeBytes / 1024, 1)} KB`;
     }
     return `${formatNumber(safeBytes, 0)} bytes`;
-  }
-
-  function normalizedAudioCacheUrl(href) {
-    const raw = text(href).trim();
-    if (!raw) return "";
-    try {
-      return new URL(raw, window.location.href).href;
-    } catch (_error) {
-      return "";
-    }
-  }
-
-  function openAudioCacheDb() {
-    return new Promise((resolve) => {
-      if (!window.indexedDB) {
-        resolve(null);
-        return;
-      }
-      let request;
-      try {
-        request = window.indexedDB.open(AUDIO_CACHE_DB_NAME, AUDIO_CACHE_DB_VERSION);
-      } catch (_error) {
-        resolve(null);
-        return;
-      }
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(AUDIO_CACHE_STORE)) {
-          db.createObjectStore(AUDIO_CACHE_STORE);
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => resolve(null);
-      request.onblocked = () => resolve(null);
-    });
-  }
-
-  // Wait for the txn to commit (oncomplete) before resolving — a parallel
-  // write that aborts can still take this read down with it, and we don't
-  // want to hand back data that never actually persisted.
-  function audioCacheRead(db, key) {
-    return new Promise((resolve) => {
-      try {
-        const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
-        const request = tx.objectStore(AUDIO_CACHE_STORE).get(key);
-        let result = null;
-        request.onsuccess = () => {
-          result = request.result || null;
-        };
-        request.onerror = () => {
-          result = null;
-        };
-        tx.oncomplete = () => resolve(result);
-        tx.onerror = () => resolve(null);
-        tx.onabort = () => resolve(null);
-      } catch (_error) {
-        resolve(null);
-      }
-    });
-  }
-
-  // Same idea on writes — wait for tx.oncomplete. Resolving on request.onsuccess
-  // let aborted transactions look successful, so "Cache All Audio" silently
-  // dropped writes and reported 0 cached on the next run.
-  function audioCacheWrite(db, key, value) {
-    return new Promise((resolve) => {
-      try {
-        const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
-        const request = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
-        let putOk = false;
-        request.onsuccess = () => {
-          putOk = true;
-        };
-        request.onerror = () => {
-          putOk = false;
-        };
-        tx.oncomplete = () => resolve(putOk);
-        tx.onerror = () => resolve(false);
-        tx.onabort = () => resolve(false);
-      } catch (_error) {
-        resolve(false);
-      }
-    });
-  }
-
-  async function fetchAudioBlobForCache(url, signal, onProgress) {
-    const response = await fetch(url, {
-      credentials: "same-origin",
-      cache: "force-cache",
-      signal,
-    });
-    if (!response.ok) {
-      throw new Error(`Audio fetch failed with status ${response.status}`);
-    }
-    const total = Number.parseInt(response.headers.get("content-length") || "0", 10) || 0;
-    if (!response.body || !response.body.getReader) {
-      const blob = await response.blob();
-      if (onProgress) onProgress(blob.size, total || blob.size);
-      return { blob, size: total || blob.size };
-    }
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    let lastProgressAt = 0;
-    while (true) {
-      const step = await reader.read();
-      if (step.done) break;
-      chunks.push(step.value);
-      received += step.value.byteLength || step.value.length || 0;
-      const now = Date.now();
-      if (onProgress && now - lastProgressAt > 500) {
-        lastProgressAt = now;
-        onProgress(received, total);
-      }
-    }
-    const contentType = response.headers.get("content-type") || "audio/wav";
-    const blob = new Blob(chunks, { type: contentType });
-    if (onProgress) onProgress(blob.size, total || blob.size);
-    return { blob, size: total || blob.size };
-  }
-
-  async function cacheAudioUrl(db, item, signal, onProgress) {
-    const cached = await audioCacheRead(db, item.url);
-    if (cached && cached.blob && cached.blob.size > 0) {
-      return { status: "cached", bytes: cached.size || cached.blob.size };
-    }
-    const result = await fetchAudioBlobForCache(item.url, signal, onProgress);
-    const stored = await audioCacheWrite(db, item.url, {
-      blob: result.blob,
-      size: result.size,
-      savedAt: Date.now(),
-    });
-    if (!stored) {
-      throw new Error("Could not write audio to local cache");
-    }
-    return { status: "stored", bytes: result.size };
   }
 
   function formatPercent(value, digits = 1) {
@@ -4413,157 +4316,6 @@
     );
   }
 
-  function TrainingAudioCacheAll({ rows }) {
-    const cacheItems = React.useMemo(() => {
-      const seen = new Set();
-      const items = [];
-      (rows || []).forEach((row) => {
-        const url = normalizedAudioCacheUrl(row.audioHref);
-        if (!url || seen.has(url)) return;
-        seen.add(url);
-        items.push({
-          url,
-          name: row.fileName || row.name || url,
-        });
-      });
-      return items;
-    }, [rows]);
-    const [cacheState, setCacheState] = React.useState({
-      status: "idle",
-      done: 0,
-      total: 0,
-      message: "",
-    });
-    const cacheAbortRef = React.useRef(null);
-    React.useEffect(() => {
-      return () => {
-        if (cacheAbortRef.current) {
-          cacheAbortRef.current.abort();
-          cacheAbortRef.current = null;
-        }
-      };
-    }, []);
-    const isRunning = cacheState.status === "running";
-    const browserCacheAvailable = Boolean(window.indexedDB && window.fetch);
-    const canCache = cacheItems.length > 0 && browserCacheAvailable;
-
-    async function startCachingAll() {
-      if (isRunning || !canCache) return;
-      const db = await openAudioCacheDb();
-      if (!db) {
-        setCacheState({
-          status: "error",
-          done: 0,
-          total: cacheItems.length,
-          message: "Audio cache is not available in this browser.",
-        });
-        return;
-      }
-      const controller = new AbortController();
-      cacheAbortRef.current = controller;
-      let nextIndex = 0;
-      let done = 0;
-      let stored = 0;
-      let alreadyCached = 0;
-      let failed = 0;
-      let cachedBytes = 0;
-      const total = cacheItems.length;
-      setCacheState({ status: "running", done: 0, total, message: `Caching 0 of ${total} audio file(s)...` });
-
-      async function worker() {
-        while (!controller.signal.aborted) {
-          const item = cacheItems[nextIndex];
-          nextIndex += 1;
-          if (!item) return;
-          setCacheState((previous) => ({
-            ...previous,
-            message: `Caching ${done + 1} of ${total}: ${item.name}`,
-          }));
-          try {
-            const result = await cacheAudioUrl(db, item, controller.signal, (received, expected) => {
-              setCacheState((previous) => ({
-                ...previous,
-                message: expected
-                  ? `Caching ${item.name}: ${formatBytes(received)} of ${formatBytes(expected)}`
-                  : `Caching ${item.name}: ${formatBytes(received)}`,
-              }));
-            });
-            if (result.status === "cached") {
-              alreadyCached += 1;
-            } else {
-              stored += 1;
-            }
-            cachedBytes += Number(result.bytes || 0);
-          } catch (error) {
-            if (error && error.name === "AbortError") return;
-            failed += 1;
-          } finally {
-            done += 1;
-            setCacheState({
-              status: "running",
-              done,
-              total,
-              message: `Cached ${done} of ${total}.`,
-            });
-          }
-        }
-      }
-
-      try {
-        const workerCount = Math.min(AUDIO_CACHE_ALL_CONCURRENCY, total);
-        await Promise.all(Array.from({ length: workerCount }, () => worker()));
-        const wasCancelled = controller.signal.aborted;
-        setCacheState({
-          status: wasCancelled ? "idle" : failed ? "error" : "done",
-          done,
-          total,
-          message: wasCancelled
-            ? `Stopped after ${done} of ${total} audio file(s).`
-            : `Cache all finished: ${stored} added, ${alreadyCached} already cached${failed ? `, ${failed} failed` : ""}. ${formatBytes(cachedBytes)} available locally.`,
-        });
-      } finally {
-        try {
-          db.close();
-        } catch (_error) {}
-        if (cacheAbortRef.current === controller) {
-          cacheAbortRef.current = null;
-        }
-      }
-    }
-
-    function stopCachingAll() {
-      if (cacheAbortRef.current) {
-        cacheAbortRef.current.abort();
-      }
-    }
-
-    return h(
-      "div",
-      { className: "training-cache-controls" },
-      h(
-        "button",
-        {
-          className: "secondary",
-          type: "button",
-          onClick: startCachingAll,
-          disabled: isRunning || !canCache,
-        },
-        isRunning ? "Caching Audio..." : "Cache All Audio"
-      ),
-      isRunning ? h("button", { className: "ghost", type: "button", onClick: stopCachingAll }, "Stop") : null,
-      h(
-        "p",
-        { className: `field-status cache-status-${cacheState.status}` },
-        cacheState.message ||
-          (browserCacheAvailable
-            ? cacheItems.length
-              ? `${cacheItems.length} audio file(s) available to cache.`
-              : "No audio files to cache."
-            : "Audio cache is not available in this browser.")
-      )
-    );
-  }
-
   function uncompleteTrainingLabel(row) {
     if (!row || !row.name || !routes.uncompleteTrainingLabel) return;
     // Confirm before deleting sample files. The audio + RTTM in the project's
@@ -4638,34 +4390,181 @@
     });
   }
 
+  // Build the "« 1 2 … 7 [8] 9 … 24 »" sequence the table footer renders.
+  // Always shows first 2 and last 2 pages; collapses the gap with an
+  // ellipsis. For small totals (<= 7) just lists every page directly so
+  // the user never sees a single-page gap like "1 … 2".
+  function buildPaginationSequence(current, total) {
+    if (total <= 1) return [];
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const around = new Set([1, 2, current - 1, current, current + 1, total - 1, total]);
+    const sorted = Array.from(around).filter((page) => page >= 1 && page <= total).sort((a, b) => a - b);
+    const sequence = [];
+    for (let i = 0; i < sorted.length; i += 1) {
+      if (i > 0 && sorted[i] - sorted[i - 1] > 1) sequence.push("…");
+      sequence.push(sorted[i]);
+    }
+    return sequence;
+  }
+
+  function TrainingLabelsPaginationBar({ pageNumber, totalPages, onChange, disabled }) {
+    if (totalPages <= 1) return null;
+    const sequence = buildPaginationSequence(pageNumber, totalPages);
+    return h(
+      "nav",
+      { className: "training-labels-pagination", "aria-label": "Training labels pagination" },
+      h(
+        "button",
+        {
+          type: "button",
+          className: "pagination-step",
+          onClick: () => onChange(pageNumber - 1),
+          disabled: disabled || pageNumber <= 1,
+          "aria-label": "Previous page",
+        },
+        "‹ Previous"
+      ),
+      sequence.map((entry, index) => {
+        if (entry === "…") {
+          return h(
+            "span",
+            { key: `gap-${index}`, className: "pagination-gap", "aria-hidden": "true" },
+            "…"
+          );
+        }
+        const isCurrent = entry === pageNumber;
+        return h(
+          "button",
+          {
+            key: `page-${entry}`,
+            type: "button",
+            className: `pagination-page${isCurrent ? " is-current" : ""}`,
+            onClick: () => onChange(entry),
+            disabled: disabled || isCurrent,
+            "aria-current": isCurrent ? "page" : undefined,
+            "aria-label": `Page ${entry}`,
+          },
+          String(entry)
+        );
+      }),
+      h(
+        "button",
+        {
+          type: "button",
+          className: "pagination-step",
+          onClick: () => onChange(pageNumber + 1),
+          disabled: disabled || pageNumber >= totalPages,
+          "aria-label": "Next page",
+        },
+        "Next ›"
+      )
+    );
+  }
+
   function TrainingLabelsPage() {
     const labels = ctx.trainingLabels || {};
-    const rows = labels.rows || [];
     const summary = labels.summary || {};
+    // Server may embed rows inline when the inventory is small. Treat the
+    // embed as the initial seed so users with a handful of files never see
+    // an empty table on first paint; larger inventories arrive empty here
+    // and rely on the API fetch below.
+    const initialEmbeddedRows = Array.isArray(labels.rows) ? labels.rows : [];
     const [showCompleted, setShowCompleted] = React.useState(() => Boolean(uiState.showCompletedTrainingLabels));
-    const [folderFilter, setFolderFilter] = React.useState("all");
-    const [rowLimit, setRowLimit] = React.useState(DEFAULT_FILE_VIEW_LIMIT);
+    // Default folder is "" = all folders (server treats empty as no filter).
+    const [selectedFolder, setSelectedFolder] = React.useState(() => uiState.selectedTrainingLabelFolder || "");
+    const [folderBuckets, setFolderBuckets] = React.useState([]);
+    const [folderTotals, setFolderTotals] = React.useState({});
+    const [rows, setRows] = React.useState(initialEmbeddedRows);
+    const [rowsLoading, setRowsLoading] = React.useState(false);
+    const [rowsTotal, setRowsTotal] = React.useState(initialEmbeddedRows.length);
+    const TRAINING_LABEL_PAGE_SIZES = [25, 50, 100, 250];
+    const [pageSize, setPageSize] = React.useState(() => Number(uiState.trainingLabelsPageSize) || 25);
+    const [pageNumber, setPageNumber] = React.useState(1);
+    React.useEffect(() => {
+      uiState.trainingLabelsPageSize = pageSize;
+    }, [pageSize]);
     React.useEffect(() => {
       uiState.showCompletedTrainingLabels = showCompleted;
     }, [showCompleted]);
-    const statusFilteredRows = React.useMemo(
-      () => showCompleted ? rows : rows.filter((row) => row.status !== "completed"),
-      [rows, showCompleted]
-    );
-    const sortedRows = React.useMemo(
-      () => sortFileRowsByFolder(statusFilteredRows, fileViewFolderLabel, (row) => row.fileName || row.name),
-      [statusFilteredRows]
-    );
-    const folderChoices = React.useMemo(() => fileViewFolderChoices(sortedRows, fileViewFolderLabel), [sortedRows]);
     React.useEffect(() => {
-      if (folderFilter !== "all" && !folderChoices.some((folder) => folder.key === folderFilter)) {
-        setFolderFilter("all");
+      uiState.selectedTrainingLabelFolder = selectedFolder;
+    }, [selectedFolder]);
+    // Folder counts populate the dropdown labels ("ADSJinyoung (12)"). One
+    // shot on mount; the row-slice fetch below is what drives the table.
+    React.useEffect(() => {
+      const route = routes.trainingFolders || "/api/training-folders";
+      let cancelled = false;
+      window.fetch(route, { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload) => {
+          if (cancelled || !payload) return;
+          setFolderBuckets(Array.isArray(payload.folders) ? payload.folders : []);
+          setFolderTotals(payload.totals && typeof payload.totals === "object" ? payload.totals : {});
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }, []);
+    // Fetch the current page's slice on mount and whenever folder, page
+    // size, completed-toggle, or page number changes. hide_completed is
+    // pushed to the server so the pagination total is the count the user
+    // actually sees, not "fetched 250, showing 87".
+    React.useEffect(() => {
+      const route = routes.trainingLabelsApi || "/api/training-labels";
+      const offset = (pageNumber - 1) * pageSize;
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+      if (selectedFolder) params.set("folder", selectedFolder);
+      if (!showCompleted) params.set("hide_completed", "1");
+      let cancelled = false;
+      setRowsLoading(true);
+      window.fetch(`${route}?${params.toString()}`, { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload) => {
+          if (cancelled || !payload) return;
+          const incoming = Array.isArray(payload.rows) ? payload.rows : [];
+          setRows(incoming);
+          setRowsTotal(Number(payload.total) || 0);
+        })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setRowsLoading(false); });
+      return () => { cancelled = true; };
+    }, [selectedFolder, pageSize, pageNumber, showCompleted]);
+    // If something pushes us past the end (e.g. status filter shrinks the
+    // total), pull pageNumber back into range without losing the user's
+    // current spot if it's still valid.
+    const totalPages = Math.max(1, Math.ceil((rowsTotal || 0) / pageSize));
+    React.useEffect(() => {
+      if (pageNumber > totalPages) setPageNumber(totalPages);
+    }, [totalPages, pageNumber]);
+    const tableHeadingRef = React.useRef(null);
+    function gotoPage(target) {
+      const clamped = Math.max(1, Math.min(totalPages, Math.floor(target) || 1));
+      if (clamped === pageNumber) return;
+      setPageNumber(clamped);
+      // After the new page renders, scroll the table heading back to the
+      // top of the viewport so the user lands on row 1 of the new slice
+      // instead of staying parked beside the footer.
+      if (tableHeadingRef.current && typeof tableHeadingRef.current.scrollIntoView === "function") {
+        window.requestAnimationFrame(() => {
+          try {
+            tableHeadingRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+          } catch (_error) {
+            tableHeadingRef.current.scrollIntoView();
+          }
+        });
       }
-    }, [folderFilter, folderChoices]);
-    const folderFilteredRows = folderFilter === "all"
-      ? sortedRows
-      : sortedRows.filter((row) => fileViewFolderLabel(row) === folderFilter);
-    const visibleRows = folderFilteredRows.slice(0, Math.min(rowLimit, folderFilteredRows.length));
+    }
+    function changeFolder(value) {
+      setSelectedFolder(value);
+      setPageNumber(1);
+    }
+    function changePageSize(value) {
+      setPageSize(value);
+      setPageNumber(1);
+    }
+    function toggleShowCompleted(value) {
+      setShowCompleted(value);
+      setPageNumber(1);
+    }
     const projectNames = Array.from(new Set((ctx.projects || []).map((project) => project.slug).filter(Boolean))).sort();
     const speakerNames = Array.from(
       new Set(
@@ -4714,29 +4613,79 @@
             "div",
             null,
             h("h2", null, "Uploaded Material To Label"),
-            h("p", null, "Open Inspect to label from the review page with audio playback, timing rows, and fine-tuning save actions.")
+            h(
+              "p",
+              null,
+              "Open Inspect to label from the review page with audio playback, timing rows, and fine-tuning save actions. ",
+              rowsLoading
+                ? "Loading page…"
+                : `Page ${pageNumber} of ${totalPages} · ${rowsTotal} file(s) match.`
+            )
           ),
-	          h(
-		            "div",
-		            { className: "training-labels-controls" },
-		            h(TrainingAudioCacheAll, { rows }),
-		            h(FolderFilterControl, { id: "training_labels_folder_filter", value: folderFilter, onChange: setFolderFilter, folders: folderChoices }),
-		            h(FileViewLimitControl, {
-		              id: "training_labels_row_limit",
-		              total: folderFilteredRows.length,
-		              shown: visibleRows.length,
-		              limit: rowLimit,
-		              onLimitChange: setRowLimit,
-		            }),
-		            h(
-		              "label",
-	              { className: "checkbox-row training-labels-toggle" },
-              h("input", { type: "checkbox", checked: showCompleted, onChange: (event) => setShowCompleted(event.target.checked) }),
+          h(
+            "div",
+            { className: "training-labels-controls" },
+            h(
+              "label",
+              { className: "field-inline", htmlFor: "training_labels_folder_select" },
+              h("span", { className: "row-note" }, "Folder"),
+              h(
+                "select",
+                {
+                  id: "training_labels_folder_select",
+                  value: selectedFolder,
+                  onChange: (event) => changeFolder(event.target.value),
+                },
+                h(
+                  "option",
+                  { value: "" },
+                  `All folders${folderTotals.total ? ` (${folderTotals.total})` : ""}`
+                ),
+                folderBuckets.map((bucket) =>
+                  h(
+                    "option",
+                    { key: bucket.value, value: bucket.value },
+                    `${bucket.name} (${bucket.total})`
+                  )
+                )
+              )
+            ),
+            h(
+              "label",
+              { className: "field-inline", htmlFor: "training_labels_page_size" },
+              h("span", { className: "row-note" }, "Per page"),
+              h(
+                "select",
+                {
+                  id: "training_labels_page_size",
+                  value: pageSize,
+                  onChange: (event) => changePageSize(Number(event.target.value) || 25),
+                },
+                TRAINING_LABEL_PAGE_SIZES.map((value) =>
+                  h("option", { key: value, value: value }, String(value))
+                )
+              )
+            ),
+            h(
+              "label",
+              { className: "checkbox-row training-labels-toggle" },
+              h("input", { type: "checkbox", checked: showCompleted, onChange: (event) => toggleShowCompleted(event.target.checked) }),
               ` Show completed labels${completedCount ? ` (${completedCount})` : ""}`
             )
           )
         ),
-        h(TrainingLabelsTable, { rows: visibleRows })
+        // Anchor for scroll-to-top: clicking a page number scrolls this
+        // span into view so the user lands at row 1 of the new slice.
+        h("span", { ref: tableHeadingRef, tabIndex: -1, "aria-hidden": "true" }),
+        rowsLoading && rows.length === 0
+          ? h("p", { className: "field-status" }, "Loading rows…")
+          : h(TrainingLabelsTable, { rows }),
+        h(TrainingLabelsPaginationBar, {
+          pageNumber,
+          totalPages,
+          disabled: rowsLoading,
+          onChange: gotoPage,
+        })
       )
     );
   }
@@ -4960,7 +4909,8 @@
           h("div", { className: "fine-tune-file-section-head" }, h("h3", null, "SSH audio in audio_in/"), h("p", null, `${audioFiles.length} file(s) found`)),
           h("div", { className: "selection-toolbar" }, h("button", { className: "secondary", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "all" }, "Select shown"), h("button", { className: "ghost", type: "button", "data-select-group": "fine-tune-audio", "data-select-mode": "none" }, "Clear")),
           h(Field, { id: "server_audio_paths", label: "Audio files" }, h(WorkspaceFileChecklist, { group: "fine-tune-audio", name: "server_audio_paths", files: audioFiles, emptyText: "No audio files are present in audio_in/ yet." })),
-          h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected.")
+          h("p", { className: "field-status" }, h("span", { "data-selection-count": "fine-tune-audio" }, "0"), " audio file(s) selected."),
+          h("p", { className: "field-note" }, "SSH audio is linked into the project (no duplicate bytes). The original file must remain in audio_in/ for training.")
         ),
         h(
           "section",
@@ -6982,7 +6932,15 @@
     const openDialogIds = settings.preserveDialogs ? snapshotOpenDialogs() : [];
     const formState = settings.preserveFormState ? snapshotFormState() : null;
     syncDerivedState(nextState || initialState);
-    root.render(h(Dashboard));
+    // Catch render-time errors here too — React doesn't surface those to
+    // window.error reliably, and a thrown component renders the same blank
+    // root as no JS at all.
+    try {
+      root.render(h(Dashboard));
+    } catch (renderError) {
+      showDashboardError("React render failed", renderError);
+      return;
+    }
     const afterRender = () => {
       restoreFormState(formState);
       postRenderSync();

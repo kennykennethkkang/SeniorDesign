@@ -105,11 +105,15 @@ class ReviewOutputsTests(unittest.TestCase):
             self.assertIn("flushLabelAutoSaveOnUnload", html)
             self.assertIn("sendBeacon", html)
             self.assertIn("firstEditSaved", html)
-            self.assertIn('id="cacheAudioButton"', html)
-            self.assertIn('id="cacheAllAudioButton"', html)
-            self.assertIn("cacheAllTrainingAudio", html)
-            self.assertIn("fetchAudioWithProgress", html)
-            self.assertIn("response.blob()", html)
+            # IndexedDB audio cache was removed: the swap-to-blob behavior
+            # caused 70 MB duplicate downloads and audio reload mid-play.
+            # Audio now streams fresh from the dashboard's /files route on
+            # every visit; the browser-native HTTP cache (max-age=3600 on
+            # audio_in/) handles fast subsequent plays within a session.
+            self.assertNotIn('id="cacheAudioButton"', html)
+            self.assertNotIn('id="cacheAllAudioButton"', html)
+            self.assertNotIn("cacheAllTrainingAudio", html)
+            self.assertNotIn("ml-speech-audio-cache", html)
             self.assertNotIn("Adjust selected label", html)
             self.assertNotIn("Set Start Here", html)
             self.assertIn("id=\"labelHealth\"", html)

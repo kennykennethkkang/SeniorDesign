@@ -1,11 +1,13 @@
 :root {
-  /* SCU brand red, bumped slightly darker (was #a32035) so primary buttons
-     and accent text clear WCAG AA contrast (>= 4.5:1) on a white background.
-     The shift is small enough to preserve the brand identity but large
-     enough to support low-vision users and screen-reader fallbacks. */
-  --scu-red: #8c1c2e;
-  --bronco-red: #6f1825;
-  --sunrise: #ffb600;
+  /* Calm neutral palette. The primary/accent color is a single muted
+     steel-blue — chosen over the old saturated SCU red because the red
+     gradient buttons read as loud/"tacky". The blue clears WCAG AA
+     contrast (>= 4.5:1) on white for buttons and accent text. The
+     ``--brand`` variable name is kept (lots of rules reference it); it
+     just no longer holds a red. */
+  --brand: #3d6478;
+  --brand-dark: #2e4b5c;
+  --sunrise: #c2902f;
   --agave: #4d8798;
   --agave-dark: #115d6f;
   --palm: #55712e;
@@ -13,23 +15,23 @@
   --slate: #425766;
   --slate-dark: #2a373f;
   --fog: #e0dad3;
-  --fog-light: #efece9;
+  --fog-light: #eef0f1;
   --white: #ffffff;
-  --bg: #f7f8fa;
-  --bg-ink: #1e252b;
+  --bg: #f6f7f8;
+  --bg-ink: #222a30;
   --panel: rgba(255, 255, 255, 0.94);
   --panel-solid: #ffffff;
-  --muted: #66717c;
-  --line: #d9dee3;
-  --border: #cbd2d9;
-  --body-grid-red: rgba(163, 32, 53, 0.08);
-  --body-grid-blue: rgba(77, 135, 152, 0.08);
+  --muted: #6b757e;
+  --line: #dde0e3;
+  --border: #ccd1d6;
+  --body-grid-red: rgba(90, 100, 110, 0.04);
+  --body-grid-blue: rgba(90, 105, 115, 0.04);
   --body-start: #ffffff;
-  --body-end: #eef2f5;
-  --accent: var(--scu-red);
-  --accent-dark: var(--bronco-red);
-  --warm: #b13e13;
-  --warm-soft: #fff2dc;
+  --body-end: #eef0f2;
+  --accent: var(--brand);
+  --accent-dark: var(--brand-dark);
+  --warm: #b5651d;
+  --warm-soft: #f6ecdd;
   --gold: var(--sunrise);
   --shadow: 0 16px 38px rgba(42, 55, 63, 0.1);
   --shadow-soft: 0 8px 22px rgba(42, 55, 63, 0.08);
@@ -52,9 +54,11 @@
 }
 
 :root[data-theme="dark"] {
-  --scu-red: #d14a5f;
-  --bronco-red: #8f2a3a;
-  --sunrise: #ffc247;
+  /* Dark theme mirrors the calm steel-blue accent — a lighter tint so it
+     reads on the dark panel without glowing. */
+  --brand: #6f9fb6;
+  --brand-dark: #527e96;
+  --sunrise: #d9ad5e;
   --agave: #69a9ba;
   --agave-dark: #8fc6d4;
   --palm: #9ab36c;
@@ -70,14 +74,14 @@
   --muted: #c3ced8;
   --line: #3c4f5f;
   --border: #526677;
-  --body-grid-red: rgba(209, 74, 95, 0.12);
-  --body-grid-blue: rgba(105, 169, 186, 0.1);
+  --body-grid-red: rgba(130, 145, 155, 0.07);
+  --body-grid-blue: rgba(130, 150, 160, 0.07);
   --body-start: #111821;
   --body-end: #0a0f15;
-  --accent: #ff9aac;
-  --accent-dark: #d14a5f;
-  --warm: #ff9a64;
-  --warm-soft: #3b261c;
+  --accent: #8fbdd2;
+  --accent-dark: #6f9fb6;
+  --warm: #e0a25e;
+  --warm-soft: #332a1f;
   --shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
   --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.28);
   --ok-ink: #6dd49b;
@@ -164,19 +168,19 @@ textarea {
    property. */
 button {
   border: 0;
-  background: linear-gradient(135deg, var(--scu-red), var(--bronco-red));
+  background: var(--brand);
   color: var(--white);
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
-  box-shadow: var(--shadow-soft);
+  box-shadow: none;
   line-height: 1.25;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
 button.secondary {
-  background: linear-gradient(135deg, var(--slate), var(--slate-dark));
-  box-shadow: var(--shadow-soft);
+  background: var(--slate);
+  box-shadow: none;
 }
 
 button.ghost {
@@ -267,8 +271,8 @@ code {
   padding: 28px 30px;
   color: var(--white);
   background:
-    linear-gradient(135deg, rgba(163, 32, 53, 0.98), rgba(134, 38, 51, 0.96) 48%, rgba(42, 55, 63, 0.98)),
-    var(--scu-red);
+    linear-gradient(135deg, rgba(61, 100, 120, 0.98), rgba(46, 75, 92, 0.96) 48%, rgba(42, 55, 63, 0.98)),
+    var(--brand);
 }
 
 .hero-card p {
@@ -379,8 +383,8 @@ code {
 
 .tab-link.active {
   color: var(--white);
-  background: linear-gradient(135deg, var(--scu-red), var(--bronco-red));
-  border-color: rgba(134, 38, 51, 0.75);
+  background: var(--brand);
+  border-color: var(--brand-dark);
 }
 
 .workspace {
@@ -495,7 +499,7 @@ code {
 }
 
 .quick-jump input {
-  border-color: rgba(163, 32, 53, 0.34);
+  border-color: rgba(61, 100, 120, 0.34);
   background: rgba(255, 255, 255, 0.92);
 }
 
@@ -516,7 +520,7 @@ code {
 }
 
 .quick-jump-results a strong {
-  color: var(--scu-red);
+  color: var(--brand);
 }
 
 .quick-jump-results a small {
@@ -548,7 +552,7 @@ code {
   position: absolute;
   inset: auto 0 0 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--scu-red), var(--sunrise), var(--agave));
+  background: var(--brand);
 }
 
 .workspace-strip span {
@@ -675,7 +679,7 @@ code {
   position: absolute;
   inset: 0 auto 0 0;
   width: 4px;
-  background: linear-gradient(180deg, var(--scu-red), var(--sunrise));
+  background: var(--brand);
 }
 
 .help-grid {
@@ -710,7 +714,7 @@ code {
 .metric strong {
   display: block;
   margin-top: 6px;
-  color: var(--scu-red);
+  color: var(--brand);
   font-size: 25px;
 }
 
@@ -1054,12 +1058,12 @@ code {
 .der-mode-option .der-mode-warning {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--bronco-red);
+  color: var(--brand-dark);
 }
 
 .der-mode-option.is-selected {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(163, 32, 53, 0.18);
+  box-shadow: 0 0 0 2px rgba(61, 100, 120, 0.18);
 }
 
 .der-mode-option.is-disabled {
@@ -1342,7 +1346,7 @@ code {
 }
 
 .der-results-table .der-row.error td {
-  background: rgba(163, 32, 53, 0.06);
+  background: rgba(61, 100, 120, 0.06);
 }
 
 .der-results-table .der-audio-cell {
@@ -1369,7 +1373,7 @@ code {
 }
 
 .der-metric-block.error {
-  color: var(--bronco-red);
+  color: var(--brand-dark);
 }
 
 .der-metric-headline {
@@ -1469,7 +1473,7 @@ code {
 }
 
 .der-results-table .score-error {
-  color: var(--bronco-red);
+  color: var(--brand-dark);
 }
 
 .der-results-table .score-empty {
@@ -1602,8 +1606,8 @@ code {
 
 .status-pill.failed,
 .status-pill.error {
-  background: rgba(163, 32, 53, 0.12);
-  color: var(--bronco-red);
+  background: rgba(61, 100, 120, 0.12);
+  color: var(--brand-dark);
 }
 
 .status-pill.not-run,
@@ -1711,8 +1715,8 @@ code {
 }
 
 .model-choice.active {
-  border-color: rgba(163, 32, 53, 0.42);
-  box-shadow: inset 0 0 0 1px rgba(163, 32, 53, 0.18);
+  border-color: rgba(61, 100, 120, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(61, 100, 120, 0.18);
 }
 
 .compact-toggle .status-pill {
@@ -2126,17 +2130,17 @@ dialog.dashboard-dialog::backdrop {
   width: 13px;
   height: 13px;
   border-radius: 999px;
-  background: var(--scu-red);
-  box-shadow: 0 0 0 0 rgba(163, 32, 53, 0.28);
+  background: var(--brand);
+  box-shadow: 0 0 0 0 rgba(61, 100, 120, 0.28);
   animation: loader-pulse 1.1s ease-out infinite;
 }
 
 @keyframes loader-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(163, 32, 53, 0.35);
+    box-shadow: 0 0 0 0 rgba(61, 100, 120, 0.35);
   }
   100% {
-    box-shadow: 0 0 0 14px rgba(163, 32, 53, 0);
+    box-shadow: 0 0 0 14px rgba(61, 100, 120, 0);
   }
 }
 
@@ -2148,7 +2152,7 @@ dialog.dashboard-dialog::backdrop {
 
 :root[data-theme="dark"] .hero-card {
   background:
-    linear-gradient(135deg, rgba(124, 34, 47, 0.98), rgba(69, 30, 39, 0.96) 48%, rgba(12, 17, 23, 0.98)),
+    linear-gradient(135deg, rgba(61, 100, 120, 0.98), rgba(46, 75, 92, 0.96) 48%, rgba(12, 17, 23, 0.98)),
     #451e27;
 }
 
@@ -2157,13 +2161,13 @@ dialog.dashboard-dialog::backdrop {
 }
 
 :root[data-theme="dark"] button:not(.ghost):not(.secondary):not(.theme-toggle) {
-  background: linear-gradient(135deg, #c44255, var(--bronco-red));
-  color: var(--white);
+  background: var(--brand);
+  color: #0f151c;
 }
 
 :root[data-theme="dark"] button.secondary {
   border: 1px solid var(--border);
-  background: linear-gradient(135deg, #45596b, #25313d);
+  background: var(--slate);
   color: #f7fbff;
 }
 
@@ -2196,14 +2200,14 @@ dialog.dashboard-dialog::backdrop {
 }
 
 :root[data-theme="dark"] .tab-link.active {
-  color: var(--white);
-  background: linear-gradient(135deg, #c44255, var(--bronco-red));
-  border-color: rgba(255, 154, 172, 0.45);
+  color: #0f151c;
+  background: var(--brand);
+  border-color: var(--brand-dark);
 }
 
 :root[data-theme="dark"] .model-choice.active {
-  border-color: rgba(255, 154, 172, 0.48);
-  box-shadow: inset 0 0 0 1px rgba(255, 154, 172, 0.24);
+  border-color: rgba(143, 189, 210, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(143, 189, 210, 0.24);
 }
 
 :root[data-theme="dark"] .metric strong,
@@ -2512,12 +2516,12 @@ button.secondary.danger:hover {
   --space-6: 32px;
   --transition-fast: 140ms cubic-bezier(0.2, 0.8, 0.4, 1);
   --transition: 180ms cubic-bezier(0.2, 0.8, 0.4, 1);
-  --ring: 0 0 0 3px rgba(163, 32, 53, 0.22);
+  --ring: 0 0 0 3px rgba(61, 100, 120, 0.22);
   --hover-lift: translateY(-1px);
 }
 
 :root[data-theme="dark"] {
-  --ring: 0 0 0 3px rgba(255, 154, 172, 0.32);
+  --ring: 0 0 0 3px rgba(143, 189, 210, 0.32);
 }
 
 /* Cut the five-property transition down to two. With this many buttons and
@@ -2549,11 +2553,11 @@ textarea:focus-visible,
   box-shadow: var(--ring);
 }
 
-/* --- Button modernization: flatten the gradients, keep brand color --- */
+/* --- Buttons: flat solid fill, no gradient gloss --- */
 button {
-  background: var(--scu-red);
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
-  letter-spacing: 0.01em;
+  background: var(--brand);
+  background-image: none;
+  letter-spacing: 0;
   border-radius: var(--radius);
 }
 
@@ -2579,7 +2583,7 @@ button.ghost {
 }
 
 button.ghost:hover:not(:disabled) {
-  background: rgba(163, 32, 53, 0.08);
+  background: rgba(61, 100, 120, 0.08);
   border-color: transparent;
   color: var(--accent-dark);
 }
@@ -2650,9 +2654,9 @@ textarea:focus-visible {
 
 .tab-link.active {
   background: var(--accent);
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent);
+  background-image: none;
   border-color: transparent;
-  box-shadow: 0 6px 14px rgba(163, 32, 53, 0.25);
+  box-shadow: none;
 }
 
 :root[data-theme="dark"] .tab-link:hover:not(.active) {
@@ -2722,7 +2726,7 @@ table tbody tr:hover {
 
 .status-pill.failed,
 .status-pill.error {
-  border-color: rgba(163, 32, 53, 0.25);
+  border-color: rgba(61, 100, 120, 0.25);
 }
 
 .status-pill.succeeded,
@@ -2748,7 +2752,7 @@ table tbody tr:hover {
 }
 
 .notice-toast.error {
-  border-left-color: var(--bronco-red);
+  border-left-color: var(--brand-dark);
 }
 
 .notice-toast.info {
@@ -3626,13 +3630,13 @@ dialog.dashboard-dialog {
 }
 
 :root[data-theme="dark"] .label-training-target {
-  border-color: rgba(255, 154, 172, 0.32);
+  border-color: rgba(143, 189, 210, 0.32);
   background: linear-gradient(180deg, #221b25, #171d25);
   box-shadow: none;
 }
 
 :root[data-theme="dark"] .label-training-target-head {
-  border-bottom-color: rgba(255, 154, 172, 0.22);
+  border-bottom-color: rgba(143, 189, 210, 0.22);
 }
 
 :root[data-theme="dark"] .label-training-target-head p {
@@ -3640,8 +3644,8 @@ dialog.dashboard-dialog {
 }
 
 :root[data-theme="dark"] .target-backend-pill {
-  border-color: rgba(255, 154, 172, 0.36);
-  background: rgba(255, 154, 172, 0.15);
+  border-color: rgba(143, 189, 210, 0.36);
+  background: rgba(143, 189, 210, 0.15);
   color: var(--accent);
 }
 
@@ -3814,6 +3818,94 @@ dialog.dashboard-dialog {
   margin-left: auto;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+/* Google-style pagination: spaced numbers as text links with no boxes.
+   Single horizontal row, no wrapping — narrow viewports scroll
+   horizontally instead of stacking the items onto multiple lines.
+   The global `button` rule earlier in this file ships gradients +
+   shadows + bold white text + radius; we have to undo every one of
+   those for the items inside this bar to look like plain text links. */
+.training-labels-pagination {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  gap: 0;
+  margin: var(--space-4) 0 var(--space-2);
+  padding: var(--space-3) 4px;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.training-labels-pagination button {
+  /* width:auto is the critical override — the global `button` rule sets
+     `width: 100%`, which made every page number fill its own row and
+     stack vertically. auto sizes each button to its label so the flex
+     row can lay them out side by side. */
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: var(--accent);
+  padding: 4px 10px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+  cursor: pointer;
+  border-radius: 0;
+  min-width: 0;
+  max-width: none;
+  line-height: 1.4;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.training-labels-pagination button:hover:not(:disabled) {
+  background: transparent;
+  box-shadow: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.training-labels-pagination button:active:not(:disabled) {
+  box-shadow: none;
+}
+
+.training-labels-pagination button.is-current {
+  color: var(--bg-ink);
+  font-weight: 800;
+  cursor: default;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  text-decoration-thickness: 2px;
+}
+
+.training-labels-pagination button.pagination-step {
+  font-weight: 600;
+  padding: 4px 14px;
+}
+
+.training-labels-pagination button:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+  opacity: 1;
+  background: transparent;
+}
+
+.training-labels-pagination .pagination-gap {
+  padding: 0 6px;
+  color: var(--muted);
+  user-select: none;
+  flex: 0 0 auto;
 }
 
 .training-cache-controls {
@@ -4481,7 +4573,7 @@ button.btn-sm {
   --border: #4c5e6e;
   --shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
   --shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.32);
-  --ring: 0 0 0 3px rgba(255, 154, 172, 0.36);
+  --ring: 0 0 0 3px rgba(143, 189, 210, 0.36);
 }
 
 /* Card-family normalization: same radius, same border treatment.
@@ -4680,7 +4772,7 @@ pre {
 }
 
 :root[data-theme="dark"] .run-tab--active {
-  background: rgba(255, 154, 172, 0.16);
+  background: rgba(143, 189, 210, 0.16);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -4696,7 +4788,7 @@ pre {
 }
 
 :root[data-theme="dark"] .cluster-queue-row--self td {
-  background: rgba(255, 154, 172, 0.14);
+  background: rgba(143, 189, 210, 0.14);
 }
 
 /* Tab nav — the sticky bar can sit on top of forms; give it a
@@ -4864,7 +4956,7 @@ pre {
 }
 
 :root[data-theme="dark"] .der-file-row:hover {
-  background: rgba(255, 154, 172, 0.08);
+  background: rgba(143, 189, 210, 0.08);
 }
 
 :root[data-theme="dark"] .der-file-status--ok {

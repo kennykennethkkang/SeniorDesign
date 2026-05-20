@@ -430,9 +430,24 @@ def media_tag_name(media_path: Path | None) -> str:
     return "audio"
 
 
-def media_href_for_review(media_path: Path, output_html: Path) -> str:
-    """Return a browser-safe relative URL from the review page to its media."""
+def media_href_for_review(
+    media_path: Path,
+    output_html: Path,
+    *,
+    preview_url: str | None = None,
+) -> str:
+    """Return the URL the review HTML uses to load its media.
 
+    When the dashboard regenerates the review page it supplies
+    ``preview_url`` pointing at ``/api/audio-preview?path=...`` so the
+    player loads an 8 kHz mono downsample instead of the full WAV (~half
+    the bytes, no NFS streaming of 70 MB into the browser). Offline /
+    standalone CLI generation skips the preview and links straight at
+    the source via a relative path.
+    """
+
+    if preview_url:
+        return html.escape(preview_url)
     relative = os.path.relpath(media_path, output_html.parent).replace(os.sep, "/")
     return html.escape(quote(relative, safe="/._-~"))
 
@@ -672,8 +687,14 @@ def build_html(
     label_record: Mapping[str, object] | None = None,
     model_comparisons: Sequence[Mapping[str, object]] | None = None,
     fine_tuning_projects: Sequence[Mapping[str, object]] | None = None,
+    known_speakers: Sequence[str] | None = None,
+    media_preview_url: str | None = None,
 ) -> str:
-    media_href = media_href_for_review(media_path, output_html) if media_path is not None else ""
+    media_href = (
+        media_href_for_review(media_path, output_html, preview_url=media_preview_url)
+        if media_path is not None
+        else ""
+    )
     media_name = media_path.name if media_path is not None else "No matching media found"
     media_label = html.escape(media_name)
     summary_items = build_summary(flags_by_index)
@@ -782,12 +803,17 @@ def build_html(
     project_name = html.escape(record_text(label_record, "project_name", DEFAULT_LABEL_PROJECT), quote=True)
     raw_label_status = record_text(label_record, "status", "not saved").replace("_", " ")
     label_status = html.escape(raw_label_status)
+    # Merge the per-audio speakers (diarization output + existing labels for
+    # this file) with the workspace-wide ``known_speakers`` set so the
+    # dropdown shows every speaker name the user has ever entered, not just
+    # the ones tied to this WAV. Skips empty/dash entries; sorts case-aware.
     speaker_values = sorted(
         {
             value
             for value in [
                 *(training_speaker_label(cue.speaker, cue.index) for cue in cues),
                 *(entry[3] for entry in label_entries if entry[3]),
+                *(known_speakers or []),
             ]
             if value and value != "-"
         }
@@ -1139,36 +1165,6 @@ def build_html(
       border: 1px solid var(--line);
       border-radius: var(--radius-sm);
       background: var(--panel-solid);
-    }}
-    /* Audio cache status row. The whole point of the cache is that after
-       the first visit, the file is on this device's IndexedDB and playback
-       starts instantly with zero network -- no more WAVE NFS streaming
-       lag. The status here tells me whether I'm currently streaming, in
-       the middle of a background save, or hitting the cache straight. */
-    .audio-cache-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      margin: 0 0 6px;
-      font-size: 12px;
-      color: var(--muted);
-    }}
-    .audio-cache-status {{
-      font-weight: 700;
-    }}
-    .audio-cache-status.is-cached {{
-      color: #2f4a18;
-    }}
-    .audio-cache-status.is-fetching {{
-      color: var(--accent-dark, var(--accent));
-    }}
-    .audio-cache-status.is-error {{
-      color: var(--accent);
-    }}
-    .audio-cache-button {{
-      padding: 5px 10px;
-      font-size: 11px;
     }}
     .transport-button {{
       min-width: 96px;
@@ -1869,12 +1865,6 @@ def build_html(
     <section class="player-panel" aria-label="Audio playback">
       <div class="source-line"><span>Audio</span><strong>{media_label}</strong></div>
       {player_html}
-      <div class="audio-cache-row" aria-live="polite">
-        <span id="audioCacheStatus" class="audio-cache-status">Local cache: checking...</span>
-        <button id="cacheAudioButton" class="secondary audio-cache-button" type="button" hidden>Cache audio</button>
-        <button id="cacheAllAudioButton" class="secondary audio-cache-button" type="button">Cache all audio</button>
-        <button id="clearAudioCacheButton" class="ghost audio-cache-button" type="button" hidden>Clear cached audio</button>
-      </div>
       <div class="waveform-panel">
         <canvas id="waveformCanvas" class="waveform-canvas" aria-label="Audio waveform"></canvas>
         <div class="waveform-tools">
@@ -3955,413 +3945,6 @@ def build_html(
       media.addEventListener("loadedmetadata", drawWaveform);
     }}
 
-    /*
-     * Local audio cache (IndexedDB).
-     *
-     * The dashboard serves WAVs over a WAVE-cluster NFS mount. Every time I
-     * open a review page the browser has to stream chunks back through that
-     * mount before playback can start, and that's where most of the felt
-     * lag was coming from. Once the file lives in IndexedDB on this device,
-     * the next visit (and every visit after) skips the network entirely:
-     * we read the Blob locally, hand it to the <audio> element as a
-     * blob: URL, and playback starts instantly.
-     *
-     * First visit: keep the streaming src so playback starts immediately.
-     * The Cache audio button saves the whole file locally without forcing that
-     * full download during page load.
-     *
-     * Cache invalidation is by URL + content-length, so if a file is
-     * regenerated server-side with a different size it's redownloaded
-     * instead of returning stale audio.
-     */
-    const AUDIO_CACHE_DB_NAME = "ml-speech-audio-cache";
-    const AUDIO_CACHE_STORE = "blobs";
-    const AUDIO_CACHE_DB_VERSION = 1;
-    const audioCacheStatus = document.getElementById("audioCacheStatus");
-    const cacheAudioButton = document.getElementById("cacheAudioButton");
-    const cacheAllAudioButton = document.getElementById("cacheAllAudioButton");
-    const clearAudioCacheButton = document.getElementById("clearAudioCacheButton");
-
-    function setAudioCacheStatus(message, kind) {{
-      if (!audioCacheStatus) return;
-      audioCacheStatus.textContent = message;
-      audioCacheStatus.classList.remove("is-cached", "is-fetching", "is-error");
-      if (kind) audioCacheStatus.classList.add(kind);
-    }}
-    function showClearAudioCacheButton(show) {{
-      if (clearAudioCacheButton) clearAudioCacheButton.hidden = !show;
-    }}
-    function showCacheAudioButton(show) {{
-      if (cacheAudioButton) cacheAudioButton.hidden = !show;
-    }}
-    function setCacheAudioButtonBusy(isBusy) {{
-      if (cacheAudioButton) cacheAudioButton.disabled = isBusy;
-      if (cacheAllAudioButton) cacheAllAudioButton.disabled = isBusy;
-    }}
-    function normalizedAudioCacheUrl(href) {{
-      const raw = String(href || "").trim();
-      if (!raw) return "";
-      try {{
-        return new URL(raw, window.location.href).href;
-      }} catch (_err) {{
-        return "";
-      }}
-    }}
-
-    function openAudioCacheDb() {{
-      return new Promise(function (resolve) {{
-        if (!window.indexedDB) {{ resolve(null); return; }}
-        let request;
-        try {{
-          request = window.indexedDB.open(AUDIO_CACHE_DB_NAME, AUDIO_CACHE_DB_VERSION);
-        }} catch (_err) {{ resolve(null); return; }}
-        request.onupgradeneeded = function () {{
-          const db = request.result;
-          if (!db.objectStoreNames.contains(AUDIO_CACHE_STORE)) {{
-            db.createObjectStore(AUDIO_CACHE_STORE);
-          }}
-        }};
-        request.onsuccess = function () {{ resolve(request.result); }};
-        request.onerror = function () {{ resolve(null); }};
-        request.onblocked = function () {{ resolve(null); }};
-      }});
-    }}
-    // Resolve only when the IDB transaction commits (oncomplete), not when
-    // the request finishes. This was the bug behind "local cache inside
-    // diarization review not working" — request.onsuccess fired even when
-    // the surrounding txn later aborted (quota / page hide / overlapping
-    // writes), so writes silently dropped and reads handed back data that
-    // was never actually persisted.
-    function audioCacheRead(db, key) {{
-      return new Promise(function (resolve) {{
-        try {{
-          const tx = db.transaction([AUDIO_CACHE_STORE], "readonly");
-          const get = tx.objectStore(AUDIO_CACHE_STORE).get(key);
-          let result = null;
-          get.onsuccess = function () {{ result = get.result || null; }};
-          get.onerror = function () {{ result = null; }};
-          tx.oncomplete = function () {{ resolve(result); }};
-          tx.onerror = function () {{ resolve(null); }};
-          tx.onabort = function () {{ resolve(null); }};
-        }} catch (_err) {{ resolve(null); }}
-      }});
-    }}
-    function audioCacheWrite(db, key, value) {{
-      return new Promise(function (resolve) {{
-        try {{
-          const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
-          const put = tx.objectStore(AUDIO_CACHE_STORE).put(value, key);
-          let putOk = false;
-          put.onsuccess = function () {{ putOk = true; }};
-          put.onerror = function () {{ putOk = false; }};
-          tx.oncomplete = function () {{ resolve(putOk); }};
-          tx.onerror = function () {{ resolve(false); }};
-          tx.onabort = function () {{ resolve(false); }};
-        }} catch (_err) {{ resolve(false); }}
-      }});
-    }}
-    function audioCacheDelete(db, key) {{
-      return new Promise(function (resolve) {{
-        try {{
-          const tx = db.transaction([AUDIO_CACHE_STORE], "readwrite");
-          const del = tx.objectStore(AUDIO_CACHE_STORE).delete(key);
-          let delOk = false;
-          del.onsuccess = function () {{ delOk = true; }};
-          del.onerror = function () {{ delOk = false; }};
-          tx.oncomplete = function () {{ resolve(delOk); }};
-          tx.onerror = function () {{ resolve(false); }};
-          tx.onabort = function () {{ resolve(false); }};
-        }} catch (_err) {{ resolve(false); }}
-      }});
-    }}
-
-    function formatMb(bytes) {{
-      if (!Number.isFinite(bytes) || bytes <= 0) return "?";
-      return (bytes / 1048576).toFixed(1) + " MB";
-    }}
-
-    function swapMediaToBlob(blob, sourceUrl) {{
-      if (!media) return;
-      // If the user is already listening, swapping the src would briefly
-      // pause-and-restart playback, which is jarring mid-segment. Defer
-      // until the next pause/end -- the blob is already saved in IDB, so
-      // the next visit will pick it up instantly even if we never swap on
-      // this visit.
-      const performSwap = function () {{
-        const wasPlaying = !media.paused && !media.ended;
-        const previousTime = Number.isFinite(media.currentTime) ? media.currentTime : 0;
-        if (media.dataset.cacheBlobUrl) {{
-          try {{ URL.revokeObjectURL(media.dataset.cacheBlobUrl); }} catch (_e) {{}}
-        }}
-        const blobUrl = URL.createObjectURL(blob);
-        media.dataset.cacheBlobUrl = blobUrl;
-        media.dataset.cacheStreamingSrc = sourceUrl;
-        media.src = blobUrl;
-        media.load();
-        const onReady = function () {{
-          media.removeEventListener("loadedmetadata", onReady);
-          try {{ media.currentTime = previousTime; }} catch (_e) {{}}
-          if (wasPlaying) {{
-            const playPromise = media.play();
-            if (playPromise && typeof playPromise.catch === "function") playPromise.catch(function () {{}});
-          }}
-          requestDrawWaveform();
-        }};
-        media.addEventListener("loadedmetadata", onReady, {{ once: true }});
-      }};
-      if (media.paused || media.ended) {{
-        performSwap();
-      }} else {{
-        media.addEventListener("pause", performSwap, {{ once: true }});
-        media.addEventListener("ended", performSwap, {{ once: true }});
-      }}
-    }}
-
-    async function fetchAudioWithProgress(sourceUrl) {{
-      const response = await window.fetch(sourceUrl, {{ credentials: "same-origin", cache: "force-cache" }});
-      if (!response.ok) {{
-        throw new Error("audio fetch returned " + response.status);
-      }}
-      const totalHeader = response.headers.get("content-length");
-      const total = totalHeader ? parseInt(totalHeader, 10) : 0;
-      if (!response.body || !response.body.getReader) {{
-        setAudioCacheStatus("Caching to local: downloading audio...", "is-fetching");
-        const blob = await response.blob();
-        return {{
-          blob,
-          contentLength: total || blob.size,
-        }};
-      }}
-      const reader = response.body.getReader();
-      const chunks = [];
-      let received = 0;
-      while (true) {{
-        const step = await reader.read();
-        if (step.done) break;
-        chunks.push(step.value);
-        received += step.value.length;
-        if (total > 0) {{
-          const percent = Math.min(99, Math.floor((received / total) * 100));
-          setAudioCacheStatus("Caching to local: " + percent + "% (" + formatMb(received) + " / " + formatMb(total) + ")", "is-fetching");
-        }} else {{
-          setAudioCacheStatus("Caching to local: " + formatMb(received), "is-fetching");
-        }}
-      }}
-      const contentType = response.headers.get("content-type") || "audio/wav";
-      return {{
-        blob: new Blob(chunks, {{ type: contentType }}),
-        contentLength: total || received,
-      }};
-    }}
-
-    async function refreshAudioCacheWithNewDb(sourceUrl) {{
-      const db = await openAudioCacheDb();
-      if (!db) {{
-        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
-        return;
-      }}
-      try {{
-        await refreshAudioCache(db, sourceUrl);
-      }} finally {{
-        try {{ db.close(); }} catch (_e) {{}}
-      }}
-    }}
-
-    async function ensureAudioCached() {{
-      if (!media) return;
-      const sourceUrl = media.currentSrc || media.src;
-      if (!sourceUrl || sourceUrl.startsWith("blob:") || sourceUrl.startsWith("data:")) {{
-        setAudioCacheStatus("Local cache: not applicable");
-        return;
-      }}
-      const db = await openAudioCacheDb();
-      if (!db) {{
-        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
-        return;
-      }}
-      try {{
-        const cached = await audioCacheRead(db, sourceUrl);
-        if (cached && cached.blob && cached.blob.size > 0) {{
-          swapMediaToBlob(cached.blob, sourceUrl);
-          setAudioCacheStatus("Cached locally · " + formatMb(cached.size || cached.blob.size) + " · zero network for playback", "is-cached");
-          showCacheAudioButton(false);
-          showClearAudioCacheButton(true);
-          // Background validation: if the server file's size differs from
-          // the cached entry, redownload silently so we don't keep stale
-          // audio. HEAD is cheap and won't compete with playback. Reopen IDB
-          // if the refresh is needed because this function closes its handle
-          // as soon as the cache check is done.
-          window.fetch(sourceUrl, {{ method: "HEAD", credentials: "same-origin" }})
-            .then(function (response) {{
-              if (!response.ok) return;
-              const total = parseInt(response.headers.get("content-length") || "0", 10);
-              if (total > 0 && cached.size && total !== cached.size) {{
-                refreshAudioCacheWithNewDb(sourceUrl);
-              }}
-            }})
-            .catch(function () {{}});
-          return;
-        }}
-        setAudioCacheStatus("Local cache: not saved yet. Use Cache audio to make future opens faster.");
-        showCacheAudioButton(true);
-        showClearAudioCacheButton(false);
-      }} finally {{
-        try {{ db.close(); }} catch (_e) {{}}
-      }}
-    }}
-
-    async function refreshAudioCache(db, sourceUrl) {{
-      showCacheAudioButton(false);
-      setCacheAudioButtonBusy(true);
-      setAudioCacheStatus("Caching audio locally. Playback can continue while this runs...", "is-fetching");
-      try {{
-        const result = await fetchAudioWithProgress(sourceUrl);
-        const stored = await audioCacheWrite(db, sourceUrl, {{
-          blob: result.blob,
-          size: result.contentLength,
-          savedAt: Date.now(),
-        }});
-        if (stored) {{
-          swapMediaToBlob(result.blob, sourceUrl);
-          setAudioCacheStatus("Cached locally · " + formatMb(result.contentLength) + " · zero network for playback", "is-cached");
-          showCacheAudioButton(false);
-          showClearAudioCacheButton(true);
-        }} else {{
-          setAudioCacheStatus("Local cache: write failed (likely out of quota)", "is-error");
-          showCacheAudioButton(true);
-        }}
-      }} catch (err) {{
-        setAudioCacheStatus("Local cache: download failed, staying on streaming src", "is-error");
-        showCacheAudioButton(true);
-      }} finally {{
-        setCacheAudioButtonBusy(false);
-      }}
-    }}
-
-    async function cacheAudioSourceWithoutSwap(db, sourceUrl) {{
-      const cached = await audioCacheRead(db, sourceUrl);
-      if (cached && cached.blob && cached.blob.size > 0) {{
-        return {{ status: "cached", bytes: cached.size || cached.blob.size }};
-      }}
-      const result = await fetchAudioWithProgress(sourceUrl);
-      const stored = await audioCacheWrite(db, sourceUrl, {{
-        blob: result.blob,
-        size: result.contentLength,
-        savedAt: Date.now(),
-      }});
-      if (!stored) throw new Error("cache write failed");
-      return {{ status: "stored", bytes: result.contentLength }};
-    }}
-
-    async function loadTrainingAudioCacheUrls() {{
-      const urls = [];
-      const seen = new Set();
-      const addUrl = function (href) {{
-        const url = normalizedAudioCacheUrl(href);
-        if (!url || seen.has(url) || url.startsWith("blob:") || url.startsWith("data:")) return;
-        seen.add(url);
-        urls.push(url);
-      }};
-      if (media) addUrl(media.dataset.cacheStreamingSrc || media.currentSrc || media.src);
-      try {{
-        const stateUrl = appBasePath() + "/api/page-state?path=/training-labels";
-        const response = await window.fetch(stateUrl, {{ credentials: "same-origin", cache: "no-store" }});
-        if (!response.ok) return urls;
-        const payload = await response.json();
-        const rows = payload && payload.context && payload.context.trainingLabels
-          ? payload.context.trainingLabels.rows || []
-          : [];
-        rows.forEach(function (row) {{ addUrl(row.audioHref); }});
-      }} catch (_err) {{}}
-      return urls;
-    }}
-
-    async function cacheAllTrainingAudio() {{
-      if (!window.fetch || !window.indexedDB) {{
-        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
-        return;
-      }}
-      const urls = await loadTrainingAudioCacheUrls();
-      if (!urls.length) {{
-        setAudioCacheStatus("No audio files were found to cache.", "is-error");
-        return;
-      }}
-      const db = await openAudioCacheDb();
-      if (!db) {{
-        setAudioCacheStatus("Local cache: unavailable in this browser", "is-error");
-        return;
-      }}
-      let stored = 0;
-      let alreadyCached = 0;
-      let failed = 0;
-      let bytes = 0;
-      setCacheAudioButtonBusy(true);
-      try {{
-        for (let index = 0; index < urls.length; index += 1) {{
-          const url = urls[index];
-          setAudioCacheStatus("Caching all audio: " + (index + 1) + " of " + urls.length, "is-fetching");
-          try {{
-            const result = await cacheAudioSourceWithoutSwap(db, url);
-            if (result.status === "cached") alreadyCached += 1;
-            else stored += 1;
-            bytes += Number(result.bytes || 0);
-          }} catch (_err) {{
-            failed += 1;
-          }}
-        }}
-        setAudioCacheStatus(
-          "Cache all finished: " + stored + " added, " + alreadyCached + " already cached" + (failed ? ", " + failed + " failed" : "") + ". " + formatMb(bytes) + " available locally.",
-          failed ? "is-error" : "is-cached"
-        );
-        showCacheAudioButton(false);
-        showClearAudioCacheButton(true);
-      }} finally {{
-        setCacheAudioButtonBusy(false);
-        try {{ db.close(); }} catch (_e) {{}}
-      }}
-    }}
-
-    if (cacheAudioButton) {{
-      cacheAudioButton.addEventListener("click", async function () {{
-        if (!media) return;
-        const sourceUrl = media.dataset.cacheStreamingSrc || media.currentSrc || media.src;
-        if (!sourceUrl || sourceUrl.startsWith("blob:") || sourceUrl.startsWith("data:")) return;
-        await refreshAudioCacheWithNewDb(sourceUrl);
-      }});
-    }}
-    if (cacheAllAudioButton) {{
-      cacheAllAudioButton.addEventListener("click", cacheAllTrainingAudio);
-    }}
-
-    if (clearAudioCacheButton) {{
-      clearAudioCacheButton.addEventListener("click", async function () {{
-        if (!media) return;
-        const sourceUrl = media.dataset.cacheStreamingSrc || media.currentSrc || media.src;
-        if (!sourceUrl) return;
-        const db = await openAudioCacheDb();
-        if (!db) return;
-        try {{
-          await audioCacheDelete(db, sourceUrl);
-          setAudioCacheStatus("Local cache cleared. Reload to re-download.");
-          showCacheAudioButton(true);
-          showClearAudioCacheButton(false);
-        }} finally {{
-          try {{ db.close(); }} catch (_e) {{}}
-        }}
-      }});
-    }}
-
-    if (media) {{
-      // Defer the first cache check until the page is past first paint so
-      // we don't fight with everything else loading. requestIdleCallback
-      // is best when available, otherwise just delay a tick.
-      const kickCache = function () {{ ensureAudioCached(); }};
-      if (typeof window.requestIdleCallback === "function") {{
-        window.requestIdleCallback(kickCache, {{ timeout: 1500 }});
-      }} else {{
-        window.setTimeout(kickCache, 250);
-      }}
-    }}
     if (playbackRate && media) {{
       playbackRate.addEventListener("change", function () {{
         const rate = rowNumber(playbackRate.value);
@@ -4523,6 +4106,8 @@ def write_review_bundle(
     training_label_records: Mapping[str, Mapping[str, object]] | None = None,
     model_comparisons: Sequence[Mapping[str, object]] | None = None,
     fine_tuning_projects: Sequence[Mapping[str, object]] | None = None,
+    known_speakers: Sequence[str] | None = None,
+    media_preview_url_template: str | None = None,
     quiet: bool = False,
 ) -> tuple[Path, Path]:
     srt_path = srt_path.expanduser().resolve()
@@ -4563,6 +4148,21 @@ def write_review_bundle(
 
     write_flag_report(cues=cues, flags_by_index=flags_by_index, report_tsv=report_tsv)
     output_html.parent.mkdir(parents=True, exist_ok=True)
+    # If the dashboard supplied a preview URL template and the resolved
+    # media lives inside audio_dir/, point the audio player at the
+    # downsampled preview instead of the source. Keeps the ML pipeline
+    # reading the untouched original.
+    resolved_preview_url: str | None = None
+    if media_preview_url_template and resolved_media is not None:
+        try:
+            audio_relative = (
+                resolved_media.resolve().relative_to(audio_dir.expanduser().resolve()).as_posix()
+            )
+            resolved_preview_url = media_preview_url_template.format(
+                audio_relative=quote(audio_relative, safe="/._-~")
+            )
+        except ValueError:
+            resolved_preview_url = None
     output_html.write_text(
         build_html(
             cues=cues,
@@ -4574,6 +4174,8 @@ def write_review_bundle(
             label_record=label_record,
             model_comparisons=model_comparisons,
             fine_tuning_projects=fine_tuning_projects,
+            known_speakers=known_speakers,
+            media_preview_url=resolved_preview_url,
         ),
         encoding="utf-8",
     )

@@ -10,6 +10,7 @@ import argparse
 import errno
 import socket
 import sys
+import threading
 
 from dashboard.constants import DEFAULT_SERVER_MODE, DEFAULT_SERVER_THREADS
 from dashboard.servers import (
@@ -122,6 +123,13 @@ def main(argv: list[str] | None = None, app=None) -> int:
             )
         else:
             print(f"Serving workflow hub on {local_url}")
+
+        # Warm the dashboard caches in the background so the first real
+        # page render isn't a cold rglob/list_projects/750 KB-JSON parse
+        # all at once. Daemon thread so it never blocks shutdown.
+        warmup = getattr(app, "warmup_caches", None)
+        if callable(warmup):
+            threading.Thread(target=warmup, name="dashboard-warmup", daemon=True).start()
 
         if server_mode == "waitress":
             server.run()

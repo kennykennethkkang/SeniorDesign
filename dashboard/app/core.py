@@ -266,6 +266,14 @@ class CoreMixin:
                 status, headers, body = self.handle_runtime_estimate(environ)
             elif routed_method == "GET" and path == "/api/file-search":
                 status, headers, body = self.handle_file_search(environ)
+            elif routed_method == "GET" and path == "/api/training-folders":
+                status, headers, body = self.handle_training_folders(environ)
+            elif routed_method == "GET" and path == "/api/training-labels":
+                status, headers, body = self.handle_training_labels_slice(environ)
+            elif routed_method == "GET" and path == "/api/audio-files":
+                status, headers, body = self.handle_audio_files_slice(environ)
+            elif routed_method == "GET" and path == "/api/audio-preview":
+                status, headers, body = self.handle_audio_preview(environ)
             elif routed_method == "GET" and path == "/api/fine-tuning/score-run":
                 status, headers, body = self.handle_finetune_score_run(environ)
             elif routed_method == "GET" and path == "/api/fine-tuning/compare-runs":
@@ -273,7 +281,7 @@ class CoreMixin:
             elif routed_method == "GET" and path == "/health":
                 status, headers, body = self.text_response("200 OK", "ok\n")
             elif routed_method == "GET" and path.startswith("/assets/"):
-                status, headers, body = self.serve_frontend_asset(path)
+                status, headers, body = self.serve_frontend_asset(path, environ)
             elif routed_method == "GET" and path.startswith("/files/"):
                 status, headers, body = self.serve_file(path, environ)
             elif routed_method == "POST" and path == "/upload/audio":
@@ -565,7 +573,7 @@ class CoreMixin:
             return False
         return any(relative == Path(name) or Path(name) in relative.parents for name in DOWNLOADABLE_ROOT_NAMES)
 
-    def serve_frontend_asset(self, path: str):
+    def serve_frontend_asset(self, path: str, environ=None):
         """Serve React, CSS, and other frontend assets from the dedicated folder."""
 
         relative = path.removeprefix("/assets/")
@@ -576,18 +584,39 @@ class CoreMixin:
             return self.text_response("404 Not Found", "Not found\n")
 
         content_type = mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+        etag, last_modified = self._file_cache_validators(asset_path)
+        # Short-circuit with 304 when the browser's cached copy still matches.
+        # The full body fetch stays cheap because the file is local, but the
+        # 304 path skips reading the bytes off disk and pushing them through
+        # WSGI.
+        if environ is not None and self._client_has_fresh_copy(environ, etag, last_modified):
+            return (
+                "304 Not Modified",
+                [
+                    ("Cache-Control", "no-cache"),
+                    ("ETag", etag),
+                    ("Last-Modified", last_modified),
+                    *SECURITY_RESPONSE_HEADERS,
+                ],
+                [b""],
+            )
         body = asset_path.read_bytes()
-        # Vendored React + the hand-written dashboard_app.js change rarely.
-        # A short browser cache + must-revalidate cuts re-downloads on every
-        # page navigation while still letting an edit ship without a hard
-        # reload (the browser revalidates after the TTL).
+        # Force revalidation on every request so a freshly-pushed JS bundle is
+        # picked up the next time the user reloads, even if they reloaded a
+        # minute ago. ETag + Last-Modified still let the browser short-circuit
+        # with a 304 when the file hasn't changed, so the wire cost is
+        # essentially a HEAD request — negligible on the local dashboard.
         return (
             "200 OK",
-            self.response_headers(
-                content_type=content_type,
-                body_length=len(body),
-                cache_control="public, max-age=300, must-revalidate",
-            ),
+            [
+                *self.response_headers(
+                    content_type=content_type,
+                    body_length=len(body),
+                    cache_control="no-cache",
+                ),
+                ("ETag", etag),
+                ("Last-Modified", last_modified),
+            ],
             [body],
         )
 
@@ -780,10 +809,24 @@ class CoreMixin:
                 training_label_records=self.load_training_label_records(),
                 model_comparisons=self.review_model_comparisons_for_srt(srt_path),
                 fine_tuning_projects=list_projects(root=self.root),
+                known_speakers=self.all_known_speakers(),
+                media_preview_url_template=self.audio_preview_url_template(),
                 quiet=True,
             )
         except Exception:
             return
+
+    def audio_preview_url_template(self) -> str:
+        """Return the URL template the review page should embed for its audio.
+
+        The dashboard's ``/api/audio-preview`` route streams an 8 kHz mono
+        WAV preview (~half the bytes of the 16 kHz original) so the labeling
+        tab doesn't drag the full 70 MB through the browser. The
+        ``{audio_relative}`` placeholder is substituted by
+        ``write_review_bundle`` once the actual WAV is resolved.
+        """
+
+        return "/api/audio-preview?path=audio_in/{audio_relative}"
 
     def artifact_kind(self, path: Path, content_type: str = "") -> str:
         """Classify one artifact for browser previews."""
@@ -914,6 +957,86 @@ class CoreMixin:
             message_status="info",
         )
         return self.json_response("200 OK", payload)
+
+    def handle_audio_preview(self, environ):
+        """Stream an 8 kHz mono preview WAV for a single audio source.
+
+        The preview cuts a 70 MB 16 kHz file roughly in half, which keeps the
+        labeling page out of browser-tab-killing memory territory while the
+        ML pipeline keeps reading the untouched 16 kHz original. Generation
+        is lazy: the first request for a given source produces the cache
+        entry, every later request serves it directly with Range support.
+        """
+
+        from dashboard.audio_preview import ensure_preview
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        requested_path = (query.get("path") or [""])[0].strip()
+        if not requested_path:
+            return self.text_response("404 Not Found", "Not found\n")
+        try:
+            source_path = self.resolve_under_root(requested_path)
+        except ValueError:
+            return self.text_response("404 Not Found", "Not found\n")
+        if not source_path.is_file() or source_path.suffix.lower() != ".wav":
+            return self.text_response("404 Not Found", "Not found\n")
+        # Only allow previewing files inside audio_in/. Generating previews
+        # for arbitrary workspace artifacts would be a foot-gun (review HTML,
+        # logs, etc.) and dilutes the cache.
+        try:
+            source_path.resolve().relative_to(self.audio_dir.resolve())
+        except ValueError:
+            return self.text_response("404 Not Found", "Not found\n")
+        cache_root = self.local_dashboard_dir / "audio_preview"
+        try:
+            preview_path = ensure_preview(source_path, cache_root)
+        except FileNotFoundError:
+            return self.text_response("404 Not Found", "Not found\n")
+        except Exception as exc:  # noqa: BLE001 - preview generation failures fall back
+            # If we can't make a preview (corrupt WAV, locked disk, etc.)
+            # fall back to streaming the original so the page still works.
+            return self._serve_audio_file(source_path, environ)
+        return self._serve_audio_file(preview_path, environ)
+
+    def _serve_audio_file(self, file_path: Path, environ) -> tuple:
+        """Stream one audio file with Range + ETag/Last-Modified support.
+
+        Shared between the /files/ route and /api/audio-preview so both
+        paths get the same 304 short-circuit and partial-content behavior.
+        """
+
+        content_type = mimetypes.guess_type(str(file_path))[0] or "audio/wav"
+        cache_control = self._cache_control_for(content_type)
+        etag, last_modified = self._file_cache_validators(file_path)
+        validator_headers = [("ETag", etag), ("Last-Modified", last_modified)]
+        range_header = str(environ.get("HTTP_RANGE") or "")
+        if not range_header and self._client_has_fresh_copy(environ, etag, last_modified):
+            return (
+                "304 Not Modified",
+                [
+                    ("Cache-Control", cache_control),
+                    ("Accept-Ranges", "bytes"),
+                    *validator_headers,
+                    *SECURITY_RESPONSE_HEADERS,
+                ],
+                [b""],
+            )
+        if range_header:
+            ranged = self.range_response_for_file(
+                file_path,
+                content_type,
+                range_header,
+                extra_headers=validator_headers,
+            )
+            if ranged is not None:
+                return ranged
+        file_size = file_path.stat().st_size
+        headers = [
+            *self.response_headers(content_type=content_type, body_length=file_size, cache_control=cache_control),
+            ("Accept-Ranges", "bytes"),
+            *validator_headers,
+        ]
+        return "200 OK", headers, self._iter_file_chunks(file_path)
 
     def handle_artifact_preview(self, environ):
         """Return a constrained preview payload for one workspace artifact."""
@@ -1102,6 +1225,34 @@ class CoreMixin:
 
         with self._dashboard_cache_lock:
             self._dashboard_cache.clear()
+
+    def warmup_caches(self) -> None:
+        """Prime the hot caches the home/landing pages rely on.
+
+        Called from a daemon thread on server startup so the first real
+        request doesn't have to pay for a cold rglob of audio_in/, a fresh
+        list_projects scan, an os.walk of outputs_root, and a parse of the
+        ~750 KB label_status.json all in one render. Anything that throws
+        is swallowed — warmup is best-effort.
+        """
+
+        warmup_calls = (
+            self.audio_input_count,
+            self.audio_inventory,
+            self.queue_size,
+            self.project_count,
+            self.project_summaries,
+            lambda: self.recent_output_files(limit=30),
+            self.active_tracking_summary,
+            self.load_training_label_records,
+        )
+        for call in warmup_calls:
+            try:
+                call()
+            except Exception:
+                # First request will pay for whichever one failed, but the
+                # server should not be brought down by a warmup hiccup.
+                continue
 
     def cached_value(self, key: str, *, ttl_seconds: float, builder):
         """Cache expensive dashboard scans for a short interval.

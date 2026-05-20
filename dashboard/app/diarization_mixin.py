@@ -206,12 +206,18 @@ class DiarizationMixin:
         return newest_path
 
     def newest_nemo_model_artifact(self, experiments_dir: Path) -> Path | None:
-        """Return the newest reusable NeMo package, with checkpoints as a fallback."""
+        """Return the newest reusable NeMo ``.nemo`` package, or None.
 
-        nemo_package = self.newest_model_artifact(experiments_dir, suffixes={".nemo"})
-        if nemo_package:
-            return nemo_package
-        return self.newest_model_artifact(experiments_dir, suffixes={".ckpt"})
+        Only ``.nemo`` archives are returned. A raw Lightning ``.ckpt`` is
+        deliberately NOT offered: the diarization backend's NeuralDiarizer
+        can restore a ``.nemo`` but not a bare checkpoint, so surfacing one
+        produced a model that errored the moment it was selected. The
+        training launcher now always exports a ``.nemo`` (with a checkpoint
+        fallback exporter), so a project with only ``.ckpt`` files is a
+        genuinely broken run and correctly stays out of the picker.
+        """
+
+        return self.newest_model_artifact(experiments_dir, suffixes={".nemo"})
 
     def newest_pyannote_artifact(self, experiments_dir: Path) -> Path | None:
         """Return the newest reusable pyannote artifact from a fine-tuning project."""

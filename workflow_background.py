@@ -37,12 +37,47 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
+# Per-process memo for slurm_job_state results. The dashboard's tracking
+# poll hits this once per active run per second; with 50+ active runs that's
+# 50 squeue subprocesses every poll. SLURM state changes coarsely (PD → R →
+# done over minutes), so a few-second TTL is invisible to the user but saves
+# hundreds of subprocess calls per render. CLI usage is unaffected because
+# short-lived CLI processes get one cache miss and exit before TTL matters.
+_SLURM_JOB_STATE_CACHE: dict[tuple[str, bool], tuple[float, str]] = {}
+_SLURM_JOB_STATE_CACHE_TTL = 3.0
+
+
+def _slurm_job_state_cached(job_id: str, include_accounting: bool) -> str | None:
+    """Return the cached job state if still fresh, else None."""
+
+    entry = _SLURM_JOB_STATE_CACHE.get((job_id, include_accounting))
+    if entry is None:
+        return None
+    expires_at, value = entry
+    if time.monotonic() < expires_at:
+        return value
+    return None
+
+
+def _slurm_job_state_store(job_id: str, include_accounting: bool, value: str) -> None:
+    """Memoize one slurm_job_state result with a short TTL."""
+
+    _SLURM_JOB_STATE_CACHE[(job_id, include_accounting)] = (
+        time.monotonic() + _SLURM_JOB_STATE_CACHE_TTL,
+        value,
+    )
+
+
 def slurm_job_state(job_id: str, *, include_accounting: bool = True) -> str:
     """Get the current SLURM state for a job, falling back to sacct when it's already left squeue."""
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
     if not normalized_job_id:
         return ""
+
+    cached = _slurm_job_state_cached(normalized_job_id, include_accounting)
+    if cached is not None:
+        return cached
     if shutil.which("squeue"):
         try:
             completed = subprocess.run(
@@ -57,11 +92,16 @@ def slurm_job_state(job_id: str, *, include_accounting: bool = True) -> str:
         if completed is not None and completed.returncode == 0:
             states = [line.strip().lower() for line in completed.stdout.splitlines() if line.strip()]
             if states:
-                return states[0]
+                value = states[0]
+                _slurm_job_state_store(normalized_job_id, include_accounting, value)
+                return value
     if not include_accounting:
+        _slurm_job_state_store(normalized_job_id, include_accounting, "")
         return ""
     accounting = slurm_accounting_snapshot(normalized_job_id)
-    return str(accounting.get("state") or "").lower()
+    value = str(accounting.get("state") or "").lower()
+    _slurm_job_state_store(normalized_job_id, include_accounting, value)
+    return value
 
 
 def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:

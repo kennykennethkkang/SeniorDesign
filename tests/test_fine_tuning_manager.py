@@ -45,10 +45,12 @@ def float_wav_bytes(duration_seconds: float = 2.0, sample_rate: int = 16000) -> 
 
 class FineTuningTests(unittest.TestCase):
     def assert_default_slurm_resources(self, sbatch_path: pathlib.Path):
+        # Defaults sized for the WAVE `gpu` partition so NeMo MSDD fine-tuning
+        # finishes (and exports its .nemo) inside the time budget.
         sbatch_text = sbatch_path.read_text(encoding="utf-8")
-        self.assertIn("#SBATCH --cpus-per-task=8", sbatch_text)
-        self.assertIn("#SBATCH --mem=48G", sbatch_text)
-        self.assertIn("#SBATCH --time=08:00:00", sbatch_text)
+        self.assertIn("#SBATCH --cpus-per-task=16", sbatch_text)
+        self.assertIn("#SBATCH --mem=96G", sbatch_text)
+        self.assertIn("#SBATCH --time=12:00:00", sbatch_text)
         self.assertIn("#SBATCH --gres=gpu:1", sbatch_text)
 
     def test_prepare_project_accepts_ieee_float_wav_samples(self):

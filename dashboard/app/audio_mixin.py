@@ -155,21 +155,84 @@ from dashboard.cli import build_parser
 class AudioMixin:
     """Audio inventory, folder management, uploads, and reference rewrites."""
 
+    def handle_audio_files_slice(self, environ):
+        """Return the audio inventory for one folder, on demand.
+
+        The fine-tune SSH picker fetches this when the user selects a folder
+        from the folder buckets, instead of paying for the full 6 k-file
+        payload on every /fine-tuning render. ``folder=__root__`` returns
+        files that live directly under audio_in/.
+        """
+
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        folder = (query.get("folder") or [""])[0].strip()
+        needle = (query.get("q") or [""])[0].strip().lower()
+
+        audio_files = self.audio_inventory()
+        audio_root = self._resolved_audio_dir()
+        workspace_root = self.root
+        files: list[dict[str, object]] = []
+        for path in audio_files:
+            try:
+                rel = path.relative_to(audio_root).as_posix()
+            except ValueError:
+                continue
+            if folder == "__root__":
+                if "/" in rel:
+                    continue
+            elif folder:
+                if not rel.startswith(folder + "/"):
+                    continue
+            if needle and needle not in rel.lower():
+                continue
+            try:
+                workspace_relative = str(path.relative_to(workspace_root))
+            except ValueError:
+                workspace_relative = str(path)
+            files.append(
+                {
+                    "name": rel,
+                    "fileName": path.name,
+                    "folder": rel.split("/", 1)[0] if "/" in rel else "Unsorted Root",
+                    "path": workspace_relative,
+                    "type": path.suffix.lower() or "file",
+                }
+            )
+        return self.json_response("200 OK", {"folder": folder, "files": files})
+
     def audio_inventory(self) -> list[Path]:
         """Return the sorted input inventory for pages that need file selection.
 
-        Briefly cached (~2 s). YouTube conversion and Slurm jobs land WAVs
-        from separate processes, so a long-lived cache can hide fresh media —
-        but a 2 s window matches the polling cadence and stops the Media
-        Library from re-walking ``audio_in/`` for every page-state refresh
-        within the same poll burst.
+        Cache key is fingerprinted with the top-level mtime of ``audio_in/``
+        plus its immediate subfolders, so a YouTube/Slurm job that drops a
+        new WAV from a separate process is picked up on the very next render
+        without waiting for a TTL expiry. The TTL still acts as a backstop.
         """
 
+        cache_key = f"audio_inventory::{self._audio_inventory_fingerprint()}"
         return self.cached_value(
-            "audio_inventory",
-            ttl_seconds=2.0,
+            cache_key,
+            ttl_seconds=30.0,
             builder=lambda: iter_audio_files(self.audio_dir),
         )
+
+    def _audio_inventory_fingerprint(self) -> tuple:
+        """Hash audio_in/ + one level of subdirs by mtime to spot new media."""
+
+        try:
+            stat = self.audio_dir.stat()
+        except OSError:
+            return ("missing",)
+        parts: list = [stat.st_mtime]
+        try:
+            for child in self.audio_dir.iterdir():
+                try:
+                    parts.append((child.name, child.stat().st_mtime))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return tuple(parts)
 
     def audio_folder_rows(
         self,
@@ -192,11 +255,18 @@ class AudioMixin:
         audio_root = self.audio_dir.resolve()
         counts: dict[str, int] = {"": 0}
         for path in audio_files:
+            # iter_audio_files already returns paths rooted at audio_root, so
+            # call relative_to directly instead of paying for a per-file
+            # resolve() (which lstats every directory component). Falls back
+            # to the resolve()d form only for paths from callers outside the
+            # normal inventory walk.
             try:
-                relative = path.resolve().relative_to(audio_root)
+                relative = path.relative_to(audio_root)
             except ValueError:
-                # Outside audio_in (broken symlink that escaped); skip silently.
-                continue
+                try:
+                    relative = path.resolve().relative_to(audio_root)
+                except ValueError:
+                    continue
             folder = relative.parts[0] if len(relative.parts) > 1 else ""
             counts[folder] = counts.get(folder, 0) + 1
 
@@ -233,9 +303,10 @@ class AudioMixin:
     def audio_input_count(self) -> int:
         """Count supported input media without sorting the full inventory.
 
-        Cached for the same window as ``audio_inventory`` so the per-second
-        tracking poll stops re-walking the whole ``audio_in/`` tree to
-        recompute a number that changes at human pace.
+        Shares the same dir-mtime fingerprint as ``audio_inventory`` so the
+        per-second tracking poll stops re-walking the whole ``audio_in/``
+        tree to recompute a number that changes at human pace, but still
+        flips immediately when a separate process drops a new file in.
         """
 
         def _build() -> int:
@@ -252,7 +323,8 @@ class AudioMixin:
                 )
             )
 
-        return self.cached_value("audio_input_count", ttl_seconds=3.0, builder=_build)
+        cache_key = f"audio_input_count::{self._audio_inventory_fingerprint()}"
+        return self.cached_value(cache_key, ttl_seconds=30.0, builder=_build)
 
     def queue_size(self) -> int:
         """Count queued YouTube URLs with the same short TTL as other dashboard data."""
@@ -345,9 +417,30 @@ class AudioMixin:
         return folder_value, folder_path
 
     def audio_relative_path(self, path: Path) -> str:
-        """Return a POSIX-style path relative to audio_in."""
+        """Return a POSIX-style path relative to audio_in.
 
-        return path.resolve().relative_to(self.audio_dir.resolve()).as_posix()
+        ``iter_audio_files`` returns paths already rooted at the resolved
+        audio_dir, so try the cheap ``relative_to`` first. Fall back to
+        resolve()-then-relative_to only for paths handed in by other
+        callers (e.g. legacy code passing un-resolved Paths). The cheap
+        path saves ~6 k resolve() invocations per /diarization render.
+        """
+
+        audio_root = self._resolved_audio_dir()
+        try:
+            return path.relative_to(audio_root).as_posix()
+        except ValueError:
+            return path.resolve().relative_to(audio_root).as_posix()
+
+    def _resolved_audio_dir(self) -> Path:
+        """Memoize ``audio_dir.resolve()`` so the hot loop doesn't pay for it per call."""
+
+        cached = getattr(self, "_resolved_audio_dir_cache", None)
+        if cached is not None and cached[0] == self.audio_dir:
+            return cached[1]
+        resolved = self.audio_dir.resolve()
+        self._resolved_audio_dir_cache = (self.audio_dir, resolved)
+        return resolved
 
     def clean_audio_selection_value(self, raw_value: str) -> str:
         """Normalize a selected audio path while rejecting path traversal."""

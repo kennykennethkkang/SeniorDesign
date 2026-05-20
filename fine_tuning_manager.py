@@ -46,10 +46,16 @@ DEFAULT_BASE_SHIFT = 0.25
 DEFAULT_STEP_COUNT = 50
 DEFAULT_MAX_EPOCHS = 20
 DEFAULT_DEVICES = 1
+# SLURM defaults sized for the WAVE `gpu` partition (per node: 2 Volta GPUs,
+# 80 CPUs, ~376 GB RAM, 2-day max). NeMo MSDD fine-tuning kept hitting the
+# old 4-8 h limit before it could export the final .nemo, so the time
+# budget is generous and the CPU/RAM headroom lets the dataloader keep the
+# single GPU fed. One GPU on purpose: the fine-tune datasets are small and
+# multi-GPU DDP sync overhead would outweigh the gain.
 DEFAULT_SLURM_PARTITION = "gpu"
-DEFAULT_SLURM_TIME = "08:00:00"
-DEFAULT_SLURM_MEMORY = "48G"
-DEFAULT_SLURM_CPUS = 8
+DEFAULT_SLURM_TIME = "12:00:00"
+DEFAULT_SLURM_MEMORY = "96G"
+DEFAULT_SLURM_CPUS = 16
 DEFAULT_SLURM_GPUS = 1
 DEFAULT_FINE_TUNING_BACKEND = "nemo"
 SUPPORTED_FINE_TUNING_BACKENDS = {"nemo", "pyannote"}
@@ -592,6 +598,91 @@ def save_project_sample(
         write_text_replacing_existing(transcript_path, transcript_text.strip() + "\n", encoding="utf-8")
 
     return build_sample(audio_path, rttm_path, transcript_path)
+
+
+def replace_path_with_symlink(target_path: Path, source_path: Path) -> None:
+    """Atomically place a symlink at target_path pointing to source_path.
+
+    Used by the dashboard's "link existing audio" upload path so a fine-tune
+    project can reuse media that already lives in audio_in/ or a stitched
+    folder without doubling its disk usage. The target's parent is created
+    if needed; any pre-existing file or link at the target is replaced.
+    """
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_source = source_path.resolve()
+    tmp_path = sibling_temp_path(target_path)
+    try:
+        tmp_path.symlink_to(resolved_source)
+        os.replace(tmp_path, target_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def save_project_sample_links(
+    *,
+    project_name: str,
+    backend: str = DEFAULT_FINE_TUNING_BACKEND,
+    audio_path: Path,
+    rttm_path: Path,
+    audio_name: str | None = None,
+    transcript_path: Path | None = None,
+    transcript_text: str | None = None,
+    root: Path = PROJECT_ROOT,
+) -> TrainingSample:
+    """Register a labeled sample by symlinking audio/transcript instead of copying.
+
+    RTTM still gets rewritten in canonical form because the trainers expect a
+    normalized session_id, but the big bytes (audio + transcript) point back
+    at the originals. If the originals move or get deleted later, the linked
+    sample will break — that's the deliberate cost of the disk-space win.
+
+    ``audio_name`` overrides the destination filename for callers that need
+    a path-flattened stem (e.g. ``folder__001_clip.wav`` derived from a
+    nested audio_in/ path). When omitted, the source filename is used.
+    """
+
+    if not audio_path.is_file():
+        raise ValueError(f"Audio file does not exist: {audio_path}")
+    if not rttm_path.is_file():
+        raise ValueError(f"RTTM file does not exist: {rttm_path}")
+
+    normalized_backend = normalize_backend(backend)
+    paths = ensure_project_structure(project_name, backend=normalized_backend, root=root)
+    audio_filename = sanitize_filename(audio_name or audio_path.name)
+    audio_suffix = Path(audio_filename).suffix.lower()
+    if audio_suffix not in AUDIO_EXTENSIONS:
+        raise ValueError(f"Unsupported training audio type: {audio_suffix or 'unknown'}")
+    stem = Path(audio_filename).stem or sanitize_filename(rttm_path.stem)
+    if not stem:
+        raise ValueError("Unable to derive a sample name from the source files.")
+
+    target_audio_path = paths["audio_dir"] / f"{stem}{audio_suffix}"
+    target_rttm_path = paths["rttm_dir"] / f"{stem}.rttm"
+
+    replace_path_with_symlink(target_audio_path, audio_path)
+
+    try:
+        rttm_source_text = rttm_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("RTTM upload must be UTF-8 text.") from exc
+    write_canonical_rttm_text(target_rttm_path, rttm_source_text, session_id=stem)
+
+    target_transcript_path: Path | None = None
+    if transcript_path is not None and transcript_path.is_file():
+        transcript_filename = sanitize_filename(transcript_path.name)
+        transcript_suffix = Path(transcript_filename).suffix or ".txt"
+        target_transcript_path = paths["text_dir"] / f"{stem}{transcript_suffix}"
+        replace_path_with_symlink(target_transcript_path, transcript_path)
+    elif transcript_text and transcript_text.strip():
+        target_transcript_path = paths["text_dir"] / f"{stem}.txt"
+        write_text_replacing_existing(
+            target_transcript_path,
+            transcript_text.strip() + "\n",
+            encoding="utf-8",
+        )
+
+    return build_sample(target_audio_path, target_rttm_path, target_transcript_path)
 
 
 def save_project_sample_streams(
@@ -1530,6 +1621,11 @@ if [ ! -d "$NEURAL_DIR" ]; then
 fi
 
 cd "$NEURAL_DIR"
+# Dataloader worker count tracks the cores SLURM actually granted (falls
+# back to 8 for a bare local launch). More workers keep the single GPU fed
+# during MSDD embedding extraction, which is the slowest CPU-bound phase.
+WORKERS="${{SLURM_CPUS_PER_TASK:-8}}"
+
 # NeMo v2.x dropped the `model.base.*` prefix that the upstream
 # multiscale_diar_decoder.py docstring still advertises — the YAML schema
 # now exposes `model.diarizer.speaker_embeddings.model_path` directly, and
@@ -1554,6 +1650,8 @@ command=(
   model.validation_ds.manifest_filepath="$VAL_MANIFEST"
   model.train_ds.emb_dir="$TRAIN_EMB_DIR"
   model.validation_ds.emb_dir="$VAL_EMB_DIR"
+  model.train_ds.num_workers="$WORKERS"
+  model.validation_ds.num_workers="$WORKERS"
   exp_manager.name="$EXP_NAME"
   exp_manager.exp_dir="$EXP_DIR"
   +exp_manager.checkpoint_callback_params.save_last=false
@@ -1562,7 +1660,22 @@ command=(
 echo "Running NeMo fine-tuning command:"
 printf "  %q" "${{command[@]}}"
 printf "\\n"
-exec "${{command[@]}}"
+# Not `exec` — we need to run the .nemo export safety net afterwards.
+"${{command[@]}}"
+
+# .nemo export safety net. NeMo only packages the final .nemo when training
+# finishes normally; a run killed by the SLURM time limit leaves .ckpt only,
+# and the diarization backend can restore a .nemo archive but NOT a raw
+# Lightning .ckpt. If training finished without a .nemo, rebuild one from the
+# best surviving checkpoint. Best-effort: a failure here is logged but does
+# not fail the run, since training itself did complete.
+if ! find "$EXP_DIR" -name "*.nemo" -print -quit 2>/dev/null | grep -q .; then
+  echo "No .nemo produced by training — exporting from the best checkpoint..."
+  SENIOR_DESIGN_ROOT={json.dumps(str(PROJECT_ROOT))}
+  PYTHONPATH="$SENIOR_DESIGN_ROOT${{PYTHONPATH:+:$PYTHONPATH}}" \\
+    "$PYTHON_BIN" -c 'import sys; from fine_tuning_manager import export_best_checkpoint_to_nemo; print("export result:", export_best_checkpoint_to_nemo(sys.argv[1]))' "$EXP_DIR" \\
+    || echo "WARNING: .nemo export from checkpoint failed; model will not appear in diarization until re-trained." >&2
+fi
 """
     launch_script_path.parent.mkdir(parents=True, exist_ok=True)
     launch_script_path.write_text(script, encoding="utf-8")
@@ -1644,6 +1757,86 @@ def _runtime_env_block(*, backend: str) -> str:
             "fi",
         ]
     )
+
+
+def export_best_checkpoint_to_nemo(experiment_dir: Path | str) -> Path | None:
+    """Rebuild a loadable ``.nemo`` from the best surviving Lightning checkpoint.
+
+    NeMo only packages the ``.nemo`` when ``trainer.fit()`` returns normally;
+    a run killed by the SLURM time limit leaves ``.ckpt`` files only, and the
+    diarization backend's ``NeuralDiarizer`` can restore a ``.nemo`` archive
+    but not a raw checkpoint. This is the safety net: it finds the best
+    checkpoint under ``experiment_dir`` and exports a ``.nemo`` next to it.
+
+    Two real-world snags are handled:
+      * MSDD-only fine-tune checkpoints drop ``speaker_model_cfg`` from their
+        config, which crashes model construction — we re-inject it from the
+        base ``titanet_large`` speaker model.
+      * A checkpoint written while SLURM was killing the job is corrupt —
+        we walk checkpoints best-first and skip any that fail to read.
+
+    Returns the ``.nemo`` path on success, or None if every checkpoint is
+    missing/corrupt. NeMo + torch are imported lazily so the dashboard
+    (which also imports this module) never pays for the heavy import.
+    """
+
+    experiment_dir = Path(experiment_dir)
+    existing = next(iter(sorted(experiment_dir.rglob("*.nemo"))), None)
+    if existing is not None:
+        return existing
+    checkpoints = [path for path in experiment_dir.rglob("*.ckpt") if path.is_file()]
+    if not checkpoints:
+        return None
+
+    def _val_loss(path: Path) -> float:
+        match = re.search(r"val_loss=([0-9.]+)", path.name)
+        return float(match.group(1)) if match else float("inf")
+
+    # Lowest validation loss first; newest as the tie-breaker.
+    checkpoints.sort(key=lambda path: (_val_loss(path), -path.stat().st_mtime))
+
+    import torch  # noqa: PLC0415 - lazy: heavy import, only needed at export time
+    from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel  # noqa: PLC0415
+
+    speaker_model_cfg = None
+    for checkpoint in checkpoints:
+        try:
+            payload = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+        except Exception as exc:  # noqa: BLE001 - corrupt ckpt: skip, try the next
+            print(f"  skip {checkpoint.name}: cannot read checkpoint ({exc})")
+            continue
+        # ``hyper_parameters`` is an OmegaConf DictConfig (not a plain dict),
+        # so probe it with ``in`` / item access rather than isinstance(dict).
+        # NeMo stores the model config AS ``hyper_parameters`` itself — an
+        # OmegaConf DictConfig, not a plain dict with a nested "cfg" key.
+        cfg = payload.get("hyper_parameters") if isinstance(payload, dict) else None
+        # MSDD fine-tune configs drop speaker_model_cfg; NeuralDiarizer and
+        # load_from_checkpoint both need it. Pull it off the base TitaNet.
+        load_path = checkpoint
+        if cfg is not None and "speaker_model_cfg" not in cfg:
+            if speaker_model_cfg is None:
+                from nemo.collections.asr.models import EncDecSpeakerLabelModel  # noqa: PLC0415
+                speaker_model_cfg = EncDecSpeakerLabelModel.from_pretrained(
+                    "titanet_large", map_location="cpu"
+                ).cfg
+            try:
+                from omegaconf import open_dict  # noqa: PLC0415
+                with open_dict(cfg):
+                    cfg["speaker_model_cfg"] = speaker_model_cfg
+            except Exception:  # noqa: BLE001 - plain-dict cfg: assign directly
+                cfg["speaker_model_cfg"] = speaker_model_cfg
+            load_path = checkpoint.with_name(checkpoint.stem + ".speakercfg.ckpt")
+            torch.save(payload, str(load_path))
+        try:
+            model = EncDecDiarLabelModel.load_from_checkpoint(str(load_path), map_location="cpu")
+        except Exception as exc:  # noqa: BLE001 - try the next checkpoint
+            print(f"  skip {checkpoint.name}: model load failed ({exc})")
+            continue
+        out_path = checkpoint.parent / f"{experiment_dir.name}.nemo"
+        model.save_to(str(out_path))
+        print(f"  exported {out_path}")
+        return out_path
+    return None
 
 
 def write_sbatch_script(
