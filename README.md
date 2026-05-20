@@ -1,5 +1,3 @@
-hi
-
 # ML Speech Diarization
 
 This repository is organized around a local dashboard and a small set of CLI tools for:
