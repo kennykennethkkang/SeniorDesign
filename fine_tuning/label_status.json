@@ -11550,8 +11550,8 @@
       "transcript_text": "",
       "updated_at_utc": "2026-05-07T07:30:00+00:00"
     },
-    "audioStitching/20260507T082127_stitch_2363-items/syntheticdataaci.wav": {
-      "audio_file": "audioStitching/20260507T082127_stitch_2363-items/syntheticdataaci.wav",
+    "audioStitching/20260507T082127_stitch_2363-items/001_syntheticdataaci.wav": {
+      "audio_file": "audioStitching/20260507T082127_stitch_2363-items/001_syntheticdataaci.wav",
       "backend": "both",
       "completed_at_utc": "2026-05-07T15:21:58+00:00",
       "created_at_utc": "2026-05-07T15:22:02+00:00",
@@ -11577,7 +11577,7 @@
         "nemo/nemo-test1",
         "pyannote/pyannote-test1"
       ],
-      "training_rttm_path": "/WAVE/users2/unix/kkang/SeniorDesign/fine_tuning/projects/nemo/nemo-test1/rttm/syntheticdataaci.rttm",
+      "training_rttm_path": "/WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/audio_in/audioStitching/20260507T082127_stitch_2363-items/syntheticdataaci.rttm",
       "training_transcript_path": "/WAVE/users2/unix/kkang/SeniorDesign/fine_tuning/projects/nemo/nemo-test1/text/syntheticdataaci.txt",
       "training_usage": [
         {
@@ -11602,7 +11602,7 @@
         }
       ],
       "transcript_text": "",
-      "updated_at_utc": "2026-05-07T15:22:02+00:00"
+      "updated_at_utc": "2026-05-21T19:30:36+00:00"
     },
     "youtube_links/001_Kids Give Adults Advice on Dating_B08UvVwjpG4.wav": {
       "audio_file": "youtube_links/001_Kids Give Adults Advice on Dating_B08UvVwjpG4.wav",
@@ -11623,6 +11623,6 @@
       "updated_at_utc": "2026-05-04T22:12:19+00:00"
     }
   },
-  "updated_at_utc": "2026-05-15T04:23:12+00:00",
+  "updated_at_utc": "2026-05-21T19:30:36+00:00",
   "version": 1
 }

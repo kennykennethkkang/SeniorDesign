@@ -1,0 +1,80 @@
+[NeMo I 2026-05-19 23:51:52 nemo_logging:393] Using local nemo file from /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/msdd_patched_m_77p2b4/nemo-test1-trained-version-11.nemo
+[NeMo I 2026-05-19 23:51:52 nemo_logging:393] PADDING: 16
+[NeMo I 2026-05-19 23:51:53 nemo_logging:393] PADDING: 16
+[NeMo I 2026-05-19 23:51:53 nemo_logging:393] Model EncDecDiarLabelModel was successfully restored from /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/msdd_patched_m_77p2b4/nemo-test1-trained-version-11.nemo.
+[NeMo I 2026-05-19 23:51:53 nemo_logging:393] PADDING: 16
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Loading pretrained vad_multilingual_marblenet model from NGC
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Found existing object /WAVE/users2/unix/kkang/.cache/torch/NeMo/NeMo_2.6.2/vad_multilingual_marblenet/670f425c7f186060b7a7268ba6dfacb2/vad_multilingual_marblenet.nemo.
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Re-using file from: /WAVE/users2/unix/kkang/.cache/torch/NeMo/NeMo_2.6.2/vad_multilingual_marblenet/670f425c7f186060b7a7268ba6dfacb2/vad_multilingual_marblenet.nemo
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Instantiating model from pre-trained checkpoint
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] PADDING: 16
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Model EncDecClassificationModel was successfully restored from /WAVE/users2/unix/kkang/.cache/torch/NeMo/NeMo_2.6.2/vad_multilingual_marblenet/670f425c7f186060b7a7268ba6dfacb2/vad_multilingual_marblenet.nemo.
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Multiscale Weights: [1, 1, 1, 1, 1]
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Clustering Parameters: {
+        "oracle_num_speakers": false,
+        "max_num_speakers": 8,
+        "enhanced_count_thres": 80,
+        "max_rp_threshold": 0.25,
+        "sparse_search_volume": 30,
+        "maj_vote_spk_count": false,
+        "chunk_cluster_count": 50,
+        "embeddings_per_chunk": 10000
+    }
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Number of files to diarize: 1
+[NeMo I 2026-05-19 23:51:54 nemo_logging:393] Split long audio file to avoid CUDA memory issue
+[NeMo I 2026-05-19 23:52:09 nemo_logging:393] Perform streaming frame-level VAD
+[NeMo I 2026-05-19 23:52:09 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:09 nemo_logging:393] Dataset successfully loaded with 4 items and total duration provided from manifest is  0.05 hours.
+[NeMo I 2026-05-19 23:52:09 nemo_logging:393] # 4 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:14 nemo_logging:393] Generating predictions with overlapping input segments
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] Converting frame level prediction to speech/no-speech segment in start and end times format.
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] Subsegmentation for embedding extraction: scale0, /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale0.json
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] Extracting embeddings for Diarization
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] Dataset successfully loaded with 141 items and total duration provided from manifest is  0.04 hours.
+[NeMo I 2026-05-19 23:52:15 nemo_logging:393] # 141 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] Saved embedding files to /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] Subsegmentation for embedding extraction: scale1, /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale1.json
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] Extracting embeddings for Diarization
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] Dataset successfully loaded with 156 items and total duration provided from manifest is  0.04 hours.
+[NeMo I 2026-05-19 23:52:18 nemo_logging:393] # 156 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] Saved embedding files to /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] Subsegmentation for embedding extraction: scale2, /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale2.json
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] Extracting embeddings for Diarization
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] Dataset successfully loaded with 193 items and total duration provided from manifest is  0.04 hours.
+[NeMo I 2026-05-19 23:52:21 nemo_logging:393] # 193 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] Saved embedding files to /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] Subsegmentation for embedding extraction: scale3, /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale3.json
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] Extracting embeddings for Diarization
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] Dataset successfully loaded with 253 items and total duration provided from manifest is  0.05 hours.
+[NeMo I 2026-05-19 23:52:24 nemo_logging:393] # 253 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] Saved embedding files to /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] Subsegmentation for embedding extraction: scale4, /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale4.json
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] Extracting embeddings for Diarization
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] Filtered duration for loading collection is  0.00 hours.
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] Dataset successfully loaded with 375 items and total duration provided from manifest is  0.05 hours.
+[NeMo I 2026-05-19 23:52:27 nemo_logging:393] # 375 files loaded accounting to # 1 labels
+[NeMo I 2026-05-19 23:52:30 nemo_logging:393] Saved embedding files to /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Outputs are saved in /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5 directory
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading embedding pickle file of scale:0 at /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings/subsegments_scale0_embeddings.pkl
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading embedding pickle file of scale:1 at /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings/subsegments_scale1_embeddings.pkl
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading embedding pickle file of scale:2 at /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings/subsegments_scale2_embeddings.pkl
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading embedding pickle file of scale:3 at /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings/subsegments_scale3_embeddings.pkl
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading embedding pickle file of scale:4 at /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/embeddings/subsegments_scale4_embeddings.pkl
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Loading cluster label file from /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/sbatch_runtime/tmp/tmpgsmuhgu5/speaker_outputs/subsegments_scale4_cluster.label
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Filtered duration for loading collection is 0.000000.
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Total 6 session files loaded accounting to # 6 audio clips
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393]      [Threshold: 0.7000] [use_clus_as_main=False] [diar_window=50]
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Number of files to diarize: 1
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Number of files to diarize: 1
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Number of files to diarize: 1
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393] Number of files to diarize: 1
+[NeMo I 2026-05-19 23:52:31 nemo_logging:393]   
+    
+Transcript: /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/run_output/youtube_links__001_Kids_Give_Adults_Advice_on_Dating_B08UvVwjpG4.txt
+Subtitles:  /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/run_output/youtube_links__001_Kids_Give_Adults_Advice_on_Dating_B08UvVwjpG4.srt
+Review:     /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/run_output/youtube_links__001_Kids_Give_Adults_Advice_on_Dating_B08UvVwjpG4_review.html
+Flags:      /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/run_output/youtube_links__001_Kids_Give_Adults_Advice_on_Dating_B08UvVwjpG4_review_flags.tsv
