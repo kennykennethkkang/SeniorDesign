@@ -11,6 +11,11 @@ All automated test cases for this project live in this folder.
 - `test_project_utilities.py`: audio numbering helpers and YouTube conversion utility behavior.
 - `test_review_bundle.py`: review HTML and flag report generation from SRT files.
 - `test_run_diarization.py`: diarization CLI behavior that does not require GPU/runtime dependencies.
+- `test_diarization_metrics.py`: DER and companion metrics math (missed speech, false alarm, speaker confusion, JER).
+- `test_workflow_background.py`: local and Slurm background-run status helpers.
+- `test_cluster_queue.py`: the cluster-wide `squeue` snapshot helper and its HTTP endpoint.
+- `test_file_index.py`: the cross-run file index used by the dashboard.
+- `test_runtime_history.py`: the runtime-history time-estimate engine.
 
 ## Run Everything
 

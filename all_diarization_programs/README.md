@@ -7,6 +7,7 @@ This directory contains the direct diarization entrypoints and backend-specific 
 - `run_diarization.py`: direct single-audio runner
 - `run_parallel_diarization.py`: parallel variant used for wider batch-style execution
 - `nemo_msdd_backend.py`: NeMo MSDD backend integration
+- `nemo_diarization_telephonic.yaml`: NeMo diarizer config used by the MSDD backend
 - `pyannote_callhome_backend.py`: pyannote-based backend integration
 - `diarization_helpers.py`: output formatting and helper functions
 - `constraints.txt`: dependency constraints for the batch runtime
@@ -23,9 +24,6 @@ Use the direct runner when you want:
 - a debugging path that bypasses the Slurm wrappers
 
 Use the web site or `workflow_cli.py` when you want the guided project workflow.
-
-Older direct-run filenames are still available as compatibility symlinks, but the
-`run_*.py` names in this README are the primary names to use going forward.
 
 ## Step-by-step direct run
 
@@ -131,6 +129,6 @@ export HF_TOKEN=...
 
 ## Relationship to the rest of the repo
 
-- the `Direct` page in the web interface builds its command from this runner
+- the dashboard's `Diarization` page builds its command from this runner
 - `workflow_cli.py` handles the broader project workflows
 - Slurm batch scripts prepare runtime environments and use the same backend code paths

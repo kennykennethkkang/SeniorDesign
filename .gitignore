@@ -18,7 +18,7 @@ htmlcov/
 .python-version
 .ipynb_checkpoints/
 
-# Editor / OS — user-specific files that shouldn't follow the repo around
+# Editor / OS: user-specific files that shouldn't follow the repo around
 .local_dashboard/
 .vscode/
 .idea/
@@ -55,7 +55,7 @@ yarn-error.log*
 frontend/static/dist/*.map
 frontend/static/js/*.map
 
-# Project-local data — these dirs are write-once-per-run and personal to this host.
+# Project-local data: these dirs are write-once-per-run and personal to this host.
 audio_in/
 job_logs/
 job_outputs/
@@ -65,7 +65,7 @@ fine_tuning/label_work/
 stitched/
 youtube_links_err/*.tsv
 
-# SLURM scratch — wallclock outputs, error logs, and pid/url scratch files
+# SLURM scratch: wallclock outputs, error logs, and pid/url scratch files
 # don't belong in the repo. The sbatch templates in scheduler/ stay tracked.
 slurm-*.out
 slurm-*.err
@@ -74,7 +74,12 @@ slurm-*.err
 *.pid
 *.url
 
-# Bulk archives (corpus dumps, slurm bundles) — never push these to GitHub;
+# Ad-hoc fine-tune/diarization test runs. These are throwaway scratch
+# directories from manual smoke tests, full of SLURM logs and run outputs.
+test_finetune_*/
+test_finetune_*.sbatch
+
+# Bulk archives (corpus dumps, slurm bundles): never push these to GitHub;
 # they're either reproducible from the public source or too big for git.
 combined.zip
 *.zip
@@ -125,7 +130,7 @@ huggingface/
 *.bin
 *.tflite
 
-# Audio / video — recordings can contain identifiable voices; we treat them as
+# Audio / video: recordings can contain identifiable voices; we treat them as
 # data, not source. The one tracked test.opus under archive/ stays tracked
 # (git only ignores untracked files, so this won't disturb it).
 *.wav

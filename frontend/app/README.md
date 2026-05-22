@@ -40,10 +40,10 @@ Outputs:
 ## Dev server
 
 ```bash
-# Terminal A — Python backend
+# Terminal A: Python backend
 python3 workflow_cli.py local-web start
 
-# Terminal B — Vite dev server (proxies /api /files /actions to the Python server)
+# Terminal B: Vite dev server (proxies /api /files /actions to the Python server)
 cd frontend/app
 npm run dev
 ```
@@ -61,7 +61,7 @@ legacy bundle until a page is explicitly migrated.
 3. If the page needs new types, add them to `src/types.ts` so other migrated
    pages can share them.
 4. Wire the new page into `App.tsx`'s router (currently a single demo
-   page — the proper router lands as part of the second migration).
+   page; the proper router lands as part of the second migration).
 5. Run `npm run typecheck` then `npm run build`. Open the dashboard and
    verify the page works against real backend data.
 
@@ -71,7 +71,7 @@ When all six pages are migrated:
 
 1. Update `dashboard/app/rendering.py::frontend_state` to point the
    `assets.app` URL at `static/dist/dashboard.js` (and drop the
-   `assets.react` / `assets.reactDom` script tags — they're bundled now).
+   `assets.react` / `assets.reactDom` script tags, since they're bundled now).
 2. Move `frontend/static/js/dashboard_app.js` and the `frontend/vendor/`
    React UMD bundles into `archive/frontend_legacy_<date>/`.
 3. Update `frontend/package.json::scripts.check` to call
@@ -79,7 +79,7 @@ When all six pages are migrated:
 
 ## Why a parallel bundle?
 
-The user explicitly asked for "no logic changes." Running both bundles in
-parallel until each page is verified means we can roll back any migration
-by reverting one file. The Python serving layer never has to switch modes
-mid-migration.
+This migration is meant to introduce no behavior changes. Running both
+bundles in parallel until each page is verified means any migration can be
+rolled back by reverting one file. The Python serving layer never has to
+switch modes mid-migration.

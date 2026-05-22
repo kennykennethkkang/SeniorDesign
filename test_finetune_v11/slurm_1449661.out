@@ -1,9 +1,0 @@
-=== Fine-tune v11 integration test ===
-Job ID: 1449661
-Run dir: /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/run_output
-Audio list: /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/test_finetune_v11/audio_list.txt
-NeMo MSDD model: /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/fine_tuning/projects/nemo/nemo-test1/artifacts/experiments/nemo-test1-trained-version-11/nemo-test1-trained-version-11/2026-05-07_18-25-19/checkpoints/nemo-test1-trained-version-11.nemo
-Model file found: 120M
-Dependencies unchanged; skipping pip install.
---- Step 1: model load check ---
-Loading model from: /WAVE/projects2/sd-mlspeechdiarization-2025/SeniorDesign/fine_tuning/projects/nemo/nemo-test1/artifacts/experiments/nemo-test1-trained-version-11/nemo-test1-trained-version-11/2026-05-07_18-25-19/checkpoints/nemo-test1-trained-version-11.nemo

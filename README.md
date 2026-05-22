@@ -12,9 +12,10 @@ The current workflow is built around these dashboard tabs:
 
 - `Overview`
 - `Media Library`
-- `Training Labels`
+- `Stitching`
 - `YouTube Audio Conversion`
 - `Diarization`
+- `Training Labels`
 - `Fine-Tuning`
 
 Legacy CLI commands and older output folders still exist for compatibility, but the names above are the primary workflow going forward.
@@ -22,7 +23,7 @@ Legacy CLI commands and older output folders still exist for compatibility, but 
 ## Project layout
 
 - `workflow_cli.py`: top-level CLI for status, tests, review generation, and the local web launcher
-- `workflow_dashboard.py`: thin entry-point module — composes the `WorkflowWebApp` class from the mixins under `dashboard/app/`, exposes the `app` WSGI instance, and keeps `waitress_available` / `resolve_server_mode` at module level for tests to patch
+- `workflow_dashboard.py`: thin entry-point module that composes the `WorkflowWebApp` class from the mixins under `dashboard/app/`, exposes the `app` WSGI instance, and keeps `waitress_available` / `resolve_server_mode` at module level for tests to patch
 - `frontend/`: dashboard website files split into `html/`, `static/css/`, `static/js/`, and local React runtime files
 - `workflow_preferences.py`: persistent defaults used by the diarization and fine-tuning pages
 - `workflow_background.py`: shared helpers for detached and Slurm-backed runs launched from the site
@@ -30,7 +31,7 @@ Legacy CLI commands and older output folders still exist for compatibility, but 
 - `review_bundle.py`: review HTML and TSV flag generation from `.srt` files
 - `audio_numbering.py`: numbering utility for `audio_in/`
 - `youtube_audio_batch.py`: YouTube URL to audio downloader and conversion-history indexer; used by both the local CLI and the dashboard's Slurm wrapper
-- `dashboard/`: package extracted from `workflow_dashboard.py` — constants, sbatch helper, server bootstrap, CLI, and the per-domain mixins under `dashboard/app/`
+- `dashboard/`: package extracted from `workflow_dashboard.py`, holding constants, sbatch helper, server bootstrap, CLI, and the per-domain mixins under `dashboard/app/`
 - `all_diarization_programs/`: diarization entrypoints and backend-specific code
 - `scheduler/`: Slurm batch scripts for the dashboard's diarization and YouTube conversion jobs
 - `docs/`: local guides and reference papers for the project
@@ -98,7 +99,17 @@ CLI equivalent:
 python3 audio_numbering.py --audio-dir ./audio_in
 ```
 
-### 2. YouTube Audio Conversion
+### 2. Stitching
+
+Use `Stitching` to build longer multi-speaker clips out of shorter source files. This helps when the source corpus is too short or too single-speaker to give a real diarization signal.
+
+What happens:
+
+- you select source audio and the per-speaker layout
+- the dashboard submits the job through Slurm with `scheduler/run_site_stitching.sbatch`, which drives `stitch_audio.py`
+- the stitched result is mirrored back into `audio_in/` so the rest of the pipeline treats it like any other numbered upload
+
+### 3. YouTube Audio Conversion
 
 Use `YouTube Audio Conversion` to:
 
@@ -140,7 +151,7 @@ You can still edit the raw queue directly:
 youtube_links.txt
 ```
 
-### 3. Diarization
+### 4. Diarization
 
 Use `Diarization` to:
 
@@ -170,22 +181,20 @@ Typical contents of one run folder:
 
 This keeps every run separate, which makes backend comparisons and reruns easier to inspect.
 
-### 4. Review
+### 5. Review files
 
-Use `Review` to generate:
+Review files are generated automatically as part of each diarization run:
 
 - `<name>_review.html`
 - `<name>_review_flags.tsv`
 
-The page works from an existing `.srt` file and can optionally attach a matching media path.
-
-CLI equivalent:
+You can also regenerate them from an existing `.srt` file with the CLI, optionally attaching a matching media path:
 
 ```bash
 python3 workflow_cli.py review --srt path/to/file.srt --media path/to/file.wav
 ```
 
-### 5. Fine-Tuning
+### 6. Fine-Tuning
 
 Use `Fine-Tuning` to manage backend-specific training workspaces under:
 
@@ -340,7 +349,7 @@ The site now exposes these checks directly:
 - `scheduler/`: Slurm batch scripts and the shared runtime helper used by the dashboard
 - `docs/integration_testing_guide.md`: manual integration checklist
 - `docs/reference_materials/`: local PDF references used while shaping the workflow
-- `archive/`: dated snapshots of pre-dashboard scripts, output folders, and earlier prototypes — kept for reference but not part of the active workflow
+- `archive/`: dated snapshots of pre-dashboard scripts, output folders, and earlier prototypes, kept for reference but not part of the active workflow
 
 ## Testing
 
