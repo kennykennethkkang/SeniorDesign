@@ -218,9 +218,9 @@ def can_stitch_with_wave(paths: Sequence[Path]) -> bool:
     first = wave_params(paths[0])
     if first is None:
         return False
-    # Big stitch jobs benefit a lot from short-circuiting here — once any
-    # input doesn't match, we can stop opening files. Saves a full sweep of
-    # the 1.7k-file set in the common-case where someone mixes formats.
+    # Big stitch jobs benefit from short-circuiting here. Once any input
+    # doesn't match we can stop opening files. Saves a full sweep of the
+    # 1.7k-file set in the common case where someone mixes formats.
     for path in paths[1:]:
         params = wave_params(path)
         if params is None or params != first:

@@ -1,4 +1,4 @@
-"""Background auto-train runner — kicks off prepare + sbatch when labels complete.
+"""Background auto-train runner that kicks off prepare + sbatch when labels complete.
 
 The label completion flow can hand selected projects to this runner from the
 review popup, and the older per-project auto-train toggle still uses the same
@@ -15,7 +15,7 @@ and:
 5. Clears the pending flag so the dashboard reflects the new state.
 
 If the sbatch submission fails we leave the pending flag clear and log the
-error to the project's ``auto_train.log`` — there's no automatic retry, since
+error to the project's ``auto_train.log``; there's no automatic retry, since
 the user almost always wants to know about cluster issues themselves.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ import fine_tuning_manager as ftm
 from workflow_background import utc_now_iso
 
 
-# In-memory per-project locks. Single-host dashboard, single Python process —
+# In-memory per-project locks. Single-host dashboard, single Python process;
 # don't need a filesystem lock. The dict is keyed on "<backend>/<slug>".
 _AUTO_TRAIN_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -84,7 +84,7 @@ def _set_pending(project_name: str, *, backend: str, root: Path, pending: bool) 
     target = ftm.project_dir(project_name, backend=backend, root=root)
     if not target.is_dir():
         return
-    ftm._write_display_sidecar(  # noqa: SLF001 — internal helper, intentional cross-module use
+    ftm._write_display_sidecar(  # noqa: SLF001 - internal helper, intentional cross-module use
         target / "display.json",
         updates={"auto_train_pending": bool(pending)},
     )
@@ -162,7 +162,7 @@ def _runner(
 
     lock = _project_lock(backend, project_name)
     if not lock.acquire(blocking=False):
-        # Another auto-train is already queued for this project — just mark
+        # Another auto-train is already queued for this project; just mark
         # pending so the UI reflects that another label was added in the meantime.
         _set_pending(project_name, backend=backend, root=root, pending=True)
         _append_log(
@@ -203,7 +203,7 @@ def _runner(
                 extra_env=extra_env,
                 version_name=version_name,
             )
-        except Exception as exc:  # noqa: BLE001 — log everything in the runner thread
+        except Exception as exc:  # noqa: BLE001 - log everything in the runner thread
             _append_log(
                 project_name,
                 backend=backend,
@@ -239,7 +239,7 @@ def queue_auto_train(
     """Spawn a daemon thread to auto-train a project; returns False if already queued.
 
     Returning False is the "already queued, will pick up the new sample on the
-    next pass" case — exactly what we want when multiple label completions land
+    next pass" case, which is exactly what we want when multiple label completions land
     in quick succession on the same project. The currently-running thread will
     re-check ``_has_active_run`` and re-prepare with the latest sample set.
 

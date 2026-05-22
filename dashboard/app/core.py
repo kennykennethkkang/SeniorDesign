@@ -274,6 +274,8 @@ class CoreMixin:
                 status, headers, body = self.handle_audio_files_slice(environ)
             elif routed_method == "GET" and path == "/api/audio-preview":
                 status, headers, body = self.handle_audio_preview(environ)
+            elif routed_method == "GET" and path == "/api/fine-tuning/active-job-status":
+                status, headers, body = self.handle_finetune_active_job_status(environ)
             elif routed_method == "GET" and path == "/api/fine-tuning/score-run":
                 status, headers, body = self.handle_finetune_score_run(environ)
             elif routed_method == "GET" and path == "/api/fine-tuning/compare-runs":
@@ -605,7 +607,7 @@ class CoreMixin:
         # picked up the next time the user reloads, even if they reloaded a
         # minute ago. ETag + Last-Modified still let the browser short-circuit
         # with a 304 when the file hasn't changed, so the wire cost is
-        # essentially a HEAD request — negligible on the local dashboard.
+        # essentially a HEAD request, negligible on the local dashboard.
         return (
             "200 OK",
             [
@@ -620,7 +622,7 @@ class CoreMixin:
             [body],
         )
 
-    # 64 KB per chunk — big enough that the per-yield Python overhead is amortized,
+    # 64 KB per chunk: big enough that the per-yield Python overhead is amortized,
     # small enough that the browser starts decoding audio almost immediately
     # instead of waiting for the whole file (or whole range) to be read off the
     # cluster's networked filesystem before the first byte ships.
@@ -675,7 +677,7 @@ class CoreMixin:
         return False
 
     def _cache_control_for(self, content_type: str) -> str:
-        """Pick a cache header per content type — friendly for media, strict for everything else.
+        """Pick a cache header per content type. Friendly for media, strict for everything else.
 
         The whole point of this method: audio files are big and immutable once
         uploaded, so letting the browser cache them for an hour eliminates the
@@ -758,7 +760,7 @@ class CoreMixin:
         content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         cache_control = self._cache_control_for(content_type)
         etag, last_modified = self._file_cache_validators(file_path)
-        # Cache validators are sent on every response — they're cheap and they
+        # Cache validators are sent on every response; they're cheap and they
         # let the browser short-circuit re-fetches with a 304 instead of pulling
         # the whole audio off the network filesystem again.
         validator_headers = [("ETag", etag), ("Last-Modified", last_modified)]
@@ -1161,7 +1163,7 @@ class CoreMixin:
         return self.json_response("200 OK", estimate)
 
     def file_index_snapshot(self):
-        """Return the cross-run file index. Cached for 30 s — outputs only grow
+        """Return the cross-run file index. Cached for 30 s since outputs only grow
         when a run finishes, so we don't need to re-walk on every poll."""
 
         from dashboard.file_index import build_file_index
@@ -1233,7 +1235,7 @@ class CoreMixin:
         request doesn't have to pay for a cold rglob of audio_in/, a fresh
         list_projects scan, an os.walk of outputs_root, and a parse of the
         ~750 KB label_status.json all in one render. Anything that throws
-        is swallowed — warmup is best-effort.
+        is swallowed; warmup is best-effort.
         """
 
         warmup_calls = (
@@ -1271,7 +1273,7 @@ class CoreMixin:
         value = builder()
         # Anchor the TTL window to *after* the build finishes. Anchoring to
         # before-build silently breaks the cache for builders that take
-        # longer than ttl_seconds — by the time we'd write the entry, the
+        # longer than ttl_seconds. By the time we'd write the entry, the
         # entry would already be stale and the next caller would rebuild
         # from scratch. (training_label_summary at 24 s with a 10 s TTL hit
         # this exactly.)
@@ -1282,7 +1284,7 @@ class CoreMixin:
     def cached_slurm_queue(self, slurm_job_id: str, status: str) -> dict[str, object]:
         """Cached single-job squeue snapshot; empty for finished jobs.
 
-        TTL is 5 s — the user's job state changes coarsely (PD → R → done),
+        TTL is 5 s since the user's job state changes coarsely (PD → R → done),
         so refreshing every poll is wasted work. Tests still see a snapshot
         on first call because cached_value invokes the builder synchronously.
         """
@@ -1301,7 +1303,7 @@ class CoreMixin:
 
         Cached for ~1 s so the per-second tracking poll doesn't re-walk the
         runs/youtube/stitched/fine_tuning trees on every hit. The TTL matches
-        the live polling cadence — fingerprint comparison still drives real
+        the live polling cadence; fingerprint comparison still drives real
         refreshes when something actually changes on disk.
         """
 
@@ -1503,7 +1505,10 @@ class CoreMixin:
     def file_link(self, path: Path, script_name: str) -> str:
         """Map a workspace file to the constrained download route."""
 
-        relative = path.resolve().relative_to(self.root)
+        try:
+            relative = path.resolve().relative_to(self.root)
+        except ValueError:
+            return ""
         href = self.with_prefix("/files/" + quote(str(relative).replace("\\", "/")), script_name)
         return href
 

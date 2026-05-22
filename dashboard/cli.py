@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None, app=None) -> int:
     elif server_mode == "wsgiref":
         runtime_label = "standard-library WSGI"
 
-    # Wrap with gzip compression at the server boundary only — keep tests
+    # Wrap with gzip compression at the server boundary only; keep tests
     # talking to the bare WSGI app so they see uncompressed responses.
     served_app = GzipMiddleware(app)
 

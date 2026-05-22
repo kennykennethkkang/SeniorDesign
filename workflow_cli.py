@@ -4,13 +4,13 @@
 The dashboard does the heavy lifting now, so this CLI deliberately stays
 narrow. It supports the few actions users still need from a terminal:
 
-* ``status``     — print a quick report of audio inputs, queued YouTube URLs,
+* ``status``     - print a quick report of audio inputs, queued YouTube URLs,
                    tool availability, and the latest dashboard-launched runs.
-* ``review``     — regenerate an HTML review page (and the matching flag TSV)
+* ``review``     - regenerate an HTML review page (and the matching flag TSV)
                    for an existing diarization SRT.
-* ``test``       — run the local unit-test suite via ``run_tests.sh``.
-* ``serve-web``  — boot the dashboard in the foreground (useful for debugging).
-* ``local-web``  — start/stop/inspect the daemonized dashboard process.
+* ``test``       - run the local unit-test suite via ``run_tests.sh``.
+* ``serve-web``  - boot the dashboard in the foreground (useful for debugging).
+* ``local-web``  - start/stop/inspect the daemonized dashboard process.
 
 The legacy ``submit-single`` / ``submit-bulk`` / ``submit-youtube`` commands
 were retired with the dashboard cleanup; their scripts and helpers live under
@@ -600,7 +600,7 @@ def latest_diarization_directory(root: Path) -> Path | None:
 
     Tiebreaks on the directory name (timestamp-prefixed) so two runs created
     inside the same wall-clock second still produce a deterministic 'latest'
-    pick — important on shared file systems where mtime resolution can
+    pick, which matters on shared file systems where mtime resolution can
     collapse under load.
     """
 

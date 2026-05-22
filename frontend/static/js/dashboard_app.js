@@ -1,15 +1,15 @@
 /* global React, ReactDOM */
 /*
- * dashboard_app.js — senior-design dashboard frontend.
+ * dashboard_app.js - senior-design dashboard frontend.
  *
  * One hand-written React bundle (no JSX, no build step) that renders every
  * page of the local dashboard. Boots from a JSON blob the Python backend
  * stamps into <script id="dashboard-state">, then talks to the same Python
- * server over plain form posts and JSON endpoints — no separate API tier.
+ * server over plain form posts and JSON endpoints with no separate API tier.
  *
  * Why one file: the app is small enough that the cost of a build pipeline
  * outweighed the cleanliness of splitting per-page. A Vite/TS scaffold
- * exists at frontend/app/ but is intentionally not live yet — see
+ * exists at frontend/app/ but is intentionally not live yet; see
  * frontend/app/README.md for the cut-over plan.
  *
  * Structure (top → bottom):
@@ -29,7 +29,7 @@
   const h = React.createElement;
   const initialState = JSON.parse(document.getElementById("dashboard-state").textContent);
   const APP_TITLE = "ML Speech Diarization";
-  // Bumped from 1 s / 5 s — the per-second cadence was eating most of the
+  // Bumped from 1 s / 5 s because the per-second cadence was eating most of the
   // server's threadpool and starving page navigations on the single-process
   // built-in WSGI runtime. 3 s during an active run is still well inside
   // human "live feel"; 15 s idle catches up immediately on visibilitychange.
@@ -65,7 +65,7 @@
     title.textContent = "Dashboard failed to load";
     title.style.cssText = "margin:0 0 8px;font-size:20px;color:#a32035;";
     const sub = document.createElement("p");
-    sub.textContent = label + " — paste the text below if you report this.";
+    sub.textContent = label + ". Paste the text below if you report this.";
     sub.style.cssText = "margin:0 0 12px;font-size:13px;color:#5a1a1a;";
     const pre = document.createElement("pre");
     pre.textContent = detail;
@@ -214,7 +214,7 @@
   // is happy with full-page redirects after the post, so we just submit a
   // throwaway form rather than wiring a fetch + reload dance.
   // We need to trigger a POST from JavaScript without building a full SPA form
-  // submission flow — a throwaway hidden form is the simplest correct way to do it.
+  // submission flow; a throwaway hidden form is the simplest correct way to do it.
   function submitHiddenForm(action, fields) {
     if (!action) {
       return;
@@ -236,7 +236,7 @@
   function promptRenameProject(project) {
     if (!project || !project.slug) return;
     const current = project.displayName || project.slug;
-    // window.prompt is exactly the right amount of UI for a single-field rename —
+    // window.prompt is exactly the right amount of UI for a single-field rename;
     // no modal lib, no extra state, and it works without any event wiring.
     const next = window.prompt(`Rename project "${current}"`, current);
     if (next === null) return;
@@ -497,7 +497,7 @@
     }
     // Pick the source with the most folder context. Workspace-file rows
     // have ``name`` set to the basename only and ``path`` set to the full
-    // workspace-relative path — preferring the one that actually contains a
+    // workspace-relative path, preferring the one that actually contains a
     // slash keeps the folder filter meaningful for those pickers without
     // breaking the table rows whose ``name`` is already a relative path.
     const candidates = [row?.name, row?.audioFile, row?.path, row?.fileName]
@@ -959,7 +959,7 @@
     // Audio playback is rendered by the parent dialog (TrainingLabelDialog),
     // not here. Previously this picker returned null whenever there were no
     // diarization comparison items, which meant a freshly uploaded WAV that
-    // had never been diarized lost its audio player too — exactly the moment
+    // had never been diarized lost its audio player too, which was exactly the moment
     // a user would need to listen to label it. Skip the model-comparison
     // section here when there is nothing to compare; the audio still plays.
     if (!audioName || !items.length) {
@@ -1473,7 +1473,7 @@
     const titleId = `${id}-title`;
     // Lazy-render the body. Diarization tables and training-label tables put a
     // dialog under every row; without this the page eagerly mounts hundreds of
-    // ArtifactPreviewBrowsers / TrainingLabelDialog forms on first load — each
+    // ArtifactPreviewBrowsers / TrainingLabelDialog forms on first load; each
     // one firing its own /api/artifact-preview fetch the second it mounts.
     // We only build the body once the dialog has actually been shown; after
     // that we keep it mounted so re-opens are instant.
@@ -1489,7 +1489,7 @@
         return undefined;
       }
       if (typeof MutationObserver !== "function") {
-        // Old browsers we don't really expect — render eagerly so nothing
+        // Old browsers we don't really expect; render eagerly so nothing
         // breaks.
         setHasOpened(true);
         return undefined;
@@ -2746,7 +2746,7 @@
   function SlurmQueueTracker({ queue = {}, metadata = {} }) {
     const jobId = queue.job_id || metadata.slurm_job_id || "";
     const localPid = metadata.pid ? String(metadata.pid) : "";
-    // When state_source is "sacct" the job has already left the live queue —
+    // When state_source is "sacct" the job has already left the live queue;
     // show timing/exit fields instead of position counts, which are null for finished jobs.
     const isTerminal = queue.state_source === "sacct";
     const samePartitionPosition = queue.queue_position_same_partition;
@@ -2767,7 +2767,7 @@
         null,
         h("h3", null, "Slurm Queue Tracker"),
         isTerminal
-          ? h("p", null, "This job has left the live queue — details below are from ", h("code", null, "sacct"), ".")
+          ? h("p", null, "This job has left the live queue. Details below are from ", h("code", null, "sacct"), ".")
           : h("p", null, "Updates live while this run is submitted or running.")
       ),
       jobId
@@ -3422,7 +3422,7 @@
     // Selected audio names live in React state so the picker survives folder
     // filters + row-limit slicing. Without this, switching the filter dropped
     // un-rendered checkboxes from the DOM and the form silently submitted
-    // only the currently visible selections — exactly the "I picked 3 and
+    // only the currently visible selections, which caused the "I picked 3 and
     // only 1 ran" symptom. Hidden inputs below carry the full set into the
     // form post regardless of what's currently rendered.
     const [selectedAudio, setSelectedAudio] = React.useState(() => new Set());
@@ -4694,6 +4694,122 @@
     return (ctx.projects || []).filter((project) => Number(project.sampleCount || 0) > 0 && (!preparedOnly || project.prepared));
   }
 
+  function TrainingStatusBanner() {
+    const REFRESH_MS = 3 * 60 * 1000;
+    const [data, setData] = React.useState(null);
+    const [lastRefreshed, setLastRefreshed] = React.useState(null);
+    const [countdown, setCountdown] = React.useState(REFRESH_MS / 1000);
+    const nextRefreshAt = React.useRef(Date.now() + REFRESH_MS);
+
+    function fetchStatus() {
+      const url = routes.fineTuneActiveJobStatus;
+      if (!url) return;
+      fetch(url)
+        .then((r) => r.ok ? r.json() : null)
+        .then((json) => {
+          if (json) {
+            setData(json);
+            setLastRefreshed(new Date().toLocaleTimeString());
+          }
+          nextRefreshAt.current = Date.now() + REFRESH_MS;
+          setCountdown(REFRESH_MS / 1000);
+        })
+        .catch(() => {});
+    }
+
+    React.useEffect(() => {
+      fetchStatus();
+      const refreshTimer = setInterval(fetchStatus, REFRESH_MS);
+      const countdownTimer = setInterval(() => {
+        const secs = Math.max(0, Math.round((nextRefreshAt.current - Date.now()) / 1000));
+        setCountdown(secs);
+      }, 5000);
+      return () => { clearInterval(refreshTimer); clearInterval(countdownTimer); };
+    }, []);
+
+    if (!data || !data.active) return null;
+
+    function fmtElapsed(secs) {
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      const s = secs % 60;
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    const epochText = data.maxEpochs
+      ? `Epoch ${data.epoch + 1}/${data.maxEpochs}`
+      : data.epoch > 0 ? `Epoch ${data.epoch + 1}` : "Starting…";
+    const progressVal = data.maxEpochs ? (data.epoch / data.maxEpochs) : null;
+    const hasStep = data.totalSteps > 0 && data.currentStep >= 0;
+    const stepText = hasStep ? `Step ${data.currentStep}/${data.totalSteps}` : null;
+    const stepProgressVal = hasStep ? (data.currentStep / data.totalSteps) : null;
+    const isPending = ["submitted", "pending", "configuring", "waiting"].includes(data.status);
+
+    let estStartText = null;
+    if (isPending && data.estimatedStartIso) {
+      try {
+        const estDate = new Date(data.estimatedStartIso);
+        const now = new Date();
+        const diffMs = estDate - now;
+        if (diffMs > 0) {
+          const diffMins = Math.round(diffMs / 60000);
+          const diffHrs = Math.floor(diffMins / 60);
+          const remMins = diffMins % 60;
+          const countdown = diffHrs > 0 ? `~${diffHrs}h ${remMins}m` : `~${diffMins}m`;
+          estStartText = `Est. start: ${estDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (${countdown})`;
+        } else {
+          estStartText = "Est. start: imminent";
+        }
+      } catch (_) {}
+    }
+
+    return h(
+      "div",
+      { className: "training-status-banner", role: "status" },
+      h("div", { className: "tsb-left" },
+        h(StatusPill, { status: data.status }),
+        h("span", { className: "tsb-label" }, `${data.backend || "fine-tuning"} / ${data.projectName || "unknown"}`),
+        h("span", { className: "tsb-sep" }, "·"),
+        h("span", null, `Job ${data.jobId}`),
+        h("span", { className: "tsb-sep" }, "·"),
+        h("span", { className: "tsb-slurm" }, data.slurmState),
+        estStartText ? h("span", { className: "tsb-sep" }, "·") : null,
+        estStartText ? h("span", { className: "tsb-est-start" }, estStartText) : null,
+      ),
+      h("div", { className: "tsb-right" },
+        !isPending ? h("div", { className: "tsb-tracker" },
+          progressVal !== null
+            ? h("div", { className: "tsb-track-row" },
+                h("span", { className: "tsb-epoch" }, epochText),
+                h("progress", { className: "tsb-progress", value: progressVal, max: 1, title: epochText }),
+              )
+            : h("span", { className: "tsb-epoch" }, epochText),
+          stepText
+            ? h("div", { className: "tsb-track-row" },
+                h("span", { className: "tsb-step" }, stepText),
+                stepProgressVal !== null
+                  ? h("progress", { className: "tsb-progress tsb-step-bar", value: stepProgressVal, max: 1, title: stepText })
+                  : null,
+              )
+            : null,
+        ) : null,
+        h("span", null, `Elapsed: ${fmtElapsed(data.elapsedSeconds || 0)}`),
+        h("span", { className: "tsb-sep" }, "·"),
+        h("button", {
+          className: "ghost tsb-refresh",
+          type: "button",
+          title: "Refresh now",
+          onClick: fetchStatus,
+        }, "↻"),
+        lastRefreshed
+          ? h("span", { className: "tsb-meta" }, `Updated ${lastRefreshed} · next in ${countdown}s`)
+          : null,
+      )
+    );
+  }
+
   function FineTuneProjectOptions({ projects }) {
     if (!projects.length) {
       return h("option", { value: "" }, "No matching projects yet");
@@ -5028,12 +5144,12 @@
       { className: "auto-train-row" },
       h(
         "label",
-        { className: "checkbox-row", title: "When ON, completing a label for this project automatically queues prepare + sbatch. Multiple completions while a run is active are coalesced — they all get folded into the next training run." },
+        { className: "checkbox-row", title: "When ON, completing a label for this project automatically queues prepare + sbatch. Multiple completions while a run is active are coalesced; they all get folded into the next training run." },
         h("input", { type: "checkbox", checked: enabled, onChange: handleChange }),
         " Auto-train when labels complete"
       ),
       pending
-        ? h("p", { className: "row-note auto-train-pending" }, "Auto-train queued — waiting for the active run to finish before kicking off the next one.")
+        ? h("p", { className: "row-note auto-train-pending" }, "Auto-train queued, waiting for the active run to finish before kicking off the next one.")
         : enabled
           ? h("p", { className: "row-note" }, "Mark a label complete and it will queue a training run automatically.")
           : null
@@ -5042,7 +5158,7 @@
 
   // Tiny SVG sparkline + summary row for the per-run val_loss series. The
   // points come straight from the parsed pyannote .out file, so this draws
-  // whatever the trainer has emitted so far — empty until the first
+  // whatever the trainer has emitted so far; empty until the first
   // validation epoch lands, then updated by the regular polling loop.
   function RunValLossSpark({ run }) {
     const points = Array.isArray(run?.valLoss) ? run.valLoss : [];
@@ -5126,7 +5242,7 @@
     ];
     // The card title is the friendly name the user picked (or the slug
     // by default). The slug stays visible underneath because it's the
-    // persistent ID — runs and label_status entries reference it.
+    // persistent ID; runs and label_status entries reference it.
     const displayName = project.displayName || project.slug;
     const showSlugSubtitle = displayName !== project.slug;
     return h(
@@ -5360,7 +5476,7 @@
         h(
           "p",
           { className: "row-note" },
-          "Paste two RTTM paths from this project — the reference (your hand-labeled ground truth) and the hypothesis (whatever a diarization run produced). I'll compute DER, JER, and the miss / false-alarm / confusion split, then drop them into the inputs below."
+          "Paste two RTTM paths from this project: the reference (hand-labeled ground truth) and the hypothesis (output from a diarization run). DER, JER, and the miss / false-alarm / confusion breakdown will be computed and filled in below."
         ),
         h(Field, { id: "score_reference_rttm", label: "Reference RTTM (labels)" },
           h("input", {
@@ -5450,15 +5566,15 @@
   function describeRunOption(run) {
     if (!run) return "";
     const kindBadge = run.modelKind === "fine_tuned" ? " [fine-tuned]" : run.modelKind === "default" ? " [base]" : "";
-    return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} — ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
+    return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} | ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
   }
 
   function DerCalculatorPanel() {
     // Model: pick a reference (hand labels OR a diarization run), then pick
     // one or more "hypothesis" runs to score against it. Same control flow
     // covers single-model DER, side-by-side DER vs labels, and pairwise
-    // model-vs-model comparisons. Any saved diarization run — base or
-    // fine-tuned — can be the reference or a hypothesis.
+    // model-vs-model comparisons. Any saved diarization run, either base or
+    // fine-tuned, can be the reference or a hypothesis.
     const diarization = ctx.diarization || {};
     const runs = Array.isArray(diarization.runsForCompare) ? diarization.runsForCompare : [];
     const evaluable = Array.isArray(diarization.evaluableFiles) ? diarization.evaluableFiles : [];
@@ -5517,7 +5633,7 @@
     function describeRunInline(run) {
       if (!run) return "";
       const kindBadge = run.modelKind === "fine_tuned" ? " [fine-tuned]" : run.modelKind === "default" ? " [base]" : "";
-      return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} — ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
+      return `${run.modelLabel || run.backendLabel || run.backend}${kindBadge} | ${run.name} · ${run.fileCount} file${run.fileCount === 1 ? "" : "s"}`;
     }
 
     const selectedModelRuns = eligibleModelRuns.filter((run) => selectedModelPaths.has(run.path));
@@ -5800,7 +5916,7 @@
           h(
             "p",
             null,
-            "Pick a reference (hand-labeled RTTMs or another diarization run), then check off one or more model runs to compare against it. Any saved run is fair game — base NeMo, base pyannote, fine-tuned checkpoints, or a mix. Per-file and weighted-overall DER, JER, miss / false alarm / speaker confusion are reported for each model."
+            "Pick a reference (hand-labeled RTTMs or another diarization run), then check off one or more model runs to compare against it. Any saved run works: base NeMo, base pyannote, fine-tuned checkpoints, or a mix. Per-file and weighted-overall DER, JER, miss / false alarm / speaker confusion are reported for each model."
           )
         )
       ),
@@ -5898,7 +6014,7 @@
                         "p",
                         { className: "der-reference-summary" },
                         h("span", { className: "der-role-pill ref small" }, "REFERENCE"),
-                        ` ${referenceRun.modelLabel || referenceRun.backendLabel} — `,
+                        ` ${referenceRun.modelLabel || referenceRun.backendLabel}: `,
                         h("span", { className: "mono" }, referenceRun.name)
                       )
                     : null
@@ -5960,7 +6076,7 @@
               ),
               // ---- MATCHES section ----
               // The panel auto-pairs the reference with whatever each picked
-              // model has already diarized — no per-file checkbox needed.
+              // model has already diarized; no per-file checkbox needed.
               // Rows are read-only so the user can verify the matches before
               // hitting Score, and skipped-files can be expanded for a
               // sanity check.
@@ -6035,7 +6151,7 @@
                         { className: "der-file-empty" },
                         usingLabelsReference
                           ? "No completed-label files match the current filters."
-                          : "No files match — pick a reference run with files and at least one comparison model."
+                          : "No files match. Pick a reference run with files and at least one comparison model."
                       )
                     : visibleEntries
                         .filter((entry) => showSkipped || entry.modelHits > 0)
@@ -6095,7 +6211,7 @@
                       "section",
                       { className: "subpanel der-results", style: { marginTop: "12px" } },
                       h("h3", null, "Results"),
-                      // Reference banner — sits above the cards so the
+                      // Reference banner that sits above the cards so the
                       // "what we scored against" question always has a
                       // one-line answer that's hard to miss.
                       h(
@@ -6107,7 +6223,7 @@
                               React.Fragment,
                               null,
                               h("strong", null, "Diarization run"),
-                              " — ",
+                              ": ",
                               h("span", { className: "mono" }, result.reference?.run?.name || ""),
                               h("p", { className: "row-note" }, "Numbers measure agreement against this run, not error against ground truth.")
                             )
@@ -6192,7 +6308,7 @@
                                       { className: "der-winner-cell" },
                                       bestLabel
                                         ? h("span", { className: "der-winner a", title: bestLabel }, bestLabel.length > 28 ? `${bestLabel.slice(0, 25)}…` : bestLabel)
-                                        : h("span", { className: "der-winner none" }, "—")
+                                        : h("span", { className: "der-winner none" }, "-")
                                     )
                                   : null
                               );
@@ -6219,6 +6335,7 @@
     return h(
       React.Fragment,
       null,
+      h(TrainingStatusBanner),
       h(
         "article",
         { className: "panel" },
@@ -6327,7 +6444,7 @@
     return text(form?.getAttribute("data-form-key") || form?.id || form?.getAttribute("action") || "", "").trim();
   }
 
-  // Snapshot/restore call this once per control per refresh — memoize the
+  // Snapshot/restore call this once per control per refresh; memoize the
   // per-form key so a page with hundreds of inputs doesn't pay it each time.
   function formControlKey(node, formKeyCache) {
     let formKey;
@@ -6396,7 +6513,7 @@
     return snapshot;
   }
 
-  // Pair of snapshotFormState — pushes saved values back into the new DOM
+  // Pair of snapshotFormState that pushes saved values back into the new DOM
   // after React reconciles. Same memo trick to keep the hot path quiet.
   function restoreFormState(snapshot) {
     if (!snapshot) {
@@ -6745,7 +6862,7 @@
       });
   }
 
-  // Runs once after every full re-render. Three small DOM sync passes —
+  // Runs once after every full re-render. Three small DOM sync passes:
   // file summaries, selection counters, project-name selects.
   function postRenderSync() {
     const fileInputs = document.querySelectorAll("input[type='file'][data-file-summary]");
@@ -6756,7 +6873,7 @@
       }
     }
     // updateSelectionCounter rescans the form for the group, so calling it
-    // once per (form, group) is enough — even when several counter nodes
+    // once per (form, group) is enough; even when several counter nodes
     // share the group within one form.
     const selectionNodes = document.querySelectorAll("[data-selection-count]");
     const seenScopes = new WeakMap();
@@ -6932,7 +7049,7 @@
     const openDialogIds = settings.preserveDialogs ? snapshotOpenDialogs() : [];
     const formState = settings.preserveFormState ? snapshotFormState() : null;
     syncDerivedState(nextState || initialState);
-    // Catch render-time errors here too — React doesn't surface those to
+    // Catch render-time errors here too; React doesn't surface those to
     // window.error reliably, and a thrown component renders the same blank
     // root as no JS at all.
     try {
@@ -6961,8 +7078,8 @@
     if (trackingStopped) {
       return;
     }
-    // Skip the network round-trip when the user has the tab in the background
-    // — modern browsers throttle hidden timers anyway, but the dashboard's
+    // Skip the network round-trip when the user has the tab in the background;
+    // modern browsers throttle hidden timers anyway, but the dashboard's
     // per-second cadence still spends bandwidth and CPU on a tab the user is
     // not looking at. The visibilitychange listener below kicks an immediate
     // poll the moment they come back, so freshness is preserved.

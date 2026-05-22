@@ -5,7 +5,7 @@ and groups every file by its *stem* (the audio basename without extension).
 Used by the searchable index in the dashboard so the user can type ``017_call``
 and see every run, output, and source file that mentions it.
 
-The index is intentionally read-only and bounded — we only crawl directories
+The index is intentionally read-only and bounded; we only crawl directories
 the dashboard already exposes via ``DOWNLOADABLE_ROOT_NAMES``-style policy
 and stop before descending into per-checkpoint nemo/pyannote folders that
 hold thousands of files unrelated to a given audio name.

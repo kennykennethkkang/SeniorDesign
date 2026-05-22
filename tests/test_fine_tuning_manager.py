@@ -315,7 +315,7 @@ class FineTuningTests(unittest.TestCase):
             self.assert_default_slurm_resources(artifacts.sbatch_script_path)
 
             # Same cluster-runtime fixes the diarization sbatch ships need to
-            # carry over to NeMo fine-tuning too — without `module load` and
+            # carry over to NeMo fine-tuning too; without `module load` and
             # `EBROOTGCCCORE/lib64` on LD_LIBRARY_PATH, the venv's _sqlite3.so
             # can't resolve `sqlite3_deserialize`.
             sbatch_text = artifacts.sbatch_script_path.read_text(encoding="utf-8")
@@ -388,7 +388,7 @@ class FineTuningTests(unittest.TestCase):
             # NeMo v2.x renamed the speaker-embeddings override key. The
             # upstream multiscale_diar_decoder.py docstring still advertises
             # `model.base.diarizer.*`, but the actual config schema exposes
-            # `model.diarizer.*` directly — Hydra refuses to override a
+            # `model.diarizer.*` directly; Hydra refuses to override a
             # missing struct, so the old form fails fast with
             # "Key 'base' is not in struct".
             self.assertIn("model.diarizer.speaker_embeddings.model_path", launch_text)
@@ -486,14 +486,14 @@ class FineTuningTests(unittest.TestCase):
             # pyannote.database calls `torchaudio.info` for every training
             # file to precompute durations. With torchaudio 2.10's `info`/
             # `load`/`AudioMetaData` removed, a stub-only shim makes the
-            # dataloader raise during the very first epoch — the script must
+            # dataloader raise during the very first epoch; the script must
             # back the stubs with real soundfile-driven implementations.
             self.assertIn("import soundfile", train_py_text)
             self.assertIn("_sf.info", train_py_text)
             self.assertIn("_sf.read", train_py_text)
             # In torchaudio 2.10 the names exist but delegate to torchcodec,
             # which fails on the cluster (no FFmpeg libavutil). The shim has
-            # to override unconditionally — a hasattr guard lets the broken
+            # to override unconditionally; a hasattr guard lets the broken
             # torchcodec path win and pyannote dies in the dataloader.
             self.assertNotIn('if not hasattr(torchaudio, "load")', train_py_text)
             self.assertNotIn('if not hasattr(torchaudio, "info")', train_py_text)

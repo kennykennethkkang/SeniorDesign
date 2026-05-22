@@ -2,7 +2,7 @@
 """Shared helpers for detached workflow runs launched from the local dashboard.
 
 These utilities decouple long-running cluster jobs from the dashboard's HTTP
-request cycle — once an sbatch job is handed off to SLURM, everything here is
+request cycle. Once an sbatch job is handed off to SLURM, everything here is
 about polling its state and surfacing that state to the frontend.
 """
 
@@ -26,7 +26,7 @@ def utc_now_iso() -> str:
 
 
 def process_is_running(pid: int) -> bool:
-    """Send signal 0 to check process liveness — no actual signal is delivered, just the existence check."""
+    """Check process liveness by sending signal 0. No actual signal is delivered."""
 
     if pid <= 0:
         return False
@@ -37,12 +37,11 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
-# Per-process memo for slurm_job_state results. The dashboard's tracking
-# poll hits this once per active run per second; with 50+ active runs that's
-# 50 squeue subprocesses every poll. SLURM state changes coarsely (PD → R →
-# done over minutes), so a few-second TTL is invisible to the user but saves
-# hundreds of subprocess calls per render. CLI usage is unaffected because
-# short-lived CLI processes get one cache miss and exit before TTL matters.
+# Short-lived cache for slurm_job_state results. The dashboard polls once per
+# active run per second, so 50+ runs means 50 squeue calls every second. SLURM
+# state changes slowly (PD to R to done over minutes), so a few-second TTL
+# shaves off hundreds of subprocess calls per render with no visible lag.
+# CLI processes exit before the TTL matters so they are unaffected.
 _SLURM_JOB_STATE_CACHE: dict[tuple[str, bool], tuple[float, str]] = {}
 _SLURM_JOB_STATE_CACHE_TTL = 3.0
 
@@ -170,14 +169,13 @@ def slurm_accounting_snapshot(job_id: str) -> dict[str, object]:
 def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
     """Return live state + resource details for *one* SLURM job we submitted.
 
-    Asks ``squeue -j <jobid>`` and parses just that one row. We deliberately
-    do not scan the rest of the cluster here — the dashboard does not need
-    to know how many of someone else's jobs are ahead of ours, and the
-    cluster-wide scan that used to live here was expensive enough to show up
-    in the per-second polling lag.
+    Asks ``squeue -j <jobid>`` and parses just that one row. We do not scan
+    the rest of the cluster because the dashboard only cares about our own
+    jobs and the old cluster-wide scan was slow enough to appear in the
+    per-second polling lag.
 
-    "queue_position" / "jobs_ahead" fields are intentionally absent. The
-    SlurmQueueTracker UI tolerates that and just hides those rows.
+    The "queue_position" and "jobs_ahead" fields are absent by design.
+    SlurmQueueTracker handles that and just hides those rows.
     """
 
     normalized_job_id = str(job_id or "").strip().split(".", 1)[0]
@@ -210,9 +208,9 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
             "available": False,
             "message": "Unable to query squeue right now.",
         }
-    # Note: when a job has already left the queue, squeue exits non-zero with
-    # "Invalid job id specified". That is the normal terminal path — we fall
-    # through to sacct below instead of treating it as an error.
+    # When a job has already left the queue, squeue exits non-zero with
+    # "Invalid job id specified". That is the normal terminal path; we fall
+    # through to sacct instead of treating it as an error.
     stdout = (completed.stdout or "").strip()
     if completed.returncode == 0 and stdout:
         for line in stdout.splitlines():
@@ -282,7 +280,7 @@ def slurm_queue_snapshot(job_id: str) -> dict[str, object]:
 
 
 def run_status(run_dir: Path) -> str:
-    """Derive a human-readable run state from whichever metadata file is available (exit_code > slurm > metadata)."""
+    """Return a human-readable run state by checking exit_code, then SLURM, then metadata."""
 
     exit_code_path = run_dir / "exit_code.txt"
     metadata_path = run_dir / "metadata.json"

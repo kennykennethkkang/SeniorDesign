@@ -305,9 +305,9 @@ def _stem_matches_srt(srt_stem: str, candidate_stem: str) -> bool:
     Matching has to tolerate three workspace shapes that have all been valid
     at different points in the project's life:
 
-    1. **Exact match** — both files share the same stem (e.g. SRT and WAV
+    1. **Exact match**: both files share the same stem (e.g. SRT and WAV
        were written side-by-side in the same directory).
-    2. **Folder-prefixed stem** — the dashboard names diarization artifacts
+    2. **Folder-prefixed stem**: the dashboard names diarization artifacts
        by joining the audio file's relative path components with ``__``,
        so an audio file at ``audio_in/youtube_links/001_clip.wav`` produces
        ``youtube_links__001_clip.srt``. We accept ``srt_stem ==
@@ -315,7 +315,7 @@ def _stem_matches_srt(srt_stem: str, candidate_stem: str) -> bool:
        ``NNN_`` numeric prefix on both sides so a re-downloaded audio file
        (which might land at ``001_<title>`` instead of ``002_<title>``) still
        matches its older transcript.
-    3. **YouTube ID match** — both stems end in ``_<11-char-video-id>``.
+    3. **YouTube ID match**: both stems end in ``_<11-char-video-id>``.
        This is the bulletproof fallback for YouTube-sourced media: the user
        can wipe and redownload an audio file with a brand new numeric prefix
        and the SRT will still find it as long as the YouTube ID is intact.
@@ -745,9 +745,8 @@ def build_html(
             for index, (start, end, speaker) in enumerate(saved_segments, start=1)
         ]
     else:
-        # New files used to seed from the diarization model's cues, but I'm
-        # making the user type every Start/End by hand instead — that's the
-        # whole point of a manually verified training label.
+        # New files start with one blank row so the user fills in each segment
+        # manually. That is the whole point of a hand-verified training label.
         label_entries = [("1", "", "", "", "")]
 
     label_rows_html: list[str] = []
@@ -1971,7 +1970,7 @@ def build_html(
                 <input type="radio" name="trainingModeChoice" value="base">
                 <div>
                   <strong>Train a new model from the default base</strong>
-                  <small>Creates a brand-new fine-tuning project for this label. Name the model — it will be available for future training runs.</small>
+                  <small>Creates a brand-new fine-tuning project for this label. Name the model; it will be available for future training runs.</small>
                 </div>
               </label>
             </div>
@@ -2248,7 +2247,7 @@ def build_html(
     function existingTrainingTargetsByProject() {{
       // Collapse the per-run target list down to one row per project so the
       // popup shows a single picker entry per fine-tuned model. Run-level
-      // metadata still rides along on the chosen project — the user just
+      // metadata still rides along on the chosen project; the user just
       // doesn't have to think about which version row to click.
       const byKey = new Map();
       (trainingTargetData.targets || []).forEach(function (target) {{
@@ -2265,7 +2264,7 @@ def build_html(
 
     function refreshExistingRowSelection() {{
       // Tile-style "is-selected" highlight follows the checkbox state. Multi-
-      // select means we can't just store one row — refresh every time anything
+      // select means we can't just store one row; refresh every time anything
       // toggles so the visuals match exactly which models are queued.
       if (!trainingTargetOptions) return;
       trainingTargetOptions.querySelectorAll(".training-target-option").forEach(function (row) {{
@@ -2486,7 +2485,7 @@ def build_html(
     }}
 
     function openTrainingTargetDialog() {{
-      // Pick the default mode by what's actually available — if there are no
+      // Pick the default mode by what's actually available. If there are no
       // fine-tuned models yet, jump straight to the "create new" pane so the
       // user isn't staring at an empty list wondering what to do.
       const hasExisting = existingTrainingTargetsByProject().length > 0;
@@ -3200,8 +3199,8 @@ def build_html(
 
     // The dashboard's labels list polls the file-system record for status. If
     // the user edits and immediately hits Back, we want the row to show
-    // "draft" rather than "not started" — so flip the visible status pill the
-    // moment any edit happens, instead of waiting for the round-trip to land.
+    // "draft" rather than "not started", so flip the visible status pill the
+    // moment any edit happens instead of waiting for the round-trip to land.
     const labelStatePill = document.querySelector(".label-state");
     const uncompleteLabelButton = document.getElementById("uncompleteLabelButton");
     let visibleStatusFlipped = false;
@@ -3818,8 +3817,8 @@ def build_html(
     function validateBaseModeInputs() {{
       // Need a model name to register a brand-new fine-tuned project. The
       // backend slugifies it, but an empty value would slugify to "project"
-      // and silently overwrite an existing default-named project — better to
-      // make the user be explicit.
+      // and silently overwrite an existing default-named project, so the user
+      // needs to provide an explicit name.
       const projectValue = newTrainingProjectName ? String(newTrainingProjectName.value || "").trim() : "";
       if (!projectValue) {{
         window.alert("Provide a name for the new model so future training runs can find it.");

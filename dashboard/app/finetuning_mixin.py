@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fine-tuning mixin: project prep, training launch, rename, and DER/JER scoring.
 
-This is the longest mixin and on purpose — it owns the entire fine-tune flow
+This is the longest mixin, and intentionally so; it owns the entire fine-tune flow
 the dashboard exposes. Everything from "create a project shell" through
 "score a checkpoint against a reference RTTM and surface the metric" lives
 here. The actual training and metric implementations are imported from
@@ -294,7 +294,7 @@ class FineTuningMixin:
         ``link_audio`` swaps the audio/transcript byte-copy for a symlink so
         a project can reuse the original media already on disk. The RTTM
         always gets rewritten in canonical form regardless of the link
-        choice — it's small and the trainers depend on the normalized
+        choice; it's small and the trainers depend on the normalized
         session_id.
         """
 
@@ -376,7 +376,7 @@ class FineTuningMixin:
             return self.redirect(environ, "/fine-tuning", message=f"Could not create project folder: {exc}", status="error")
 
         # Drop a marker into display.json so list_projects keeps showing this
-        # project even with 0 samples — otherwise the empty shell gets filtered
+        # project even with 0 samples; otherwise the empty shell gets filtered
         # out and the user wonders where their freshly-created model went.
         display_path = target / "display.json"
         sidecar_updates: dict[str, object] = {
@@ -387,7 +387,7 @@ class FineTuningMixin:
         if display_name:
             sidecar_updates["display_name"] = display_name
         try:
-            ftm._write_display_sidecar(display_path, updates=sidecar_updates)  # noqa: SLF001 — internal helper, intentional cross-module use
+            ftm._write_display_sidecar(display_path, updates=sidecar_updates)  # noqa: SLF001 - internal helper, intentional cross-module use
         except OSError as exc:
             return self.redirect(environ, "/fine-tuning", message=f"Could not write display.json: {exc}", status="error")
 
@@ -877,7 +877,7 @@ class FineTuningMixin:
     def handle_finetune_rename_project(self, environ):
         """Update a project's display name without touching the on-disk slug or any existing run directories.
 
-        The slug is the persistent ID — everything that references the project
+        The slug is the persistent ID; everything that references the project
         (label_status, metadata, runs/) uses it. Only the human-readable label
         in display.json changes here.
         """
@@ -907,15 +907,164 @@ class FineTuningMixin:
             status="success",
         )
 
+    def handle_finetune_active_job_status(self, environ):
+        """Return the status of the most recently submitted/running fine-tuning job across all projects."""
+
+        import datetime as _dt
+        from workflow_background import slurm_job_state
+
+        active_statuses = {"running", "submitted", "pending", "configuring", "waiting"}
+        projects = list_projects(root=self.root)
+        found: dict[str, object] = {}
+        for project in projects:
+            runs_dir = Path(str(project.get("path", ""))) / "runs"
+            if not runs_dir.is_dir():
+                continue
+            for run_dir in sorted(runs_dir.glob("*"), reverse=True):
+                if not run_dir.is_dir():
+                    continue
+                meta_path = run_dir / "metadata.json"
+                if not meta_path.is_file():
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                job_id = str(meta.get("job_id") or "").strip()
+                if not job_id:
+                    continue
+                raw_slurm = slurm_job_state(job_id)
+                from fine_tuning_manager import slurm_state_to_run_status
+                mapped = slurm_state_to_run_status(raw_slurm)
+                if mapped not in active_statuses:
+                    break  # runs are newest-first; first non-active means nothing running
+                found = {
+                    "jobId": job_id,
+                    "slurmState": raw_slurm or "UNKNOWN",
+                    "status": mapped,
+                    "backend": str(meta.get("backend") or ""),
+                    "projectName": str(meta.get("project_name") or ""),
+                    "startedAt": str(meta.get("started_at_utc") or ""),
+                    "stdoutPath": str(meta.get("stdout_path") or ""),
+                    "maxEpochs": int(meta.get("max_epochs") or 0),
+                }
+                break
+            if found:
+                break
+
+        if not found:
+            return self.json_response("200 OK", {"active": False})
+
+        # Parse epoch and step progress from the stdout log
+        epoch = 0
+        max_epochs = int(found.get("maxEpochs") or 0)
+        current_step = 0
+        total_steps = 0
+        stdout_path = str(found.get("stdoutPath") or "")
+        if stdout_path:
+            log_path = Path(stdout_path)
+            if not log_path.is_file():
+                # try the slurm log via job_id
+                slurm_logs = Path(str(found.get("stdoutPath") or "")).parent
+                candidates = sorted(slurm_logs.glob(f"*_{found['jobId']}.out")) if slurm_logs.is_dir() else []
+                if candidates:
+                    log_path = candidates[-1]
+            if log_path.is_file():
+                try:
+                    # Read last 8 KB, enough for recent epoch lines
+                    with log_path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - 8192))
+                        tail = f.read().decode("utf-8", errors="replace")
+                    nemo_epoch_re = re.compile(r"Epoch\s+(\d+)[\s:/,]", re.IGNORECASE)
+                    # NeMo tqdm bar: "| 11/529 ["
+                    nemo_step_re = re.compile(r"\|\s*(\d+)/(\d+)\s*\[")
+                    pyannote_epoch_re = re.compile(r"\bepoch[=\s]+(\d+)/(\d+)", re.IGNORECASE)
+                    # Pyannote step: "step=100/500" or "step 100/500"
+                    pyannote_step_re = re.compile(r"\bstep[=\s]+(\d+)/(\d+)", re.IGNORECASE)
+                    epoch_found = False
+                    step_found = False
+                    for line in reversed(tail.splitlines()):
+                        if not epoch_found:
+                            m = pyannote_epoch_re.search(line)
+                            if m:
+                                epoch = int(m.group(1))
+                                if not max_epochs:
+                                    max_epochs = int(m.group(2))
+                                epoch_found = True
+                            else:
+                                m = nemo_epoch_re.search(line)
+                                if m:
+                                    epoch = int(m.group(1))
+                                    epoch_found = True
+                        if not step_found:
+                            m = nemo_step_re.search(line)
+                            if m:
+                                current_step = int(m.group(1))
+                                total_steps = int(m.group(2))
+                                step_found = True
+                            else:
+                                m = pyannote_step_re.search(line)
+                                if m:
+                                    current_step = int(m.group(1))
+                                    total_steps = int(m.group(2))
+                                    step_found = True
+                        if epoch_found and step_found:
+                            break
+                except Exception:
+                    pass
+
+        # Compute elapsed seconds
+        elapsed = 0
+        started_at = str(found.get("startedAt") or "")
+        if started_at:
+            try:
+                started = _dt.datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                now = _dt.datetime.now(_dt.timezone.utc)
+                elapsed = max(0, int((now - started).total_seconds()))
+            except Exception:
+                pass
+
+        # Estimated start time for pending/submitted jobs (squeue --start)
+        estimated_start_iso = ""
+        if found["status"] in {"submitted", "pending", "configuring", "waiting"}:
+            try:
+                result = subprocess.run(
+                    ["squeue", "--job", found["jobId"], "--start", "--format=%S", "--noheader"],
+                    capture_output=True, text=True, timeout=8,
+                )
+                raw_est = (result.stdout or "").strip().splitlines()[0].strip() if result.returncode == 0 else ""
+                if raw_est and raw_est.upper() not in {"N/A", "UNKNOWN", ""}:
+                    estimated_start_iso = raw_est
+            except Exception:
+                pass
+
+        return self.json_response("200 OK", {
+            "active": True,
+            "jobId": found["jobId"],
+            "slurmState": found["slurmState"],
+            "status": found["status"],
+            "backend": found["backend"],
+            "projectName": found["projectName"],
+            "epoch": epoch,
+            "maxEpochs": max_epochs,
+            "currentStep": current_step,
+            "totalSteps": total_steps,
+            "elapsedSeconds": elapsed,
+            "startedAt": found["startedAt"],
+            "estimatedStartIso": estimated_start_iso,
+        })
+
     def handle_finetune_score_run(self, environ):
         """Score a model's RTTM output against hand-labeled reference RTTM and return DER + JER metrics as JSON.
 
-        Path-traversal check is intentional — even on a single-user dashboard
+        Path-traversal check is intentional; even on a single-user dashboard
         an XSS/CSRF could forge a request pointing at /etc/passwd and we'd read
         it back. Both paths must resolve inside self.root.
         """
 
-        # Lazy import — diarization_metrics only costs something on import, and
+        # Lazy import; diarization_metrics only costs something on import, and
         # most requests never need it.
         import diarization_metrics
 
@@ -958,15 +1107,15 @@ class FineTuningMixin:
 
         Query params:
 
-        - ``reference_source`` — ``"labels"`` (default) to use saved training-label
+        - ``reference_source``: ``"labels"`` (default) to use saved training-label
           RTTMs as the reference, or ``"run"`` to use another diarization run's
           SRTs as the reference (no hand labels required for that mode).
-        - ``reference_run`` — required when ``reference_source=run``: path to the
+        - ``reference_run``: required when ``reference_source=run``; path to the
           run directory whose SRTs are treated as ground truth.
-        - ``model`` — repeatable. Each value is a run directory whose SRT for
+        - ``model``: repeatable. Each value is a run directory whose SRT for
           each audio file is scored against the reference. One or more models
           may be supplied; the table layout scales to N columns.
-        - ``audio`` — repeatable list of audio files to score.
+        - ``audio``: repeatable list of audio files to score.
 
         Response shape:
 
@@ -1254,7 +1403,7 @@ class FineTuningMixin:
             environ,
             "/fine-tuning",
             message=(
-                f"Auto-train ON for {project_slug} — completing a label will queue a training run."
+                f"Auto-train ON for {project_slug}: completing a label will queue a training run."
                 if enabled
                 else f"Auto-train OFF for {project_slug}."
             ),
@@ -1262,7 +1411,7 @@ class FineTuningMixin:
         )
 
     def handle_finetune_rename_run(self, environ):
-        """Update the display label for one training run — lets us tell runs apart without renaming the directory."""
+        """Update the display label for one training run so runs can be told apart without renaming the directory."""
 
         form = self.parse_form(environ)
         run_dir_value = (form.getfirst("run_dir") or "").strip()
@@ -1272,7 +1421,7 @@ class FineTuningMixin:
         if not display_name:
             return self.redirect(environ, "/fine-tuning", message="Provide a new display name.", status="error")
         run_dir = self.resolve_local_path(run_dir_value)
-        # Sanity-check that the path lands inside fine_tuning/projects/ — a crafted
+        # Sanity-check that the path lands inside fine_tuning/projects/; a crafted
         # form post could otherwise write display.json anywhere on the machine.
         runs_root = (self.root / "fine_tuning" / "projects").resolve()
         try:
@@ -1361,7 +1510,7 @@ class FineTuningMixin:
                 candidate = self.resolve_under_root(value)
             except ValueError:
                 candidate = Path(value).expanduser()
-            # Same ENAMETOOLONG guard as validated_training_rttm_for_audio —
+            # Same ENAMETOOLONG guard as validated_training_rttm_for_audio;
             # KaggleBabyNoises stems concatenated through stitching push
             # paths past the kernel's NAME_MAX, and a raw is_file() then
             # crashes the whole render instead of just skipping the sample.
@@ -1378,7 +1527,7 @@ class FineTuningMixin:
 
         Building the index costs two directory walks (audio_in for sidecars,
         label_work for in-progress drafts). Per-audio lookups against the
-        index are pure set membership — O(1) and zero syscalls. The previous
+        index are pure set membership: O(1) and zero syscalls. The previous
         path called ``Path.is_file()`` ~5 times per audio and ate ~24 s of
         wall time per page render with 6 k+ audio files on the cluster's
         networked filesystem. Cached for 60 s; mutations call
@@ -1421,7 +1570,7 @@ class FineTuningMixin:
 
         Uses the cached ``synthetic_rttm_index`` so summary + row builders
         can answer "does this audio have a synthetic completion?" without
-        per-audio stat calls. Skips ``build_sample`` validation — callers
+        per-audio stat calls. Skips ``build_sample`` validation; callers
         that ship the result to the user (e.g. the file picker) keep using
         ``validated_training_rttm_for_audio`` so a malformed RTTM doesn't
         slip through.
@@ -1459,7 +1608,7 @@ class FineTuningMixin:
         """Return the RTTM that makes one audio file ready for fine-tuning."""
 
         # Some KaggleBabyNoises filenames blow past the filesystem's path
-        # limit when we tack on a ``.rttm`` suffix — Path.is_file() then
+        # limit when we tack on a ``.rttm`` suffix; Path.is_file() then
         # raises ENAMETOOLONG and crashes the whole /fine-tuning render.
         # Treating the OSError as "no sidecar" lets the caller move on.
         def _is_file(path: Path) -> bool:
@@ -1509,7 +1658,7 @@ class FineTuningMixin:
         appears here, and only when its recorded RTTM still passes
         ``build_sample`` validation. In-progress label_work drafts, raw corpus
         sidecars, and project-internal RTTMs without a completed label are
-        intentionally excluded — the fine-tune picker should only surface
+        intentionally excluded. The fine-tune picker should only surface
         samples the user has finished labeling and that are ready to train on.
 
         Stitched runs still flow in because ``mirror_stitched_into_media``

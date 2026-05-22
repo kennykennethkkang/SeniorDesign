@@ -1,6 +1,6 @@
 :root {
   /* Calm neutral palette. The primary/accent color is a single muted
-     steel-blue — chosen over the old saturated SCU red because the red
+     steel-blue, chosen over the old saturated SCU red because the red
      gradient buttons read as loud/"tacky". The blue clears WCAG AA
      contrast (>= 4.5:1) on white for buttons and accent text. The
      ``--brand`` variable name is kept (lots of rules reference it); it
@@ -54,7 +54,7 @@
 }
 
 :root[data-theme="dark"] {
-  /* Dark theme mirrors the calm steel-blue accent — a lighter tint so it
+  /* Dark theme mirrors the calm steel-blue accent; a lighter tint so it
      reads on the dark panel without glowing. */
   --brand: #6f9fb6;
   --brand-dark: #527e96;
@@ -162,7 +162,7 @@ textarea {
 
 /* Base button properties (color, weight, cursor, line-height, wrap behavior).
    The visual surface (background, hover, focus ring, sizing variants) is layered
-   on top further down — see "Streamlined UI/UX Refresh" near line ~1715. Both
+   on top further down; see "Streamlined UI/UX Refresh" near line ~1715. Both
    blocks contribute non-overlapping properties; merging would just trade one
    long block for another and force every contributor to reason about every
    property. */
@@ -468,7 +468,7 @@ code {
   gap: 10px;
 }
 
-/* No backdrop-filter here — the per-node blur was forcing a fresh compositor
+/* No backdrop-filter here; the per-node blur was forcing a fresh compositor
    layer on every repaint, which is most of the visible lag during polling. */
 .workflow-node {
   min-width: 0;
@@ -1178,7 +1178,7 @@ code {
   word-break: break-all;
 }
 
-/* Headline DER pill — colors match the quality buckets in derQualityClass.
+/* Headline DER pill; colors match the quality buckets in derQualityClass.
    Solid saturated backgrounds with white text so the percentage stays legible
    on any panel color; the previous translucent fills washed out badly. */
 .der-pill {
@@ -2063,7 +2063,7 @@ dialog.dashboard-dialog {
   box-shadow: 0 28px 70px rgba(24, 33, 30, 0.28);
 }
 
-/* Plain dim instead of a blurred backdrop — same effect, no GPU blur pass. */
+/* Plain dim instead of a blurred backdrop; same effect, no GPU blur pass. */
 dialog.dashboard-dialog::backdrop {
   background: rgba(24, 33, 30, 0.66);
 }
@@ -2360,7 +2360,7 @@ dialog.dashboard-dialog::backdrop {
 }
 
 /* ============================================================
-   Audio inventory row controls (Move + Delete) — added in the
+   Audio inventory row controls (Move + Delete), added in the
    2026-05-01 cleanup pass. Keeps each per-row control set tight
    on a wide screen but stacks gracefully when the table column
    narrows.
@@ -2492,7 +2492,7 @@ button.secondary.danger:hover {
 
 
 /* ============================================================
-   ░░ Streamlined UI/UX Refresh — 2026-05-01 ░░
+   ░░ Streamlined UI/UX Refresh (2026-05-01) ░░
 
    Goals:
    * Flatter, more modern buttons with consistent sizing variants
@@ -2504,7 +2504,7 @@ button.secondary.danger:hover {
    * Tighter, denser controls inside .inline-form clusters
 
    This block is appended (rather than refactoring earlier rules)
-   so the cascade keeps existing layouts intact — newer rules win
+   so the cascade keeps existing layouts intact; newer rules win
    only where they need to.
    ============================================================ */
 :root {
@@ -2879,7 +2879,7 @@ body {
 }
 
 /* Sticky tab bar without the blur. The 10px backdrop-filter was rerasterizing
-   the area under the bar on every scroll — by far the worst offender. */
+   the area under the bar on every scroll; by far the worst offender. */
 .tab-nav {
   position: sticky;
   top: 0;
@@ -3404,7 +3404,7 @@ dialog.dashboard-dialog {
    Respect prefers-reduced-motion (added in the comprehensive
    refresh). Users who set their OS to "reduce motion" get a
    near-instant transition rather than the slide/fade we use
-   elsewhere — important for vestibular sensitivity and for
+   elsewhere; important for vestibular sensitivity and for
    users who simply prefer a snappier UI.
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {
@@ -3419,7 +3419,7 @@ dialog.dashboard-dialog {
 }
 
 /* ============================================================
-   Training Labels — fixes for the per-file label dialog and
+   Training Labels: fixes for the per-file label dialog and
    the cramped page header. The audio block was previously buried
    inside LabelSourcePicker, which returned null for any file
    without diarization comparison rows; we now render it at the
@@ -3821,7 +3821,7 @@ dialog.dashboard-dialog {
 }
 
 /* Google-style pagination: spaced numbers as text links with no boxes.
-   Single horizontal row, no wrapping — narrow viewports scroll
+   Single horizontal row, no wrapping; narrow viewports scroll
    horizontally instead of stacking the items onto multiple lines.
    The global `button` rule earlier in this file ships gradients +
    shadows + bold white text + radius; we have to undo every one of
@@ -3842,7 +3842,7 @@ dialog.dashboard-dialog {
 }
 
 .training-labels-pagination button {
-  /* width:auto is the critical override — the global `button` rule sets
+  /* width:auto is the critical override; the global `button` rule sets
      `width: 100%`, which made every page number fill its own row and
      stack vertically. auto sizes each button to its label so the flex
      row can lay them out side by side. */
@@ -4537,13 +4537,13 @@ button.btn-sm {
 
 /* ============================================================
    Senior-design polish pass.
-   Purely additive — sits at the end of the file so the cascade
+   Purely additive; sits at the end of the file so the cascade
    keeps every earlier rule intact. Goal is small, visible wins:
    tighten the SCU palette, calm down the dark mode, normalize
    card padding/radii, fix a few box-overflow cases that wrap
    awkwardly on narrow viewports, and add the responsive
    breakpoints that were missing for ~1024px and ~720px.
-   If anything regresses, delete this whole block — the rest of
+   If anything regresses, delete this whole block; the rest of
    the stylesheet is unchanged.
    ============================================================ */
 
@@ -4640,7 +4640,7 @@ button.btn-sm {
   background: var(--panel-solid);
 }
 
-/* Hero card — used to fight with the masthead grid on tablet
+/* Hero card; used to fight with the masthead grid on tablet
    widths. Drop the min-height and let the content size itself
    so the second column (command-card) doesn't get squeezed. */
 @media (max-width: 1024px) {
@@ -4708,7 +4708,7 @@ button.btn-sm {
   }
 }
 
-/* Buttons — earlier rules paint the surface; here we just clean
+/* Buttons; earlier rules paint the surface; here we just clean
    up edge cases: keep tight inline buttons from full-bleeding
    their flex container, and make sure the disabled cursor wins. */
 .row-actions button,
@@ -4722,7 +4722,7 @@ button:disabled {
   cursor: not-allowed;
 }
 
-/* Inputs — match the card border treatment so forms blend into
+/* Inputs; match the card border treatment so forms blend into
    the panel they live in instead of looking pasted on. */
 input,
 select,
@@ -4736,7 +4736,7 @@ textarea:hover:not(:disabled):not(:focus) {
   border-color: var(--slate);
 }
 
-/* Code/preview boxes — we use these everywhere (logs, RTTM,
+/* Code/preview boxes; we use these everywhere (logs, RTTM,
    transcripts). Tighten the font ramp so the content reads as
    "structured" rather than "raw dump." */
 .mono-box,
@@ -4746,7 +4746,7 @@ pre {
   border-color: var(--line);
 }
 
-/* Status / score pills — bump letter-spacing and weight so the
+/* Status / score pills; bump letter-spacing and weight so the
    short labels (OK, FAILED, DRAFT) read clearly even at small
    sizes inside crowded table rows. */
 .status-pill,
@@ -4763,7 +4763,7 @@ pre {
   color: #e6f1fb;
 }
 
-/* Run-tab strip — the pill borders looked too gray; align with
+/* Run-tab strip; the pill borders looked too gray; align with
    the rest of the SCU palette. */
 .run-tab--active {
   background: rgba(140, 28, 46, 0.10);
@@ -4777,7 +4777,7 @@ pre {
   color: var(--accent);
 }
 
-/* Cluster-queue "self" highlight — same idea, brand the row
+/* Cluster-queue "self" highlight; same idea, brand the row
    instead of using a generic blue. */
 .cluster-queue-row--self td {
   background: rgba(140, 28, 46, 0.08);
@@ -4791,7 +4791,7 @@ pre {
   background: rgba(143, 189, 210, 0.14);
 }
 
-/* Tab nav — the sticky bar can sit on top of forms; give it a
+/* Tab nav; the sticky bar can sit on top of forms; give it a
    solid backdrop so the content underneath doesn't bleed through
    the blur on macOS Safari. */
 .tab-nav {
@@ -4816,7 +4816,7 @@ pre {
   }
 }
 
-/* Print — basic readability; the dashboard is a live tool but
+/* Print; basic readability; the dashboard is a live tool but
    somebody will eventually print a results table for the
    senior-design defense binder. */
 @media print {
@@ -4972,4 +4972,95 @@ pre {
 :root[data-theme="dark"] .der-file-status--blocked {
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
+}
+
+/* ── Training Status Banner ────────────────────────────────────────── */
+.training-status-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  background: rgba(77, 135, 152, 0.10);
+  border: 1px solid rgba(77, 135, 152, 0.25);
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.tsb-left,
+.tsb-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tsb-label {
+  font-weight: 600;
+}
+
+.tsb-slurm {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tsb-sep {
+  color: var(--muted);
+}
+
+.tsb-epoch {
+  font-weight: 600;
+  min-width: 90px;
+}
+
+.tsb-progress {
+  width: 80px;
+  height: 8px;
+  vertical-align: middle;
+}
+
+.tsb-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tsb-refresh {
+  font-size: 15px;
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+:root[data-theme="dark"] .training-status-banner {
+  background: rgba(77, 135, 152, 0.12);
+  border-color: rgba(77, 135, 152, 0.30);
+}
+
+.tsb-est-start {
+  font-weight: 600;
+  color: var(--agave-dark, #3a7d8c);
+}
+
+.tsb-tracker {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tsb-track-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tsb-step {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 90px;
+}
+
+.tsb-step-bar {
+  opacity: 0.7;
 }

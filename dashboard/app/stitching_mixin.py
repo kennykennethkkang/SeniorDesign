@@ -5,8 +5,8 @@ Used to build longer multi-speaker clips out of shorter source files when
 the corpus we're handed is too short or single-speaker for a real
 diarization signal. Drives ``stitch_audio.py`` over sbatch and mirrors the
 result back into ``audio_in/`` so the rest of the pipeline can pick it up
-exactly like it would a regular upload — keeps the stitched data
-indistinguishable from any other input and avoids special cases downstream.
+exactly like a regular upload, so the stitched data is indistinguishable
+from any other input and avoids special cases downstream.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class StitchingMixin:
         stitching/diarization tabs, and write a pre-completed label_status
         record so the user doesn't have to label it by hand.
 
-        Idempotent — once metadata.media_mirror_completed is True we skip on
+        Idempotent. Once metadata.media_mirror_completed is True we skip on
         every subsequent dashboard render. Pass ``force=True`` only when
         re-running cleanup tests.
 
@@ -46,8 +46,25 @@ class StitchingMixin:
         metadata = self.read_stitched_metadata(run_dir)
         if str(metadata.get("submission_status") or "").lower() != "succeeded":
             return ""
-        if metadata.get("media_mirror_completed") and not force:
-            return str(metadata.get("media_mirror_path") or "")
+
+        # ``media_mirror_completed`` only means the files were linked into audio_in/.
+        # Pre-migration runs and runs that completed before this code existed may
+        # have that flag set but no entry in label_status.json (the root path
+        # changed between runs). Fall through to write the missing label record;
+        # skip the file-linking step since the files are already there.
+        files_already_mirrored = bool(metadata.get("media_mirror_completed")) and not force
+        if files_already_mirrored:
+            cached_audio_name = str(metadata.get("media_mirror_audio_name") or "")
+            if cached_audio_name:
+                existing = self.load_training_label_records().get(cached_audio_name) or {}
+                if self.training_label_status(existing) == "completed":
+                    # Only short-circuit when the recorded audio path still resolves.
+                    # After a project migration or an audio_numbering rename the cached
+                    # name may point to a file that no longer exists. Fall through to
+                    # detect the current filename and repair the label record.
+                    if (self.audio_dir / cached_audio_name).is_file():
+                        return str(metadata.get("media_mirror_path") or "")
+            # Label record missing or audio path is stale. Fall through to write/fix.
 
         wav_source = self.resolve_stitched_artifact(metadata.get("audio_path"), run_dir, ".wav")
         rttm_source = self.resolve_stitched_artifact(metadata.get("rttm_path"), run_dir, ".rttm")
@@ -57,7 +74,7 @@ class StitchingMixin:
             return ""
         transcript_source = self.resolve_stitched_artifact(metadata.get("transcript_path"), run_dir, ".txt")
 
-        # The user-visible folder under audio_in is "audioStitching" — same
+        # The user-visible folder under audio_in is "audioStitching", the same
         # name on the dashboard's media library + diarization tabs so it's
         # easy to find. Keep one sub-folder per run so multiple stitches
         # don't collide on filenames.
@@ -66,6 +83,15 @@ class StitchingMixin:
         wav_target = mirror_root / wav_source.name
         rttm_target = mirror_root / rttm_source.name
         transcript_target = mirror_root / transcript_source.name if transcript_source and transcript_source.is_file() else None
+
+        if files_already_mirrored and not wav_target.is_file() and mirror_root.is_dir():
+            # audio_numbering.py may have added a numeric prefix after the initial mirror.
+            # Find the only WAV in this run's mirror directory and use that instead.
+            wav_hits = [p for p in mirror_root.glob("*.wav") if p.is_file()]
+            if len(wav_hits) == 1:
+                wav_target = wav_hits[0]
+            else:
+                return ""
 
         # Hardlinks let the audio_in/ entry share storage with the stitched/
         # original; for a multi-GB stitched WAV this avoids burning disk on a
@@ -81,18 +107,19 @@ class StitchingMixin:
             except OSError:
                 shutil.copy2(source, target)
 
-        try:
-            _link_or_copy(wav_source, wav_target)
-            _link_or_copy(rttm_source, rttm_target)
-            if transcript_source and transcript_target:
-                _link_or_copy(transcript_source, transcript_target)
-        except OSError as exc:
-            metadata["media_mirror_error"] = str(exc)
+        if not files_already_mirrored:
             try:
-                (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-            except OSError:
-                pass
-            return ""
+                _link_or_copy(wav_source, wav_target)
+                _link_or_copy(rttm_source, rttm_target)
+                if transcript_source and transcript_target:
+                    _link_or_copy(transcript_source, transcript_target)
+            except OSError as exc:
+                metadata["media_mirror_error"] = str(exc)
+                try:
+                    (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+                except OSError:
+                    pass
+                return ""
 
         relative_audio_name = self.audio_relative_path(wav_target)
 
@@ -133,7 +160,7 @@ class StitchingMixin:
                     "training_projects": target_projects,
                     "training_usage": usages,
                     "training_audio_path": str(primary_usage.get("sample_audio_path") or ""),
-                    "training_rttm_path": str(primary_usage.get("sample_rttm_path") or ""),
+                    "training_rttm_path": str(rttm_target.resolve()) if rttm_target.is_file() else str(primary_usage.get("sample_rttm_path") or ""),
                     "training_transcript_path": str(primary_usage.get("sample_transcript_path") or ""),
                     "project_name": str(primary_usage.get("project_name") or ""),
                     "include_transcript": False,
@@ -151,21 +178,22 @@ class StitchingMixin:
         except Exception as exc:  # noqa: BLE001
             metadata["media_mirror_label_error"] = str(exc)
 
-        metadata["media_mirror_path"] = str(wav_target.resolve().relative_to(self.root.resolve())) if wav_target.is_file() else ""
-        metadata["media_mirror_audio_name"] = relative_audio_name
-        metadata["media_mirror_completed"] = True
-        metadata["media_mirror_completed_at_utc"] = utc_now_iso()
-        try:
-            (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        except OSError:
-            pass
+        if not files_already_mirrored:
+            metadata["media_mirror_path"] = str(wav_target.resolve().relative_to(self.root.resolve())) if wav_target.is_file() else ""
+            metadata["media_mirror_audio_name"] = relative_audio_name
+            metadata["media_mirror_completed"] = True
+            metadata["media_mirror_completed_at_utc"] = utc_now_iso()
+            try:
+                (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+            except OSError:
+                pass
         self.invalidate_dashboard_cache()
         return relative_audio_name
 
     def trigger_stitch_auto_train(self, run_dir: Path, *, force: bool = False) -> list[str]:
         """Queue an auto-train sbatch for every project the stitched run added a sample to.
 
-        Idempotent — stamps ``auto_train_triggered_at_utc`` and the queued
+        Idempotent. Stamps ``auto_train_triggered_at_utc`` and the queued
         target list into the run's metadata.json so subsequent passes (e.g.
         when the dashboard re-renders or the slurm path completes after the
         local handler has already returned) don't double-queue. Pass
@@ -182,7 +210,7 @@ class StitchingMixin:
         if not usages:
             return []
 
-        # Lazy import keeps the dashboard import graph un-tangled — auto_train
+        # Lazy import keeps the dashboard import graph clean. auto_train
         # pulls in fine_tuning_manager, which is heavyweight to import at
         # startup.
         from dashboard import auto_train as _auto_train
@@ -280,7 +308,7 @@ class StitchingMixin:
         for run_dir in self.stitched_run_directories(limit=limit):
             # Catch the slurm-async case: a stitch finished in a cluster job
             # after the immediate handler had already returned. Both the
-            # media mirror and the auto-train queue are idempotent —
+            # media mirror and the auto-train queue are idempotent;
             # subsequent renders no-op once the metadata has the stamp.
             try:
                 self.mirror_stitched_into_media(run_dir)
@@ -385,8 +413,8 @@ class StitchingMixin:
         resolved_audio = self.selected_audio_names(selected_audio, run_all=False)
         speaker_by_requested: dict[str, str] = {}
         for name, speaker in paired:
-            # First label wins if the same file is submitted twice — same
-            # behavior the old code had through dedup, just made explicit.
+            # First label wins if the same file is submitted twice, same
+            # behavior as before but now explicit.
             speaker_by_requested.setdefault(name, speaker)
         inputs: list[StitchInput] = []
         errors: list[str] = []
@@ -490,7 +518,7 @@ class StitchingMixin:
 
         We read the run's metadata before nuking the folder so we can locate
         the per-project audio/rttm/transcript copies that ``add_to_training``
-        wrote out — leaving those behind would make the project look like it
+        wrote out, because leaving those behind would make the project look like it
         still has the stitched sample even after the run is gone.
         """
 

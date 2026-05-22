@@ -31,10 +31,8 @@ from typing import Iterable
 
 import yt_dlp
 
-# Centralised helpers — these used to be duplicated inside this module. Keeping
-# them in their canonical homes (audio_numbering for filename conventions,
-# workflow_background for the metadata timestamp) means a single fix propagates
-# everywhere instead of drifting per call site.
+# Helpers that used to be duplicated in this module now live in their canonical
+# homes so a single fix propagates everywhere.
 from audio_numbering import (
     AUDIO_EXTENSIONS,
     NUMBERED_PREFIX,

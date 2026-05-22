@@ -1,7 +1,7 @@
 """Tests for the senior-design DER + companion metrics module.
 
 Each test builds tiny hand-checkable RTTM payloads so the expected numbers can
-be verified on paper. The point isn't to retest scipy — it's to make sure the
+be verified on paper. The point isn't to retest scipy; it's to make sure the
 glue between RTTM parsing, speaker mapping, and DER component bookkeeping is
 right, because that's where this kind of code usually drifts.
 """

@@ -34,7 +34,7 @@ def is_audio_file(path: pathlib.Path) -> bool:
 
     # Some uploaded corpora carry filenames long enough to trip ENAMETOOLONG
     # when the kernel tries to stat them. Treat those as "not a file we can
-    # process" and keep walking — otherwise a single bad name aborts the
+    # process" and keep walking. Otherwise a single bad name aborts the
     # whole walk and breaks unrelated pages like /training-labels save.
     try:
         if not path.is_file():
@@ -97,7 +97,7 @@ def normalize_audio_dir(audio_dir: pathlib.Path) -> list[tuple[pathlib.Path, pat
             # ``exists()`` calls ``stat()`` and crashes with ENAMETOOLONG on
             # corpus filenames that already exceed the kernel's name limit
             # (KaggleBabyNoises, etc.). One bad file used to abort the whole
-            # walk and 500-out unrelated pages — skip the prefix step for
+            # walk and 500-out unrelated pages. Skip the prefix step for
             # any file we can't physically rename and keep going.
             try:
                 while target_path.exists():

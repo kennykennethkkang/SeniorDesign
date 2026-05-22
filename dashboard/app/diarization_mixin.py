@@ -5,7 +5,7 @@ Wraps everything between "user picked some files and a model" and "sbatch
 job is in flight": validating selections, resolving the chosen backend
 (NeMo / pyannote / fine-tuned), composing the run directory, and handing
 off to ``scheduler/run_site_diarization.sbatch``. We never call the
-diarization pipeline directly here — that lives in ``run_diarization.py``
+diarization pipeline directly here; that lives in ``run_diarization.py``
 and we treat it as a black box on purpose so the dashboard side can change
 without touching ML code.
 """
@@ -1165,7 +1165,7 @@ class DiarizationMixin:
            so the player surface is technically present but loads a 404.
         3. The HTML predates the current review-bundle format. We bump
            ``REVIEW_BUNDLE_FORMAT_VERSION`` whenever the embedded JS or
-           markup changes in a way old bundles need to pick up — typically
+           markup changes in a way old bundles need to pick up, typically
            bug fixes around auto-save, status display, or audio handling.
         """
 

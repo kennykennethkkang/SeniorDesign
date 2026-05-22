@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Diarization Error Rate + companion metrics for the senior-design dashboard.
+"""Diarization Error Rate and companion metrics for the senior design dashboard.
 
-We need a way to grade our fine-tuned model's output against the labels we
-hand-annotated — ideally without pulling in a full pyannote environment on
-the cluster just to run one evaluation. So we rolled our own, keeping it
-pure-Python except for the optional scipy Hungarian-algorithm speedup.
+This module scores fine-tuned model output against hand-annotated labels
+without needing a full pyannote environment on the cluster. It is pure Python
+except for the optional scipy speedup for speaker assignment.
 
 Metrics reported:
-  - DER  (Diarization Error Rate) — the NIST-convention (miss + false_alarm +
+  - DER  (Diarization Error Rate): NIST-convention (miss + false_alarm +
     confusion) / reference_speech. Lower is better.
-  - miss / false_alarm / confusion — DER broken into its three components so
-    we can tell *why* a run got worse (e.g. high false alarm = VAD too loose).
-  - JER  (Jaccard Error Rate) — per-speaker, averaged. Unlike DER, one
-    very-talkative speaker can't dominate the number, so it's a better
-    sanity-check on over-segmented recordings.
-  - speaker_count_diff — |hyp_speakers − ref_speakers|; useful early signal
-    for over- or under-clustering.
+  - miss / false_alarm / confusion: DER split into three components so we can
+    see why a run degraded (e.g. high false alarm means VAD is too loose).
+  - JER  (Jaccard Error Rate): per-speaker, then averaged. Unlike DER, one
+    very talkative speaker cannot dominate the score, so it is a useful
+    sanity check on over-segmented recordings.
+  - speaker_count_diff: |hyp_speakers - ref_speakers|; a quick signal for
+    over- or under-clustering.
 
 Speaker assignment uses scipy's linear_sum_assignment when available (optimal
-Hungarian); otherwise we fall back to greedy max-overlap, which is within a
-few percent of optimal for the small speaker counts we see.
+Hungarian algorithm). Otherwise it falls back to greedy max-overlap, which is
+within a few percent of optimal for the small speaker counts we deal with.
 """
 from __future__ import annotations
 
@@ -93,7 +92,7 @@ def merge_intervals(intervals: Iterable[Interval]) -> list[tuple[float, float]]:
 
 
 def total_speech_time(intervals: Iterable[Interval]) -> float:
-    """Sum merged speech time — overlap regions are counted once, not once per speaker."""
+    """Sum merged speech time. Overlap regions are counted once, not once per speaker."""
 
     return sum(end - start for start, end in merge_intervals(intervals))
 
@@ -105,7 +104,7 @@ def speakers_in(intervals: Iterable[Interval]) -> list[str]:
 
 
 def _interval_overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
-    """Compute the overlap between two time ranges — used as the building block for the speaker-match matrix."""
+    """Compute the overlap between two time ranges for use in the speaker-match matrix."""
 
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
@@ -113,8 +112,8 @@ def _interval_overlap(a_start: float, a_end: float, b_start: float, b_end: float
 def overlap_matrix(reference: Sequence[Interval], hypothesis: Sequence[Interval]) -> dict[tuple[str, str], float]:
     """Build a {(ref_speaker, hyp_speaker): seconds_of_overlap} table for speaker assignment.
 
-    O(n×m) is fine here — diarization files for our recordings top out at a
-    few thousand intervals total, so brute-force pairwise is fast enough.
+    O(n x m) is fine here. Our recording files top out at a few thousand
+    intervals total, so brute-force pairwise is fast enough.
     """
 
     matrix: dict[tuple[str, str], float] = {}
@@ -137,7 +136,7 @@ def best_speaker_mapping(
     Without this, a perfect transcript where ref calls the teacher "SPK_0" and
     the hypothesis calls them "SPK_1" would score 100 % confusion. We solve the
     assignment problem using scipy's Hungarian algorithm when available, and fall
-    back to greedy otherwise — WAVE doesn't always have scipy installed.
+    back to greedy otherwise since WAVE doesn't always have scipy installed.
     """
 
     ref_speakers = speakers_in(reference)
@@ -169,7 +168,7 @@ def _greedy_speaker_mapping(
     hyp_speakers: Sequence[str],
     matrix: dict[tuple[str, str], float],
 ) -> dict[str, str]:
-    """Greedy fallback for when scipy isn't around — grab the highest-overlap pair first, repeat."""
+    """Greedy fallback for when scipy is not available. Grabs the highest-overlap pair first and repeats."""
 
     edges = sorted(((overlap, ref, hyp) for (ref, hyp), overlap in matrix.items()), reverse=True)
     used_ref: set[str] = set()
@@ -280,7 +279,7 @@ def compute_jer(
     """Compute per-speaker Jaccard Error Rate and average it across reference speakers.
 
     JER is useful alongside DER because DER gets dominated by whoever talks the
-    most — JER gives each speaker equal weight. For each reference speaker we
+    most. JER gives each speaker equal weight. For each reference speaker we
     find the best-matching hypothesis speaker (most overlap) and compute
     1 − intersection/union. A speaker the model never predicted = JER 1.0.
     """
@@ -385,7 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  false alarm: {metrics['false_alarm_seconds']:.2f}s")
     print(f"  confusion:   {metrics['confusion_seconds']:.2f}s")
     print(f"JER: {metrics['jer'] * 100:.2f}%  (averaged across {metrics['reference_speaker_count']} reference speakers)")
-    print(f"speakers — reference: {metrics['reference_speaker_count']}, hypothesis: {metrics['hypothesis_speaker_count']}")
+    print(f"speakers: reference={metrics['reference_speaker_count']}, hypothesis={metrics['hypothesis_speaker_count']}")
     return 0
 
 

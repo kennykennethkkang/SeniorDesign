@@ -4,7 +4,7 @@
 Kept small on purpose: pure stdlib WSGI + Waitress (optional), so it boots
 inside the same Python environment as the rest of the project without a
 separate service to babysit. The split matches how WAVE actually works
-day-to-day — the web UI is for interactive setup, browsing, and quick
+day-to-day. The web UI is for interactive setup, browsing, and quick
 edits, while anything GPU-heavy gets handed off to sbatch and watched
 through the same dashboard.
 

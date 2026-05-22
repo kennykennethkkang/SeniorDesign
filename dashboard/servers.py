@@ -20,7 +20,7 @@ from socketserver import ThreadingMixIn
 
 
 # Content types that compress well. Audio/video/images are already compressed
-# so we skip them — gzip would just burn CPU for ~0% savings.
+# so we skip them; gzip would just burn CPU for ~0% savings.
 _GZIP_MIN_BYTES = 1024
 _GZIP_CONTENT_TYPES = (
     "text/",
@@ -47,7 +47,7 @@ def _is_gzippable(content_type: str) -> bool:
 class GzipMiddleware:
     """WSGI middleware that compresses text/JSON responses with gzip.
 
-    The dashboard ships a multi-megabyte JSON state blob inside the page HTML —
+    The dashboard ships a multi-megabyte JSON state blob inside the page HTML;
     on a slow link the browser stalls waiting for it before LCP can fire.
     Most of that blob is repetitive text, so gzip cuts it ~10x. We skip
     binary/already-compressed content types and very small responses to avoid
@@ -62,7 +62,7 @@ class GzipMiddleware:
             return self.application(environ, start_response)
 
         # We need to inspect the inner app's Content-Type before deciding what
-        # to do, but we must NOT buffer the body for non-gzippable responses —
+        # to do, but we must NOT buffer the body for non-gzippable responses;
         # otherwise large media downloads (audio_in/*.wav, 70+ MB) get slurped
         # into memory and break range/streaming behavior. Capture status +
         # headers via a wrapped start_response, then branch.
@@ -84,7 +84,7 @@ class GzipMiddleware:
         exc_info = captured.get("exc_info")
 
         if already_encoded or not _is_gzippable(content_type):
-            # Pass through untouched — preserves chunked streaming and range
+            # Pass through untouched; preserves chunked streaming and range
             # responses (Content-Range / 206) for audio + binary assets.
             start_response(status, headers, exc_info)
             return body_iter

@@ -2,13 +2,13 @@
 
 The dashboard serves audio from a WAVE-cluster NFS mount. The originals are
 typically 16 kHz mono 16-bit PCM WAVs, but for a 30-40 min recording that's
-still ~70 MB — enough to crash a browser tab when the labeler is editing
+still ~70 MB, enough to crash a browser tab when the labeler is editing
 many fields while audio is buffering.
 
 This module produces an 8 kHz mono WAV preview (half the bytes) the first
 time a given source is requested and caches the result under
 ``.local_dashboard/audio_preview/<hash>.wav``. Subsequent requests serve the
-cached file directly. Originals are never modified — the ML pipeline keeps
+cached file directly. Originals are never modified; the ML pipeline keeps
 reading the 16 kHz WAVs as before.
 
 Pure-stdlib (``wave`` + ``audioop``) so we don't depend on ffmpeg, which
@@ -97,7 +97,7 @@ def _generate_preview(source_path: Path, target_path: Path) -> None:
                     # Normalize bit width first so ratecv has a 16-bit input.
                     if src_width != PREVIEW_TARGET_WIDTH:
                         raw = audioop.lin2lin(raw, src_width, PREVIEW_TARGET_WIDTH)
-                    # Fold stereo down to mono before resampling — cheaper
+                    # Fold stereo down to mono before resampling, which is cheaper
                     # and prevents the ratecv buffer from blowing up on
                     # long stereo files.
                     if src_channels > 1:
@@ -133,7 +133,7 @@ def ensure_preview(source_path: Path, cache_root: Path) -> Path:
         return target
     lock = _lock_for(target)
     with lock:
-        # Re-check inside the lock — another thread may have finished while
+        # Re-check inside the lock; another thread may have finished while
         # we were waiting.
         if target.is_file():
             return target

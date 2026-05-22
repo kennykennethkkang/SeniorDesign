@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rendering mixin: builds the JSON page-state blob and serves the React HTML shell.
 
-The browser side doesn't talk to a REST API — it boots from a single page
+The browser side doesn't talk to a REST API; it boots from a single page
 template with a chunk of JSON shoved into ``<script id="dashboard-state">``.
 This mixin is what assembles that JSON: page context, asset URLs, route
 table, defaults, queue snapshots, etc. Frontend changes that need new data
@@ -175,7 +175,7 @@ class RenderingMixin:
         *,
         diarization_model_key: str = "",
     ) -> dict[str, object]:
-        """Lazy-load per-page data — expensive scans (audio inventory, project list) only happen for pages that show them."""
+        """Lazy-load per-page data. Expensive scans (audio inventory, project list) only happen for pages that show them."""
 
         effective_path = current_path if current_path in PAGE_PATHS else "/"
         context = self.shared_page_context()
@@ -219,7 +219,7 @@ class RenderingMixin:
         if effective_path in MODEL_SELECTION_PAGES:
             context["preferences"] = self.model_preferences()
         if effective_path in {"/uploads", "/training-labels", "/fine-tuning"}:
-            # Capped at 25 — the frontend filter dropdown only displays recent
+            # Capped at 25 since the frontend filter dropdown only displays recent
             # runs; 100 was bloating the state blob to multi-MB. Older runs
             # remain accessible from the diarization tab's run history.
             context["diarization_history"] = self.diarization_history_rows(limit=25)
@@ -269,7 +269,7 @@ class RenderingMixin:
         Appends an mtime-based ``?v=...`` cache buster. Cache-Control: no-store
         usually does the job, but every so often a browser holds onto a stale
         bundle through a refresh or two. Fingerprinting the URL itself is the
-        belt-and-braces fix — when the file changes, the URL changes, and the
+        belt-and-braces fix. When the file changes, the URL changes, and the
         browser has no choice but to refetch.
         """
 
@@ -302,10 +302,13 @@ class RenderingMixin:
 
         if not isinstance(path, Path) or not path.is_file():
             return None
+        href = self.file_link(path, script_name)
+        if not href:
+            return None
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         return {
             "label": label,
-            "href": self.file_link(path, script_name),
+            "href": href,
             "path": self.describe_path(path),
             "kind": self.artifact_kind(path, content_type),
             "previewHref": self.artifact_preview_link(path, script_name),
@@ -546,7 +549,7 @@ class RenderingMixin:
     def frontend_diarization_runs_for_compare(self) -> list[dict[str, object]]:
         """Flatten the diarization-history lookup into one row per run for the DER calculator's dropdowns.
 
-        Surfaces base models AND fine-tuned checkpoints — every run that landed
+        Surfaces base models AND fine-tuned checkpoints. Every run that landed
         an SRT on disk shows up so the user can pair any two together. We tag
         each row with ``modelKind`` ("default" / "fine_tuned" / "unknown") so
         the UI can show a badge without re-deriving it from the model key.
@@ -629,7 +632,7 @@ class RenderingMixin:
         return serialized
 
     def frontend_projects(self, projects: list[dict[str, object]], script_name: str) -> list[dict[str, object]]:
-        """Build the fine-tuning project card payloads — includes step completion state, recent runs, and artifact links."""
+        """Build the fine-tuning project card payloads: step completion state, recent runs, and artifact links."""
 
         serialized: list[dict[str, object]] = []
         for project in projects:
@@ -708,7 +711,7 @@ class RenderingMixin:
                         # Surface the snapshotted base/pretrained model so the user
                         # can tell at a glance which checkpoint each fine-tuned run
                         # was built on top of. Empty for legacy runs that predate
-                        # the metadata snapshot — UI just hides the row.
+                        # the metadata snapshot; UI just hides the row.
                         "baseModel": str(run.get("base_model") or "").strip(),
                         "baseModelKind": str(run.get("base_model_kind") or "").strip(),
                         # val_loss points parsed live from the pyannote .out file;
@@ -817,7 +820,7 @@ class RenderingMixin:
     ) -> list[dict[str, object]]:
         """Combine audio-file metadata with label_status records so the training-labels page shows everything in one row.
 
-        Cached for 10 s — same reason as ``training_label_summary``: the
+        Cached for 10 s for the same reason as ``training_label_summary``: the
         per-audio rttm_lookup does ~5 stat() calls per file on a networked
         filesystem and dominated cold-cache page renders. Mutations
         (label saves, completions, deletes) call ``invalidate_dashboard_cache``.
@@ -985,7 +988,7 @@ class RenderingMixin:
         message: str,
         message_status: str,
     ) -> dict[str, object]:
-        """Assemble the full window.__STATE__ blob — everything React needs to render the current page."""
+        """Assemble the full window.__STATE__ blob with everything React needs to render the current page."""
 
         projects = self.frontend_projects(list(context.get("projects", [])), script_name)
         recent_outputs = [
@@ -1033,7 +1036,7 @@ class RenderingMixin:
             else []
         )
         # /training-labels and /fine-tuning no longer need the top-level
-        # ctx.audioFiles array on a large inventory — their queues/pickers
+        # ctx.audioFiles array on a large inventory; their queues/pickers
         # fetch what they need via /api/training-labels and /api/audio-files
         # respectively. /uploads, /stitching, /diarization still read it,
         # so keep building for those.
@@ -1042,7 +1045,7 @@ class RenderingMixin:
             current_path in audio_files_pages
             or (current_path in {"/training-labels", "/fine-tuning"} and embed_training_rows_inline)
         )
-        # Hoist audio_dir.resolve() and self.root out of the per-file loop —
+        # Hoist audio_dir.resolve() and self.root out of the per-file loop;
         # the previous comprehension called `audio_relative_path` three times
         # per file (each one running `path.resolve()` + `audio_dir.resolve()`),
         # plus a separate `describe_path`. With 6 k+ audio files on the
@@ -1185,6 +1188,7 @@ class RenderingMixin:
                 "fineTuneRenameProject": self.frontend_route("/fine-tuning/rename-project", script_name),
                 "fineTuneRenameRun": self.frontend_route("/fine-tuning/rename-run", script_name),
                 "fineTuneDeleteRunModel": self.frontend_route("/fine-tuning/delete-run-model", script_name),
+                "fineTuneActiveJobStatus": self.frontend_route("/api/fine-tuning/active-job-status", script_name),
                 "fineTuneScoreRun": self.frontend_route("/api/fine-tuning/score-run", script_name),
                 "fineTuneCompareRuns": self.frontend_route("/api/fine-tuning/compare-runs", script_name),
                 "fineTuneAutoTrain": self.frontend_route("/fine-tuning/auto-train", script_name),
@@ -1298,8 +1302,8 @@ class RenderingMixin:
                         # handles the audio_in/<file>.wav vs renumbered
                         # 001_<file>.wav mismatch where the persistent record
                         # was keyed before normalize_audio_dir ran. Using the
-                        # row makes every "completed" entry — including
-                        # stitched conversations — eligible for DER.
+                        # row makes every "completed" entry, including
+                        # stitched conversations, eligible for DER.
                         and str(row.get("trainingRttmPath") or "")
                     ],
                 },
@@ -1315,7 +1319,7 @@ class RenderingMixin:
         current_path: str,
         diarization_model_key: str = "",
     ) -> str:
-        """Produce the final HTML response — builds page context, serializes state, and injects it into the HTML shell."""
+        """Produce the final HTML response. Builds page context, serializes state, and injects it into the HTML shell."""
 
         context = self.page_context(
             current_path,

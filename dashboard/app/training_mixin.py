@@ -222,7 +222,7 @@ class TrainingLabelsMixin:
         needle = (query.get("q") or [""])[0].strip().lower()
         # hide_completed=1 drops completed rows on the server BEFORE counting,
         # so the pagination total matches what the user actually sees. The
-        # frontend's "Show completed labels" toggle drives this flag — keeping
+        # frontend's "Show completed labels" toggle drives this flag; keeping
         # the filter server-side makes 'Page 3 of 12' an honest count instead
         # of 'showing 250 fetched but only 87 visible after client-side
         # filter'.
@@ -288,7 +288,7 @@ class TrainingLabelsMixin:
     def load_training_label_records(self) -> dict[str, dict[str, object]]:
         """Load per-upload labeling state for the training label queue.
 
-        Caches by (mtime, size) of label_status.json — the file is ~750 KB and
+        Caches by (mtime, size) of label_status.json. The file is ~750 KB and
         used to be re-parsed on every page render of /training-labels and
         /fine-tuning. Saving a label rewrites the file and bumps mtime, so
         the cached copy is replaced on the next call automatically.
@@ -472,7 +472,7 @@ class TrainingLabelsMixin:
     ) -> dict[str, int]:
         """Count queue states for the labeling page summary.
 
-        Cached for 10 s — the inner ``rttm_lookup`` does ~5 stat() calls per
+        Cached for 10 s. The inner ``rttm_lookup`` does ~5 stat() calls per
         audio file to find sidecars and label_work drafts, which on a
         networked filesystem with 6k+ files turns into 30s+ per render.
         Saving a label or completing one calls ``invalidate_dashboard_cache``,
@@ -562,7 +562,7 @@ class TrainingLabelsMixin:
         Two-tier ordering:
           1. Has this file ever appeared in a diarization run's summary?
              If yes it goes in the top group; if no it stays alphabetical
-             at the bottom. ('Diarized' is liberal here — even failed runs
+             at the bottom. ('Diarized' is liberal here; even failed runs
              count, since a failed-and-rerun loop is part of the workflow.)
           2. Within the diarized group, surface drafts and questions before
              not-yet-labeled files and already-completed work. Within each
@@ -1230,7 +1230,7 @@ class TrainingLabelsMixin:
         # Drop any sample copies the previous completion left in projects this
         # label is no longer training. Without this, switching the popup choice
         # from project A to project B would silently keep training A on stale
-        # data — exactly the duplicate-RTTM bug we hit before.
+        # data, which caused the duplicate-RTTM bug we hit before.
         previous_target_keys = [
             str(item)
             for item in (existing_record.get("training_projects") or [])
@@ -1262,7 +1262,7 @@ class TrainingLabelsMixin:
                     audio_name=audio_name,
                 )
                 # Symlink the audio_in source into the project rather than
-                # copying its bytes — duplicating gigabytes of stitched WAVs
+                # copying its bytes, since duplicating gigabytes of stitched WAVs
                 # per project was the disk-usage cliff the user wants to
                 # avoid. RTTM is small and gets rewritten in canonical form
                 # via the label_work draft path we wrote a few lines up.
@@ -1418,7 +1418,7 @@ class TrainingLabelsMixin:
         """Roll a completed label back to draft and remove its training sample copies.
 
         The user wanted a way to take a label OUT of the fine-tuning sample
-        pool — common after spotting a labeling mistake post-completion. We
+        pool, which is common after spotting a labeling mistake post-completion. We
         delete the audio/rttm/transcript copies from every project this label
         was added to (covers both the new path-flattened stem and the legacy
         basename stem), drop the staged copy in ``label_work/``, and rewind
@@ -1465,7 +1465,7 @@ class TrainingLabelsMixin:
             if any(removed.values()):
                 cleared_projects.append(key)
 
-        # Drop the label_work staging copy too — it gets rewritten on the next
+        # Drop the label_work staging copy too; it gets rewritten on the next
         # completion, so leaving it behind would just be confusing dead state.
         label_stem = self.diarization_output_base(audio_name)
         review_rttm_path = self.training_label_work_dir / f"{label_stem}.rttm"
@@ -1476,7 +1476,7 @@ class TrainingLabelsMixin:
                 pass
 
         # Preserve segments / transcript / questions so the user can keep
-        # editing — only flip the status and clear the completion bookkeeping.
+        # editing; only flip the status and clear the completion bookkeeping.
         rewound = dict(record)
         rewound["status"] = "draft"
         rewound["training_projects"] = []

@@ -4,8 +4,8 @@
 Owns everything the dashboard does with raw audio that isn't a diarization run:
 listing folders, paginating ``audio_in/`` so the page doesn't choke on large
 corpora, accepting uploads, normalizing filenames, and rewriting the per-run
-reference paths when a folder is renamed. Pure I/O and metadata work — the
-ML pipeline never lives here, so this mixin is safe to evolve independently.
+reference paths when a folder is renamed. Pure I/O and metadata work; the
+ML pipeline never lives here so this mixin is safe to evolve independently.
 """
 from __future__ import annotations
 
@@ -242,8 +242,8 @@ class AudioMixin:
 
         Accepts an optional pre-fetched ``audio_files`` list so the caller
         (typically ``page_context``) does not pay for two walks of
-        ``audio_in/`` per request — one for the inventory grid and one for
-        the folder dropdown counters. Falls back to the unguarded scan when
+        ``audio_in/`` per request (one for the inventory grid and one for
+        the folder dropdown counters). Falls back to the unguarded scan when
         called standalone (e.g., from the AJAX live-tracking endpoint).
         """
 
@@ -691,7 +691,7 @@ class AudioMixin:
             summary = self.cascade_delete_audio_file(relative_audio)
         except ValueError as exc:
             # Reserved for genuinely bad input (path traversal, empty value).
-            # FileNotFoundError no longer surfaces here — cascade_delete_audio_file
+            # FileNotFoundError no longer surfaces here; cascade_delete_audio_file
             # treats a missing WAV as a no-op success and still sweeps orphaned
             # references, which is the experience the user actually wants when
             # they click Delete on a stale row.
@@ -737,7 +737,7 @@ class AudioMixin:
         Each path is run through the same idempotent ``cascade_delete_audio_file``
         used by the per-row Delete button, so missing files (stale page state)
         and YouTube-linked files behave consistently with the single-row flow.
-        Failures on one file do not abort the rest of the batch — the response
+        Failures on one file do not abort the rest of the batch. The response
         notifies the user about both successes and failures so they know
         exactly what landed.
         """
@@ -1332,7 +1332,7 @@ class AudioMixin:
         clicked Delete on a stale row, or another process removed the file
         first) we still sweep every orphaned reference and return success.
         Surfacing a "not found" error in that case would be both confusing and
-        wrong — the user's intent was "make this row stop existing," and after
+        wrong. The user's intent was "make this row stop existing," and after
         the sweep that intent is satisfied.
         """
 

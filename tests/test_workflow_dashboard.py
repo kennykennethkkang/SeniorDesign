@@ -475,7 +475,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(del_status, "303 See Other")
             self.assertIn("/stitching", headers["Location"])
             self.assertFalse(run_dir.exists())
-            # The pushed sample copies should be gone too — leaving them
+            # The pushed sample copies should be gone too; leaving them
             # behind would make the project look like it still owns the
             # stitched sample.
             self.assertFalse(any((project_dir / "audio").iterdir()))
@@ -2217,7 +2217,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(context["trainingLabels"]["summary"]["total"], 2)
             self.assertEqual(context["trainingLabels"]["summary"]["completed"], 1)
             self.assertEqual(context["trainingLabels"]["summary"]["not_started"], 1)
-            # /fine-tuning intentionally ships an empty rows array — the row
+            # /fine-tuning intentionally ships an empty rows array; the row
             # list is only rendered on /training-labels, so we keep the state
             # blob lean here.
             self.assertEqual(context["trainingLabels"]["rows"], [])
@@ -2257,7 +2257,7 @@ class WorkflowWebTests(unittest.TestCase):
 
             self.assertEqual(status, "200 OK")
             context = page_state(body)["context"]
-            # Strict picker: label_work drafts alone are not enough — without
+            # Strict picker: label_work drafts alone are not enough; without
             # a completed-label record in label_status.json, nothing appears.
             self.assertEqual(context["trainingSources"]["audioFiles"], [])
             self.assertEqual(context["trainingSources"]["rttmFiles"], [])
@@ -4436,7 +4436,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertFalse(removed_path.is_file())
 
     def test_audio_file_delete_succeeds_when_wav_is_already_gone(self):
-        """Delete must be idempotent — stale UI rows should not surface 'not found' errors.
+        """Delete must be idempotent; stale UI rows should not surface 'not found' errors.
 
         Reproduces the bug the user reported after the bulk WAV cleanup: their
         browser still showed inventory rows whose underlying WAVs were already

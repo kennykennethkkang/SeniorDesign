@@ -16,7 +16,7 @@ class SlurmQueueSnapshotTests(unittest.TestCase):
     def test_slurm_queue_snapshot_returns_state_and_resources_for_our_job(self):
         # squeue is now invoked with -j <jobid>, so the response contains only
         # our row. The snapshot intentionally drops cluster-wide queue position
-        # fields — we don't track other people's jobs anymore.
+        # fields; we don't track other people's jobs anymore.
         squeue_stdout = (
             "123|PD|Priority|2026-05-04T10:05:00|gpu|site_diarization|kkang|0:00|2:00:00|1|6|gpu:1\n"
         )

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from audio_numbering import AUDIO_EXTENSIONS
-from workflow_background import slurm_job_state, utc_now_iso
+from workflow_background import process_is_running, slurm_job_state, utc_now_iso
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_NAME = "msdd_5scl_15_05_50Povl_256x3x32x2.yaml"
@@ -120,7 +120,7 @@ class FineTuneArtifacts:
 
 @dataclass(frozen=True)
 class FineTuneRun:
-    """Track one launch attempt — we store both the local PID and the SLURM job ID so we can query status either way."""
+    """Holds one launch attempt: local PID and SLURM job ID so we can query status from either."""
 
     run_dir: Path
     stdout_path: Path
@@ -136,7 +136,7 @@ class FineTuneRun:
 
 
 def slugify(value: str) -> str:
-    """Turn a user-typed project name into a filesystem-safe slug — keeps the dir names clean and predictable."""
+    """Convert a user-typed project name into a filesystem-safe slug for clean directory names."""
 
     cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
     while "--" in cleaned:
@@ -328,7 +328,7 @@ def project_display_path(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> Path:
-    """Resolve where a project's display.json lives — centralised so nothing hard-codes the path."""
+    """Return the path to a project's display.json so nothing else hard-codes it."""
 
     return project_dir(project_name, backend=backend, root=root) / "display.json"
 
@@ -467,7 +467,7 @@ def project_dir(
     backend: str = DEFAULT_FINE_TUNING_BACKEND,
     root: Path = PROJECT_ROOT,
 ) -> Path:
-    """Compute the canonical on-disk location for a project — one source of truth for the path structure."""
+    """Return the canonical on-disk path for a project directory."""
 
     normalized_backend = normalize_backend(backend)
     slug = slugify(project_name)
@@ -635,7 +635,7 @@ def save_project_sample_links(
     RTTM still gets rewritten in canonical form because the trainers expect a
     normalized session_id, but the big bytes (audio + transcript) point back
     at the originals. If the originals move or get deleted later, the linked
-    sample will break — that's the deliberate cost of the disk-space win.
+    sample will break if they move. That is the trade-off for saving disk space.
 
     ``audio_name`` overrides the destination filename for callers that need
     a path-flattened stem (e.g. ``folder__001_clip.wav`` derived from a
@@ -1200,7 +1200,7 @@ def write_pyannote_subset_uem(path: Path, samples: Sequence[TrainingSample]) -> 
     """Write one full-file annotated range per sample for pyannote training.
 
     `sample.duration_seconds` (and `probe_media_duration`) trust the WAV
-    header / ffprobe metadata — fine for clean files, but the workspace has
+    header / ffprobe metadata, which works for clean files, but the workspace has
     truncated WAVs where the header claims a 7-minute clip but only 16 s of
     samples actually exist on disk. soundfile counts real frames, so use it
     to set the UEM `annotated` upper bound. Otherwise pyannote's dataloader
@@ -1319,13 +1319,12 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-# Compatibility shim for torchaudio 2.10 — `AudioMetaData`, `info`, `load`,
-# and `list_audio_backends` were all removed/renamed, but pyannote.audio 3.4
-# still references them at import time AND at runtime (its database loader
-# calls `torchaudio.info` to precompute durations). The diarization backend's
-# stubbed-info shim is enough for inference because the pipeline path never
-# touches pyannote.database — but training does, so we have to back the
-# stubs with real soundfile-driven implementations or the dataloader bails.
+# Compatibility shim for torchaudio 2.10. `AudioMetaData`, `info`, `load`,
+# and `list_audio_backends` were removed/renamed, but pyannote.audio 3.4
+# still calls them at import time and at runtime (its database loader calls
+# `torchaudio.info` to precompute durations). The inference path is fine with
+# stubbed versions, but training goes through pyannote.database so the stubs
+# need real soundfile-backed implementations or the dataloader crashes.
 import torch
 import torchaudio
 import soundfile as _sf
@@ -1467,9 +1466,8 @@ class PyannoteProgressLogger(pl.Callback):
             flush=True,
         )
 
-    # Validation hooks below are observation-only — they don't change how the
-    # task validates or what it computes. They just dump a val_loss line when
-    # PL hands one to us, so the dashboard can plot the curve from the .out.
+    # Validation hooks below are read-only observers. They just write a
+    # val_loss line to stdout so the dashboard can plot the curve from the log.
     def _val_loss_value(self, source):
         if isinstance(source, dict):
             for key in ("val_loss", "validation_loss", "loss"):
@@ -1625,12 +1623,14 @@ cd "$NEURAL_DIR"
 # back to 8 for a bare local launch). More workers keep the single GPU fed
 # during MSDD embedding extraction, which is the slowest CPU-bound phase.
 WORKERS="${{SLURM_CPUS_PER_TASK:-8}}"
+# Reduce CUDA memory fragmentation so large embedding tensors don't OOM
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # NeMo v2.x dropped the `model.base.*` prefix that the upstream
-# multiscale_diar_decoder.py docstring still advertises — the YAML schema
-# now exposes `model.diarizer.speaker_embeddings.model_path` directly, and
-# Hydra refuses to override a missing struct key, so passing `model.base.*`
-# is what fails the run with "Key 'base' is not in struct".
+# multiscale_diar_decoder.py docstring shows. The YAML schema now exposes
+# `model.diarizer.speaker_embeddings.model_path` directly. Hydra refuses to
+# override a missing struct key, so passing `model.base.*` fails the run
+# with "Key 'base' is not in struct".
 #
 # `trainer.strategy=ddp_find_unused_parameters_true` is the other override
 # we need. Lightning 2.x auto-picks DDP even on a single GPU, and the MSDD
@@ -1650,8 +1650,8 @@ command=(
   model.validation_ds.manifest_filepath="$VAL_MANIFEST"
   model.train_ds.emb_dir="$TRAIN_EMB_DIR"
   model.validation_ds.emb_dir="$VAL_EMB_DIR"
-  model.train_ds.num_workers="$WORKERS"
-  model.validation_ds.num_workers="$WORKERS"
+  ++model.train_ds.num_workers="$WORKERS"
+  ++model.validation_ds.num_workers="$WORKERS"
   exp_manager.name="$EXP_NAME"
   exp_manager.exp_dir="$EXP_DIR"
   +exp_manager.checkpoint_callback_params.save_last=false
@@ -1660,7 +1660,7 @@ command=(
 echo "Running NeMo fine-tuning command:"
 printf "  %q" "${{command[@]}}"
 printf "\\n"
-# Not `exec` — we need to run the .nemo export safety net afterwards.
+# Not `exec` because we need to run the .nemo export safety net afterwards.
 "${{command[@]}}"
 
 # .nemo export safety net. NeMo only packages the final .nemo when training
@@ -1670,7 +1670,7 @@ printf "\\n"
 # best surviving checkpoint. Best-effort: a failure here is logged but does
 # not fail the run, since training itself did complete.
 if ! find "$EXP_DIR" -name "*.nemo" -print -quit 2>/dev/null | grep -q .; then
-  echo "No .nemo produced by training — exporting from the best checkpoint..."
+  echo "No .nemo produced by training; exporting from the best checkpoint..."
   SENIOR_DESIGN_ROOT={json.dumps(str(PROJECT_ROOT))}
   PYTHONPATH="$SENIOR_DESIGN_ROOT${{PYTHONPATH:+:$PYTHONPATH}}" \\
     "$PYTHON_BIN" -c 'import sys; from fine_tuning_manager import export_best_checkpoint_to_nemo; print("export result:", export_best_checkpoint_to_nemo(sys.argv[1]))' "$EXP_DIR" \\
@@ -1717,9 +1717,9 @@ def _runtime_env_block(*, backend: str) -> str:
     """Return the bash snippet that prepares modules, venv, and LD_LIBRARY_PATH.
 
     Mirrors the working `run_site_diarization.sbatch` so the fine-tuning jobs
-    inherit the same cluster runtime — the dashboard's `sys.executable` ends up
-    pointing at the dashboard's own venv, which is the wrong one for pyannote
-    training and never had module-loaded GCCcore on its LD path either way.
+    pick up the same cluster runtime. The dashboard's `sys.executable` points
+    at the dashboard's own venv, which has no lightning or pyannote and lacks
+    the module-loaded GCCcore on its LD path.
     """
 
     backend_key = normalize_backend(backend)
@@ -1730,11 +1730,10 @@ def _runtime_env_block(*, backend: str) -> str:
             f"_FT_DEFAULT_VENV={json.dumps(str(default_venv))}",
             f"_FT_RUNTIME_ENV_SCRIPT={json.dumps(str(_RUNTIME_ENV_SCRIPT))}",
             'PYTHON_BIN="${PYTHON_BIN:-$_FT_DEFAULT_VENV/bin/python3}"',
-            # The dashboard forwards its own sys.executable as PYTHON_BIN, which
-            # on WAVE is /usr/bin/python3 — that interpreter has no lightning,
-            # nemo, or pyannote installed and the GPU job dies on import. Force
-            # PYTHON_BIN back to the backend venv unless the caller already
-            # picked an interpreter inside it.
+            # The dashboard passes its own sys.executable as PYTHON_BIN.
+            # On WAVE that is /usr/bin/python3, which has none of the ML
+            # packages and the GPU job dies on import. Force PYTHON_BIN back
+            # to the backend venv unless the caller picked one inside it.
             'case "$PYTHON_BIN" in',
             '  "$_FT_DEFAULT_VENV/bin/"*)',
             "    ;;",
@@ -1768,12 +1767,12 @@ def export_best_checkpoint_to_nemo(experiment_dir: Path | str) -> Path | None:
     but not a raw checkpoint. This is the safety net: it finds the best
     checkpoint under ``experiment_dir`` and exports a ``.nemo`` next to it.
 
-    Two real-world snags are handled:
+    Two real-world issues are handled:
       * MSDD-only fine-tune checkpoints drop ``speaker_model_cfg`` from their
-        config, which crashes model construction — we re-inject it from the
+        config, which crashes model construction. We re-inject it from the
         base ``titanet_large`` speaker model.
-      * A checkpoint written while SLURM was killing the job is corrupt —
-        we walk checkpoints best-first and skip any that fail to read.
+      * A checkpoint written while SLURM was killing the job may be corrupt.
+        We walk checkpoints best-first and skip any that fail to load.
 
     Returns the ``.nemo`` path on success, or None if every checkpoint is
     missing/corrupt. NeMo + torch are imported lazily so the dashboard
@@ -1807,8 +1806,8 @@ def export_best_checkpoint_to_nemo(experiment_dir: Path | str) -> Path | None:
             continue
         # ``hyper_parameters`` is an OmegaConf DictConfig (not a plain dict),
         # so probe it with ``in`` / item access rather than isinstance(dict).
-        # NeMo stores the model config AS ``hyper_parameters`` itself — an
-        # OmegaConf DictConfig, not a plain dict with a nested "cfg" key.
+        # NeMo stores the model config in ``hyper_parameters`` as an OmegaConf
+        # DictConfig, not a plain dict with a nested "cfg" key.
         cfg = payload.get("hyper_parameters") if isinstance(payload, dict) else None
         # MSDD fine-tune configs drop speaker_model_cfg; NeuralDiarizer and
         # load_from_checkpoint both need it. Pull it off the base TitaNet.
@@ -2288,21 +2287,9 @@ def prepare_project(
     )
 
 
-def process_is_running(pid: int) -> bool:
-    """Check whether a locally launched fine-tuning process is still alive."""
 
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-# Read-only — does not touch the training process. Pulls val_loss values out
-# of an existing pyannote .out file so the dashboard can render them as a
-# small per-epoch series. Tolerates missing files and partial logs.
+# Pulls val_loss values out of a pyannote .out file for the dashboard's
+# per-epoch chart. Does not touch the training process at all.
 _PYANNOTE_VAL_LOSS_LINE_RE = re.compile(
     r"\[pyannote-train\][^\n]*?epoch=(\d+)/(\d+)[^\n]*?"
     r"(?:step=(\d+)[^\n]*?)?"
@@ -2378,7 +2365,7 @@ def parse_pyannote_val_loss(out_path: Path, *, max_points: int = 200) -> list[di
     if len(points) > max_points:
         points = points[-max_points:]
     if len(_PYANNOTE_VAL_LOSS_CACHE) >= _PYANNOTE_VAL_LOSS_CACHE_LIMIT:
-        # Drop one arbitrary entry — process-local cache, no need for LRU.
+        # Drop one arbitrary entry; this is a process-local cache so LRU is overkill.
         _PYANNOTE_VAL_LOSS_CACHE.pop(next(iter(_PYANNOTE_VAL_LOSS_CACHE)), None)
     _PYANNOTE_VAL_LOSS_CACHE[cache_key] = points
     return points
