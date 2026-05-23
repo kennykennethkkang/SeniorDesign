@@ -6,7 +6,7 @@
       "created_at_utc": "2026-05-08T14:32:15+00:00",
       "include_transcript": false,
       "issue_questions": "",
-      "label_segments": "0.000 0.550 Speaker_0",
+      "label_segments": "22.866 43.823 Speaker_0\r\n50.820 56.480 Speaker_0\r\n56.520 63.600 Speaker_0\r\n63.640 79.772 Speaker_0\r\n79.868 81.533 Speaker_0\r\n81.757 96.188 Speaker_0\r\n101.320 105.929 Speaker_0\r\n120.068 130.334 Speaker_0",
       "project_name": "uploaded-site-training",
       "review_path": "outputs/diarization_runs/nemo/20260507T171843_diarization_nemo_01-items/ADSJinyoung__001_ad00_review.html",
       "selected_training_target_label": "",
@@ -22,7 +22,7 @@
         "pyannote/uploaded-site-training"
       ],
       "transcript_text": "",
-      "updated_at_utc": "2026-05-15T04:23:12+00:00"
+      "updated_at_utc": "2026-05-22T22:19:08+00:00"
     },
     "AdultDirectedSpeech/001_ad00.wav": {
       "audio_file": "AdultDirectedSpeech/001_ad00.wav",
@@ -11602,7 +11602,7 @@
         }
       ],
       "transcript_text": "",
-      "updated_at_utc": "2026-05-22T19:57:37+00:00"
+      "updated_at_utc": "2026-05-22T22:11:45+00:00"
     },
     "youtube_links/001_Kids Give Adults Advice on Dating_B08UvVwjpG4.wav": {
       "audio_file": "youtube_links/001_Kids Give Adults Advice on Dating_B08UvVwjpG4.wav",
@@ -11623,6 +11623,6 @@
       "updated_at_utc": "2026-05-04T22:12:19+00:00"
     }
   },
-  "updated_at_utc": "2026-05-22T19:57:37+00:00",
+  "updated_at_utc": "2026-05-22T22:19:08+00:00",
   "version": 1
 }
