@@ -26,7 +26,16 @@ def build_parser() -> argparse.ArgumentParser:
     """Expose a minimal CLI for serving the dashboard locally."""
 
     parser = argparse.ArgumentParser(description="Serve the ML Speech Diarization dashboard.")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Address to bind. Defaults to 127.0.0.1 (local only), which is what "
+            "an SSH tunnel connects to. Pass --host 0.0.0.0 to expose the "
+            "dashboard on the network, but only on a trusted network: the "
+            "dashboard has no authentication."
+        ),
+    )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--server",

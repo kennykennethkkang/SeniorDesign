@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClusterQueueSnapshot } from "../types";
+import { formatFetchedAtUtc, refreshNoteText } from "../utils";
 
 interface Props {
   url: string;
@@ -57,9 +58,7 @@ export function ClusterQueuePanel({ url, refreshIntervalMs = 5000 }: Props) {
 
   const jobs = useMemo(() => snapshot?.jobs ?? [], [snapshot]);
   const me = snapshot?.current_user ?? "";
-  const fetchedAt = snapshot?.fetched_at_utc
-    ? snapshot.fetched_at_utc.replace("T", " ").replace(/\..*$/, "")
-    : "";
+  const fetchedAt = formatFetchedAtUtc(snapshot?.fetched_at_utc ?? "");
 
   return (
     <article className="panel cluster-queue-panel">
@@ -151,11 +150,7 @@ export function ClusterQueuePanel({ url, refreshIntervalMs = 5000 }: Props) {
         </table>
       )}
 
-      <p className="footer-note">
-        {fetchedAt
-          ? `Last refreshed ${fetchedAt} UTC. Refreshes every ${Math.round(refreshIntervalMs / 1000)} s.`
-          : `Refreshes every ${Math.round(refreshIntervalMs / 1000)} s.`}
-      </p>
+      <p className="footer-note">{refreshNoteText(fetchedAt, refreshIntervalMs)}</p>
     </article>
   );
 }

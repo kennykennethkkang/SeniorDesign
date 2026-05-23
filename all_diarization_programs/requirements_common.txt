@@ -1,7 +1,11 @@
 nltk
 faster-whisper>=1.1.0
-git+https://github.com/MahmoudAshraf97/demucs.git
-git+https://github.com/oliverguhr/deepmultilingualpunctuation.git
-git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
+# Fork dependencies pinned to upstream HEAD as of 2026-05-22 for reproducible
+# installs. These forks are unversioned, so without a commit pin every install
+# pulls whatever HEAD happens to be at that moment, which can silently change
+# behavior. Bump the SHAs when you intentionally move to a newer commit.
+git+https://github.com/MahmoudAshraf97/demucs.git@4273070a70ded308ddfd0879d267bbd06f89a1b7
+git+https://github.com/oliverguhr/deepmultilingualpunctuation.git@5a0dd7f4fd56687f59405aa8eba1144393d8b74b
+git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@264e7a1f81bff9ff5e787a5537020c2ad0b0df02
 yt-dlp>=2024.11.15
 imageio-ffmpeg>=0.6.0

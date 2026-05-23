@@ -1,2 +1,3 @@
 numpy<2
-indic-numtowords @ git+https://github.com/AI4Bharat/indic-numtowords.git
+# Pinned to upstream HEAD as of 2026-05-22 for reproducible installs.
+indic-numtowords @ git+https://github.com/AI4Bharat/indic-numtowords.git@167927b24ba9c843a1c62021d47fcbe71f6f177f

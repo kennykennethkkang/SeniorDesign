@@ -1,0 +1,47 @@
+name: tests
+
+# Runs the local test suite on every push and pull request so regressions get
+# caught before they reach the main branch. This mirrors tests/run_all_tests.sh:
+# compile-check the core scripts, syntax-check the frontend bundle and the
+# Slurm scripts, then run the unittest suite.
+#
+# The suite is deliberately lightweight. None of the tests import the heavy ML
+# stack (torch, pyannote, NeMo); those are lazy imports inside the training code
+# paths, which the tests do not exercise. The one third-party package the tests
+# need at import time is yt-dlp, pulled in by youtube_audio_batch.py.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install lightweight test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+
+      - name: Run the test suite
+        run: bash tests/run_all_tests.sh
+
+      - name: Install the frontend/app dev dependencies
+        run: npm ci --prefix frontend/app
+
+      - name: Run the frontend/app vitest suite
+        run: npm test --prefix frontend/app

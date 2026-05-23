@@ -340,7 +340,15 @@ def build_parser() -> argparse.ArgumentParser:
     web_parser = subparsers.add_parser(
         "serve-web", help="Run the local workflow dashboard."
     )
-    web_parser.add_argument("--host", default="0.0.0.0", help="Bind host.")
+    web_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind host. Defaults to 127.0.0.1 (local only), which is what an "
+            "SSH tunnel connects to. Pass 0.0.0.0 to expose it on the network, "
+            "but only on a trusted network: the dashboard has no authentication."
+        ),
+    )
     web_parser.add_argument("--port", type=int, default=8000, help="Bind port.")
     web_parser.add_argument(
         "--server",

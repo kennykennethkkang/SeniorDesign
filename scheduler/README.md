@@ -27,3 +27,20 @@ Active scripts:
 Everyday use should go through the dashboard. If you need to run one of these
 scripts by hand for debugging, set the same environment variables the
 dashboard passes (see the per-script comments) before calling `sbatch`.
+
+## Checkout-path assumption
+
+These scripts assume the canonical checkout lives at
+`/WAVE/users2/unix/kkang/SeniorDesign`. Two places encode that path:
+
+- The `#SBATCH --output=` and `#SBATCH --error=` lines. Slurm parses these
+  directives before the shell runs, so they cannot read an environment
+  variable; the absolute path is required there.
+- The `ROOT_DIR` line, which does honor a `SITE_ROOT_DIR` override
+  (`ROOT_DIR="${SITE_ROOT_DIR:-/WAVE/users2/unix/kkang/SeniorDesign}"`).
+
+If you ever run the dashboard from a different checkout, update the two
+`#SBATCH` log paths to match (or point them at a directory that exists), and
+export `SITE_ROOT_DIR` so `ROOT_DIR` resolves to the same checkout. The
+`job_logs/slurm/` directory under that root must exist before submission, or
+Slurm has nowhere to write the job logs.

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FileSearchResponse } from "../types";
+import { limitMatches, searchEndpoint } from "../utils";
 
 interface Props {
   url: string;
@@ -22,7 +23,7 @@ export function FileSearchPanel({ url, debounceMs = 250 }: Props) {
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setLoading(true);
-      fetch(`${url}?q=${encodeURIComponent(query)}`, {
+      fetch(searchEndpoint(url, query), {
         cache: "no-store",
         headers: { Accept: "application/json" },
       })
@@ -72,7 +73,7 @@ export function FileSearchPanel({ url, debounceMs = 250 }: Props) {
               <span className="file-search-stem">{group.stem}</span>
               <span className="file-search-count">{group.match_count} match(es)</span>
               <ul className="file-search-matches">
-                {(group.matches || []).slice(0, 12).map((m, i) => (
+                {limitMatches(group.matches).map((m, i) => (
                   <li
                     key={`${m.rel_path}-${i}`}
                     className={`file-search-match file-search-match--${m.kind}`}
